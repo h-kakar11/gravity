@@ -7,22 +7,10 @@ import type { HardwareInfo } from "../types/hardware";
 import type { Settings } from "../types/settings";
 import type { ErrorInfo } from "../types/error";
 import type { JobState } from "../types/job";
+import { asErrorInfo } from "../utils/errors";
 
 // TODO(spec section 34): replace this plain dev console with the dark-mode, curved-card
 // premium home screen once the IPC pipeline it proves out (spec sections 33, 42) is solid.
-
-function asErrorInfo(err: unknown): ErrorInfo {
-  if (err && typeof err === "object" && "category" in err && "message" in err) {
-    return err as ErrorInfo;
-  }
-  return {
-    code: "E_UNKNOWN",
-    category: "UNKNOWN",
-    message: String(err),
-    details: String(err),
-    recoverable: false,
-  };
-}
 
 const CANCELLABLE_STATES: ReadonlySet<JobState> = new Set(["QUEUED", "STARTING", "RUNNING", "PAUSED"]);
 

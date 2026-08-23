@@ -3,7 +3,7 @@
 // exported here so the wire format (docs/ipc-contract.md) has exactly one place it can leak.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CoreCommand, CommandParams, CommandResult, CoreEvent } from "../types/ipc";
+import type { CoreCommand, CommandParams, CommandResult, CoreEvent, DownloadJobParams } from "../types/ipc";
 import type { ErrorInfo } from "../types/error";
 
 function isErrorInfo(value: unknown): value is ErrorInfo {
@@ -105,6 +105,20 @@ export const pauseJob = (jobId: string) => sendCommand("pauseJob", { jobId });
 export const resumeJob = (jobId: string) => sendCommand("resumeJob", { jobId });
 export const retryJob = (jobId: string) => sendCommand("retryJob", { jobId });
 export const inspectFile = (path: string) => sendCommand("inspectFile", { path });
+export const inspectDownloadUrl = (url: string) => sendCommand("inspectDownloadUrl", { url });
+export const createDownloadJob = (params: DownloadJobParams) =>
+  sendCommand("createJob", { type: "DOWNLOAD", params: params as unknown as Record<string, unknown> });
 export const getCapabilities = (path: string) => sendCommand("getCapabilities", { path });
 export const getSettings = () => sendCommand("getSettings", {});
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
+
+// Reveals a completed download's output file in Windows Explorer via the Rust
+// `open_containing_folder` Tauri command (app/desktop/src-tauri/src/lib.rs) -- never a raw
+// shell command from React (spec section 37).
+export async function openContainingFolder(filePath: string): Promise<void> {
+  try {
+    await invoke("open_containing_folder", { path: filePath });
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}

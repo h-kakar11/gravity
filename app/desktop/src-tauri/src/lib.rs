@@ -2,6 +2,8 @@ mod core_bridge;
 
 use core_bridge::CoreState;
 use serde_json::Value;
+use std::path::Path;
+use std::process::Command;
 use tauri::Manager;
 
 /// The one Tauri command the frontend uses to talk to mediatool-core (see
@@ -52,6 +54,23 @@ async fn send_core_command(
     }
 }
 
+/// Reveals a completed download's output file in Windows Explorer (spec section 37: "open
+/// containing folder", implemented through the backend rather than an arbitrary shell
+/// command from React). `/select,<path>` is one argv entry passed straight to explorer.exe
+/// -- no shell string concatenation, same "structured arguments only" rule the C++ core
+/// follows for every process it launches.
+#[tauri::command]
+fn open_containing_folder(path: String) -> Result<(), String> {
+    if !Path::new(&path).exists() {
+        return Err(format!("cannot open containing folder: path does not exist: {path}"));
+    }
+    Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to launch explorer.exe: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -61,7 +80,7 @@ pub fn run() {
             app.manage(state);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![send_core_command])
+        .invoke_handler(tauri::generate_handler![send_core_command, open_containing_folder])
         .build(tauri::generate_context!())
         .expect("error while building the MediaTool Tauri application")
         .run(|app_handle, event| {

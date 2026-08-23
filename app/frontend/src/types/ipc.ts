@@ -8,6 +8,7 @@ import type { HardwareInfo } from "./hardware";
 import type { Settings } from "./settings";
 import type { ErrorInfo } from "./error";
 import type { Progress } from "./progress";
+import type { DownloadMetadata, QualityPreset } from "./download";
 
 export type CoreCommand =
   | "createJob"
@@ -18,10 +19,20 @@ export type CoreCommand =
   | "resumeJob"
   | "retryJob"
   | "inspectFile"
+  | "inspectDownloadUrl"
   | "getCapabilities"
   | "getSettings"
   | "updateSettings"
   | "getHardwareInfo";
+
+// Params a DOWNLOAD-type createJob call takes, nested under CommandParams["createJob"].params
+// (see docs/ipc-contract.md "createJob params by type"). `quality` defaults to "BEST" on
+// the C++ side when omitted.
+export interface DownloadJobParams {
+  url: string;
+  outputDirectory: string;
+  quality?: QualityPreset;
+}
 
 // Params for each command, keyed by command name.
 export interface CommandParams {
@@ -33,6 +44,7 @@ export interface CommandParams {
   resumeJob: { jobId: string };
   retryJob: { jobId: string };
   inspectFile: { path: string };
+  inspectDownloadUrl: { url: string };
   getCapabilities: { path: string };
   getSettings: Record<string, never>;
   updateSettings: { settings: Partial<Settings> };
@@ -49,6 +61,7 @@ export interface CommandResult {
   resumeJob: Record<string, never>;
   retryJob: Record<string, never>;
   inspectFile: { fileInfo: FileInfo };
+  inspectDownloadUrl: { metadata: DownloadMetadata };
   getCapabilities: { capabilities: string[] };
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };
