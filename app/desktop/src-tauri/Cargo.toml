@@ -1,0 +1,39 @@
+[package]
+name = "mediatool-desktop"
+version = "0.1.0"
+description = "MediaTool desktop shell (Tauri) -- bridges the React frontend to the mediatool-core sidecar over stdio NDJSON."
+edition = "2021"
+rust-version = "1.77"
+
+# See docs/ipc-contract.md and docs/development.md for the process topology this crate
+# implements: it owns no business logic, only the stdio bridge in src/core_bridge.rs.
+
+[lib]
+# Tauri v2 convention: an "app lib" exposes `run()`, and the actual `main.rs` binary is a
+# two-line shim. The template normally also adds "cdylib" here for mobile targets
+# (Android/iOS load the app as a shared library) -- omitted on purpose for this
+# Windows-desktop-only Phase 1 build: GNU ld (MinGW-w64's linker, used instead of MSVC so
+# this toolchain needs no admin-elevated Visual Studio install -- see
+# docs/development.md) assigns every exported symbol a 16-bit ordinal when building a
+# cdylib, and Tauri's full dependency graph (300+ crates) overflows that range
+# ("export ordinal too large: 90115"), failing the link entirely. staticlib+rlib is all a
+# desktop `main.rs` binary needs; re-add cdylib only if/when this target list grows a
+# mobile build, at which point building that variant with the MSVC toolchain instead of
+# MinGW is the more likely fix anyway.
+name = "mediatool_desktop_lib"
+crate-type = ["staticlib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "io-util"] }
+log = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"

@@ -1,0 +1,14 @@
+{
+  "name": "mediatool",
+  "version": "0.1.0",
+  "description": "Local-first media downloader, converter, and compressor - C++ core",
+  "dependencies": [
+    "nlohmann-json",
+    "spdlog",
+    "reproc",
+    {
+      "name": "gtest",
+      "platform": "!(android | ios)"
+    }
+  ]
+}

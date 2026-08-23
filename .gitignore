@@ -1,0 +1,48 @@
+# --- Build outputs ---
+/build/
+/out/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/CTestTestfile.cmake
+**/*.obj
+**/*.exe
+**/*.pdb
+**/*.ilk
+
+# --- vcpkg (vendored tool + build artifacts, not project source) ---
+/third_party/vcpkg/
+/vcpkg_installed/
+
+# --- Node / frontend ---
+/app/frontend/node_modules/
+/app/frontend/dist/
+/app/frontend/.vite/
+
+# --- Rust / Tauri ---
+/app/desktop/node_modules/
+/app/desktop/src-tauri/target/
+/app/desktop/src-tauri/Cargo.lock
+/app/desktop/src-tauri/gen/
+
+# --- Python ---
+/python/downloader/.venv/
+**/__pycache__/
+*.pyc
+
+# --- Application runtime data (never commit user data) ---
+/resources/local/
+*.log
+settings.local.json
+
+# --- Local tooling state (not project source) ---
+/.claude/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# --- Test artifacts ---
+/tests/**/fixtures/tmp/

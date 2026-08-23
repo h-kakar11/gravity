@@ -1,0 +1,37 @@
+#pragma once
+
+// Platform-safe path helpers built on std::filesystem (spec section 11) -- never
+// manually concatenate path strings; go through Join()/Normalize() instead so
+// separators, "." / ".." segments, and absolute-path overrides are handled by the
+// standard library rather than ad-hoc string logic.
+
+#include <string>
+#include <vector>
+
+namespace mediatool::filesystem::paths {
+
+// Joins `base` with `component` the way std::filesystem::path::operator/ does: if
+// `component` is itself absolute, it replaces `base` entirely (mirrors
+// std::filesystem's own semantics rather than surprising callers with two different
+// behaviors).
+std::string Join(const std::string& base, const std::string& component);
+
+// Left-to-right fold of Join() over `components`.
+std::string Join(const std::string& base, const std::vector<std::string>& components);
+
+bool IsAbsolute(const std::string& path);
+
+// Lexically collapses "." / ".." segments and redundant separators without touching
+// the filesystem (safe to call on paths that don't exist yet, e.g. an output path
+// that hasn't been created). Does not resolve symlinks.
+std::string Normalize(const std::string& path);
+
+// No leading dot, lowercase (matches IFileSystem::GetExtension's contract).
+std::string GetExtension(const std::string& path);
+
+// Filename with extension, no directory component.
+std::string GetFilename(const std::string& path);
+
+std::string GetParentDirectory(const std::string& path);
+
+}  // namespace mediatool::filesystem::paths

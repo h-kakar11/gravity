@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window. App-defined commands (send_core_command) are always invokable and need no explicit permission entry; this grants only the baseline window/core APIs Tauri itself needs.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
