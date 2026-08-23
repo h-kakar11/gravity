@@ -10,10 +10,12 @@
 // against shared interfaces) are wired together for the first time -- see docs/architecture.md.
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -22,6 +24,7 @@
 
 #include "core/downloads/IDownloadProvider.h"
 #include "core/downloads/NdjsonLineProtocol.h"
+#include "core/downloads/QualityPreset.h"
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
 #include "core/events/Event.h"
@@ -30,6 +33,7 @@
 #include "core/filesystem/LocalFileSystem.h"
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
+#include "core/jobs/DownloadJob.h"
 #include "core/jobs/JobManager.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/Progress.h"
@@ -109,7 +113,15 @@ struct AppContext {
                            ? std::nullopt
                            : std::optional<std::string>(settings.advanced.ffmpegPath),
                        std::nullopt),
-          ytDlpProvider(processRunner, ResolvePythonExecutable(), ResolveDownloaderScript()),
+          // Resolved once at startup (not per-download) and handed to yt-dlp so it merges
+          // separate video/audio streams via the SAME ffmpeg binary the rest of the app
+          // already uses -- see docs/decisions.md "Video/audio merge strategy".
+          ytDlpProvider(processRunner, ResolvePythonExecutable(), ResolveDownloaderScript(),
+                        media::DiscoverFfmpegPath(processRunner, settings.advanced.ffmpegPath.empty()
+                                                                      ? std::nullopt
+                                                                      : std::optional<std::string>(
+                                                                            settings.advanced.ffmpegPath))
+                            .value_or("")),
           jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs))) {}
 };
 
@@ -210,22 +222,120 @@ filesystem::FileInfo InspectFileEnriched(AppContext& app, const std::string& pat
     return info;
 }
 
+json DownloadFormatToJson(const downloads::DownloadFormat& format) {
+    json j;
+    j["formatId"] = format.formatId;
+    if (format.extension) j["extension"] = *format.extension;
+    if (format.resolution) j["resolution"] = *format.resolution;
+    if (format.width) j["width"] = *format.width;
+    if (format.height) j["height"] = *format.height;
+    if (format.fps) j["fps"] = *format.fps;
+    if (format.videoCodec) j["videoCodec"] = *format.videoCodec;
+    if (format.audioCodec) j["audioCodec"] = *format.audioCodec;
+    if (format.videoBitrateKbps) j["videoBitrateKbps"] = *format.videoBitrateKbps;
+    if (format.audioBitrateKbps) j["audioBitrateKbps"] = *format.audioBitrateKbps;
+    if (format.filesizeBytes) j["filesizeBytes"] = *format.filesizeBytes;
+    if (format.approxFilesizeBytes) j["approxFilesizeBytes"] = *format.approxFilesizeBytes;
+    j["hasVideo"] = format.hasVideo;
+    j["hasAudio"] = format.hasAudio;
+    return j;
+}
+
+json DownloadMetadataToJson(const downloads::DownloadMetadata& metadata) {
+    json j;
+    j["title"] = metadata.title;
+    if (metadata.uploader) j["uploader"] = *metadata.uploader;
+    if (metadata.durationSeconds) j["durationSeconds"] = *metadata.durationSeconds;
+    if (metadata.webpageUrl) j["webpageUrl"] = *metadata.webpageUrl;
+    if (metadata.thumbnailUrl) j["thumbnailUrl"] = *metadata.thumbnailUrl;
+    if (metadata.extractor) j["extractor"] = *metadata.extractor;
+    if (metadata.playlistIndex) j["playlistIndex"] = *metadata.playlistIndex;
+    if (metadata.playlistCount) j["playlistCount"] = *metadata.playlistCount;
+    json formats = json::array();
+    for (const auto& f : metadata.formats) formats.push_back(DownloadFormatToJson(f));
+    j["formats"] = formats;
+    return j;
+}
+
+// Shared by createJob{type:DOWNLOAD} and inspectDownloadUrl -- both take a raw URL from
+// the frontend and must reject it up front (spec section 4) rather than letting an
+// obviously-unsupported string reach a subprocess launch.
+void ValidateDownloadUrl(AppContext& app, const std::string& url) {
+    if (url.empty() || !app.ytDlpProvider.CanHandle(url)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_DOWNLOAD_URL", errors::ErrorCategory::UnsupportedFormat,
+            "This URL is not a supported http/https media URL.", "url=" + url));
+    }
+}
+
+json HandleInspectDownloadUrl(AppContext& app, const json& params) {
+    const std::string url = params.at("url").get<std::string>();
+    ValidateDownloadUrl(app, url);
+    const downloads::DownloadMetadata metadata = app.ytDlpProvider.Inspect(url, [] { return false; });
+    return {{"metadata", DownloadMetadataToJson(metadata)}};
+}
+
+json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
+    const std::string url = jobParams.at("url").get<std::string>();
+    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
+    ValidateDownloadUrl(app, url);
+    if (outputDirectory.empty()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
+            "An output directory is required."));
+    }
+
+    // A coarse floor, not a real "will this download fit" check (that needs the file
+    // size, which isn't known until Inspect() runs inside the job) -- catches the
+    // "drive is already essentially full" case up front (spec section 11).
+    constexpr std::uint64_t kMinFreeBytesForDownload = 100ull * 1024 * 1024;
+    if (auto available = app.fileSystem.GetAvailableDiskSpace(outputDirectory);
+        available && *available < kMinFreeBytesForDownload) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INSUFFICIENT_DISK_SPACE", errors::ErrorCategory::DiskSpaceError,
+            "Not enough free disk space at the selected output directory.",
+            "available=" + std::to_string(*available) + " bytes"));
+    }
+
+    downloads::QualityPreset quality = downloads::QualityPreset::Best;
+    if (jobParams.contains("quality")) {
+        try {
+            quality = downloads::QualityPresetFromWireString(jobParams.at("quality").get<std::string>());
+        } catch (const std::invalid_argument& e) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_QUALITY_PRESET", errors::ErrorCategory::Unknown, e.what()));
+        }
+    }
+
+    jobs::DownloadJob::Options options;
+    options.url = url;
+    options.outputDirectory = outputDirectory;
+    options.quality = quality;
+
+    auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem, &app.ffmpegEngine);
+    const jobs::JobId id = job->Id();
+    app.jobManager.SubmitJob(std::move(job));
+    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+    return {{"jobId", id}};
+}
+
 json HandleCreateJob(AppContext& app, const json& params) {
     const std::string typeWire = params.at("type").get<std::string>();
+
+    if (typeWire == "DOWNLOAD") {
+        return HandleCreateDownloadJob(app, params.at("params"));
+    }
+
     if (typeWire != "TEST") {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
-            "Only TEST jobs are implemented in Phase 1 -- " + typeWire +
+            "Only TEST and DOWNLOAD jobs are implemented so far -- " + typeWire +
                 " is scaffolded (see docs/roadmap.md) but not runnable yet.",
             "", false));
     }
 
     auto job = std::make_unique<jobs::TestJob>();
     const jobs::JobId id = job->Id();
-    job->SetCallbacks(
-        [&app, id](jobs::JobState state) { PublishJobStateChanged(app, id, state); },
-        [&app, id](const jobs::Progress& progress) { PublishJobProgress(app, id, progress); });
-
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
     return {{"jobId", id}};
@@ -299,6 +409,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"resumeJob", HandleResumeJob},
         {"retryJob", HandleRetryJob},
         {"inspectFile", HandleInspectFile},
+        {"inspectDownloadUrl", HandleInspectDownloadUrl},
         {"getCapabilities", HandleGetCapabilities},
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
