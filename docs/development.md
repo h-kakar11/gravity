@@ -69,6 +69,26 @@ The Tauri shell spawns `mediatool-core.exe` (built above) as a subprocess and br
 stdio NDJSON protocol to the frontend as Tauri commands/events — see
 `docs/architecture.md` and `docs/ipc-contract.md`.
 
+**If the app panics on launch** with `failed to spawn mediatool-core ... The system cannot
+find the path specified`: `core_bridge.rs`'s dev-mode sidecar path is a relative guess
+(`../../build/windows-mingw-debug/app/core/mediatool-core.exe`) built on the assumption
+that `cargo run`'s working directory is `app/desktop` — true for some Tauri CLI
+versions/invocations, not others (observed during Phase 2 testing: the same command that
+worked in Phase 1 later ran `cargo` from `app/desktop/src-tauri` instead, one directory
+level off). Set these env vars to absolute paths before `npm run tauri dev` to bypass the
+guess entirely:
+
+```powershell
+$env:MEDIATOOL_CORE_PATH = "A:\path\to\gravity\build\windows-mingw-debug\app\core\mediatool-core.exe"
+$env:MEDIATOOL_PYTHON_PATH = "A:\path\to\gravity\python\downloader\.venv\Scripts\python.exe"
+$env:MEDIATOOL_DOWNLOADER_SCRIPT = "A:\path\to\gravity\python\downloader\downloader.py"
+```
+
+The latter two matter because `mediatool-core.exe` inherits its own working directory
+from whatever spawned it (the Tauri Rust process), so the same CWD mismatch can affect its
+*own* relative defaults for finding the Python venv, not just Rust's guess at finding
+`mediatool-core.exe` itself.
+
 ## One-shot dev bootstrap
 
 There is no single command that does all of the above yet (Phase 2 candidate: a
@@ -80,7 +100,10 @@ order, each time you pull changes that touch more than the frontend.
 | Suite | Command |
 |---|---|
 | C++ (GoogleTest) | `ctest --preset windows-mingw-debug --output-on-failure` |
-| Python (`unittest`) | `python/downloader/.venv/Scripts/python -m unittest discover -s tests/python` |
+| Python (`unittest`) | `python -m unittest discover -s tests/python` (deliberately run under the **ambient** interpreter, not the venv — see the module docstring in `tests/python/test_downloader_protocol.py`) |
+
+Manual (non-automated, real network) downloader integration test:
+`docs/protocols/downloader.md`'s "Manual integration test" section.
 
 ## Why some choices were made
 

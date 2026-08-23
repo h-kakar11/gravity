@@ -1,16 +1,30 @@
 # Technical roadmap
 
-Phase 1 (this repository, current) builds the foundation only — see the root
-`README.md` for exactly what is implemented vs. scaffolded today. Everything below is
-planned, not built.
+**Phase 1 — COMPLETED.** Foundation: Tauri/React shell, C++ core, job system, IPC,
+FFmpeg discovery, Python downloader scaffold, five mockable interfaces, tests, docs.
 
-## Downloads
-- YouTube: single video, highest available quality, separate video/audio stream merging
-- Playlists: sequential download, preserved order, per-item numbering
-- Custom output directory, automatic filenames from video titles
-- Live download speed, ETA, and a speed-over-time graph
-- Retry handling, cancellation, future concurrent-download limits (N > 1)
-- Additional sites as yt-dlp supports them: Vimeo, Streamable, Medal, others
+**Phase 2 — COMPLETED.** The download vertical slice: real metadata inspection (with
+full format list), quality selection, a real `DownloadJob` running on the existing
+`JobManager`, real progress/speed/ETA, cancellation, output verification via `ffprobe`,
+collision-safe filenames, and a functional (not final) downloader UI. See
+`docs/phase-2.md` for the full report and `docs/decisions.md` for what was decided along
+the way. See the root `README.md` for the authoritative working-vs-scaffolded table.
+
+Everything below is planned, not built.
+
+## Downloads (remaining)
+- Playlists: sequential download, preserved order, per-item numbering (Phase 2
+  deliberately rejects playlist URLs rather than guessing — see `docs/decisions.md`)
+- A live speed-over-time graph (the event architecture already supports periodic speed
+  samples; only the chart itself is unbuilt)
+- Bounded automatic retries (`RetryJob` already exists on `JobManager`; `DownloadJob`
+  doesn't yet wire a retry policy into it)
+- Configurable concurrent-download limits (N > 1) — `JobManager`'s worker pool size is
+  already configurable, just not yet exposed for downloads specifically
+- Additional sites as yt-dlp supports them beyond YouTube: Vimeo, Streamable, Medal,
+  others (architecture already supports this — `IDownloadProvider`/`YtDlpProvider` are
+  not YouTube-specific — just not manually verified against those sites yet)
+- Native output-folder picker (deferred — see `docs/decisions.md`)
 
 ## Video conversion
 MP4 <-> MOV, MP4 -> WebM, video -> GIF, MKV -> MP4, and similar container/codec conversions.

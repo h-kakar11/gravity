@@ -34,6 +34,9 @@
 /resources/local/
 *.log
 settings.local.json
+# Ad hoc manual downloader integration test output (docs/protocols/downloader.md) --
+# real downloaded media, never committed (spec section 42).
+/.manual-test-output/
 
 # --- Local tooling state (not project source) ---
 /.claude/

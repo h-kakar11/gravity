@@ -49,11 +49,11 @@ Everything the application does is eventually a `Job` (spec section 4):
 
 ```
 Job (core/jobs/Job.h)
- +-- DownloadJob        (Phase 2+)
- +-- ConversionJob      (Phase 2+)
- +-- CompressionJob     (Phase 2+)
- +-- BatchJob           (Phase 2+)
- +-- WorkflowJob        (Phase 2+)
+ +-- DownloadJob        Phase 2 — real, see "The download pipeline" below
+ +-- ConversionJob      (Phase 3+)
+ +-- CompressionJob     (Phase 3+)
+ +-- BatchJob           (Phase 3+)
+ +-- WorkflowJob        (Phase 3+)
  \-- TestJob             Phase 1 — synthetic, proves the pipeline end-to-end
 ```
 
@@ -101,6 +101,73 @@ by launching it through an `IProcessRunner` and translating its NDJSON events
 — the rest of the codebase never needs to know yt-dlp exists (spec section 19; a future
 `VimeoProvider` or similar plugs into the same interface).
 
+## The download pipeline (Phase 2)
+
+```
+React (DownloaderPage) -> Tauri -> C++ core -> DownloadJob -> IDownloadProvider (YtDlpProvider)
+                                                                       |
+                                                              stdio NDJSON
+                                                                       v
+                                                        python/downloader/downloader.py -> yt-dlp -> ffmpeg
+```
+
+Two IPC commands drive it (`docs/ipc-contract.md`):
+
+- `inspectDownloadUrl(url)` — a direct, synchronous request/response call (not a Job) that
+  fetches title/uploader/duration/thumbnail/available formats without downloading
+  anything. It blocks the IPC loop for the duration of the network probe (typically 1-3s)
+  — see "Known limitations" below.
+- `createJob({type: "DOWNLOAD", params: {url, outputDirectory, quality}})` — creates a real
+  `DownloadJob` (`core/jobs/DownloadJob.h`) that runs on the existing `JobManager` worker
+  pool, same as `TestJob`. No separate downloader-specific queue exists (spec section 38).
+
+`DownloadJob::Execute()` does, in order: (1) call `IDownloadProvider::Inspect()` again
+(deliberately re-fetching, not trusting whatever the frontend's earlier `inspectDownloadUrl`
+call saw — keeps the job self-contained, see `docs/decisions.md`) to get the current
+title; (2) sanitize it (`FilenameSanitizer::SanitizeWindowsFilename`) and pick a
+collision-free base filename via `FilenameSanitizer::DeduplicateBaseName` (checked against
+*any* extension, since the final container isn't known until after the download — spec
+section 29); (3) call `IDownloadProvider::Download()`, forwarding `Progress` updates
+straight through to `ReportProgress()`; (4) verify the result — file exists, non-zero
+size, and (when `IMediaEngine::IsAvailable()`) an `FFmpegEngine::Probe()` round-trip —
+before ever calling `SetResult()` (spec section 27, "a download is not complete simply
+because yt-dlp exited successfully"). Any failure past step (2) triggers a best-effort
+cleanup sweep of every file in the output directory whose name starts with the chosen
+base name — safe specifically because that name was chosen NOT to collide with anything
+that predates this job.
+
+`QualityPreset` (`core/downloads/QualityPreset.h`) is the only quality vocabulary anything
+above `engines/downloader` ever sees (`BEST`, `2160P`, `1440P`, `1080P`, `720P`, `480P`,
+`AUDIO_ONLY`). `engines/downloader/YtDlpFormatSelector.h` is the one place a preset becomes
+a concrete yt-dlp `-f` selector string — see `docs/decisions.md` for why that translation
+lives in C++ rather than in `downloader.py`.
+
+Video/audio merging is NOT reimplemented via `FFmpegEngine` — see `docs/decisions.md`
+"Video/audio merge strategy" for why yt-dlp's own internal ffmpeg invocation is used
+instead (pointed at the exact binary `engines/ffmpeg/FFmpegDiscovery` already resolved, so
+there's still only one ffmpeg-discovery authority in the app).
+
+The Python protocol gained a second command (`inspect`, alongside `download`) — see
+`docs/protocols/downloader.md` for the full wire shape, including the richer
+`DownloadMetadata`/`DownloadFormat` fields and the expanded error classification
+(private/removed/geo-restricted/playlist/format-unavailable, on top of Phase 1's
+network-failure detection).
+
+### Known limitations (Phase 2)
+
+- `inspectDownloadUrl` and `DownloadJob`'s internal re-inspect both run synchronously
+  inside their caller (the IPC loop thread, or the job's worker thread respectively) —
+  there's no async/streaming metadata delivery. This is fine for the vertical slice; a
+  future phase could move `inspectDownloadUrl` onto a worker thread with a correlated
+  response if blocking the IPC loop for a few seconds ever becomes a real problem.
+- Pause/resume is not implemented for `DownloadJob` (`SupportsPause()` is `false`) — only
+  cancel. yt-dlp has no clean "pause a download" primitive; a Phase 3+ implementation
+  would need to stop and later resume via HTTP range requests, which is real design work,
+  not a Phase 2 vertical-slice concern.
+- Playlist URLs are explicitly rejected (`E_PLAYLIST_NOT_SUPPORTED`) rather than silently
+  downloading only the first video — see spec section 30 ("prepare, don't fully
+  implement").
+
 ## Filesystem, temp files, and atomic output
 
 `core/filesystem/LocalFileSystem` implements `IFileSystem` on top of `std::filesystem`
@@ -123,9 +190,12 @@ on any machine.
 Every cross-process or cross-hardware dependency sits behind one of five interfaces (spec
 section 37): `IProcessRunner`, `IMediaEngine`, `IDownloadProvider`, `IFileSystem`,
 `IClock`. Production code depends on the interface; tests depend on a `Mock*`
-implementation. No unit test needs a real ffmpeg, a real network connection, or the real
-`%LOCALAPPDATA%` to pass — see `docs/development.md`'s testing section for how to run the
-suites.
+implementation — `MockDownloadProvider` and `MockFileSystem` (both added in Phase 2)
+round out the three mocks spec section 39 calls out by name for `DownloadJob` tests;
+`IMediaEngine` and `IClock` are exercised via a scripted fake/nullptr rather than a
+dedicated `Mock*` class, which was enough for what currently depends on them. No unit
+test needs a real ffmpeg, a real network connection, or the real `%LOCALAPPDATA%` to pass
+— see `docs/development.md`'s testing section for how to run the suites.
 
 ## What's scaffolded vs. working
 
