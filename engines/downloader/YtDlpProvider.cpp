@@ -9,6 +9,7 @@
 
 #include "core/downloads/NdjsonLineProtocol.h"
 #include "core/errors/MediaToolException.h"
+#include "engines/downloader/YtDlpFormatSelector.h"
 
 namespace mediatool::downloader {
 
@@ -44,34 +45,70 @@ std::optional<int> OptionalInt(const nlohmann::json& data, const char* key) {
     return data.at(key).get<int>();
 }
 
+std::optional<std::string> OptionalString(const nlohmann::json& data, const char* key) {
+    if (!data.contains(key) || data.at(key).is_null()) {
+        return std::nullopt;
+    }
+    return data.at(key).get<std::string>();
+}
+
+downloads::DownloadFormat ParseDownloadFormat(const nlohmann::json& f) {
+    downloads::DownloadFormat format;
+    format.formatId = f.value("formatId", std::string());
+    format.extension = OptionalString(f, "extension");
+    format.resolution = OptionalString(f, "resolution");
+    format.width = OptionalInt(f, "width");
+    format.height = OptionalInt(f, "height");
+    format.fps = OptionalDouble(f, "fps");
+    format.videoCodec = OptionalString(f, "videoCodec");
+    format.audioCodec = OptionalString(f, "audioCodec");
+    format.videoBitrateKbps = OptionalDouble(f, "videoBitrateKbps");
+    format.audioBitrateKbps = OptionalDouble(f, "audioBitrateKbps");
+    format.filesizeBytes = OptionalUInt64(f, "filesizeBytes");
+    format.approxFilesizeBytes = OptionalUInt64(f, "approxFilesizeBytes");
+    format.hasVideo = f.value("hasVideo", false);
+    format.hasAudio = f.value("hasAudio", false);
+    return format;
+}
+
+// Used for BOTH the lightweight metadata event Download() emits mid-flight (title/
+// duration/playlist fields only) and the rich one Inspect() emits (everything, including
+// formats) -- fields absent from `data` simply stay nullopt/empty.
+downloads::DownloadMetadata ParseDownloadMetadata(const nlohmann::json& data) {
+    downloads::DownloadMetadata metadata;
+    metadata.title = data.value("title", std::string());
+    metadata.uploader = OptionalString(data, "uploader");
+    metadata.durationSeconds = OptionalDouble(data, "duration");
+    metadata.webpageUrl = OptionalString(data, "webpageUrl");
+    metadata.thumbnailUrl = OptionalString(data, "thumbnailUrl");
+    metadata.extractor = OptionalString(data, "extractor");
+    metadata.playlistIndex = OptionalInt(data, "playlistIndex");
+    metadata.playlistCount = OptionalInt(data, "playlistCount");
+    if (data.contains("formats") && data.at("formats").is_array()) {
+        for (const auto& f : data.at("formats")) {
+            metadata.formats.push_back(ParseDownloadFormat(f));
+        }
+    }
+    return metadata;
+}
+
 }  // namespace
 
 YtDlpProvider::YtDlpProvider(process::IProcessRunner& processRunner, std::string pythonExecutable,
-                              std::string scriptPath)
+                              std::string scriptPath, std::string ffmpegLocation)
     : processRunner_(processRunner),
       pythonExecutable_(std::move(pythonExecutable)),
-      scriptPath_(std::move(scriptPath)) {}
+      scriptPath_(std::move(scriptPath)),
+      ffmpegLocation_(std::move(ffmpegLocation)) {}
 
 bool YtDlpProvider::CanHandle(const std::string& url) const {
     return StartsWithCaseInsensitive(url, "http://") || StartsWithCaseInsensitive(url, "https://");
 }
 
-void YtDlpProvider::Download(const downloads::DownloadOptions& options,
-                              downloads::MetadataCallback onMetadata,
-                              downloads::ProgressCallback onProgress,
-                              downloads::CompletedCallback onCompleted,
-                              downloads::CancelledCallback isCancelled) {
-    // NOTE: DownloadOptions::extra is not forwarded -- docs/ipc-contract.md's downloader
-    // command shape only defines url/outputDir/quality. Revisit if a later phase needs
-    // provider-specific overrides to reach downloader.py.
-    nlohmann::json params;
-    params["url"] = options.url;
-    params["outputDir"] = options.outputDirectory;
-    params["quality"] = options.quality;
-    nlohmann::json command;
-    command["command"] = "download";
-    command["params"] = params;
-
+YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
+    const nlohmann::json& command,
+    const std::function<void(downloads::DownloaderEventType, const nlohmann::json&)>& onEvent,
+    downloads::CancelledCallback isCancelled, const char* cancelCode, const char* cancelMessage) {
     // IProcessRunner may deliver stdout lines from a background thread while this
     // function polls WaitFor() on the caller's thread -- guard the two flags shared
     // between them.
@@ -88,48 +125,17 @@ void YtDlpProvider::Download(const downloads::DownloadOptions& options,
             return;
         }
         const nlohmann::json& data = parsed->at("data");
+        const auto type = downloads::GetDownloaderEventType(*parsed);
 
-        switch (downloads::GetDownloaderEventType(*parsed)) {
-            case downloads::DownloaderEventType::Metadata: {
-                downloads::DownloadMetadata metadata;
-                metadata.title = data.value("title", std::string());
-                metadata.durationSeconds = OptionalDouble(data, "duration");
-                metadata.playlistIndex = OptionalInt(data, "playlistIndex");
-                metadata.playlistCount = OptionalInt(data, "playlistCount");
-                onMetadata(metadata);
-                break;
-            }
-            case downloads::DownloaderEventType::Progress: {
-                jobs::Progress progress;
-                progress.processedBytes = OptionalUInt64(data, "downloadedBytes");
-                progress.totalBytes = OptionalUInt64(data, "totalBytes");
-                progress.speedBytesPerSecond = OptionalDouble(data, "speedBytesPerSecond");
-                progress.etaSeconds = OptionalDouble(data, "etaSeconds");
-                if (progress.processedBytes && progress.totalBytes && *progress.totalBytes > 0) {
-                    progress.percentage = (static_cast<double>(*progress.processedBytes) /
-                                           static_cast<double>(*progress.totalBytes)) * 100.0;
-                }
-                progress.statusMessage = data.value("statusMessage", std::string("Downloading"));
-                onProgress(progress);
-                break;
-            }
-            case downloads::DownloaderEventType::Completed: {
-                {
-                    std::lock_guard<std::mutex> lock(stateMutex);
-                    completedReceived = true;
-                }
-                onCompleted(data.value("outputPath", std::string()));
-                break;
-            }
-            case downloads::DownloaderEventType::Error: {
-                std::lock_guard<std::mutex> lock(stateMutex);
-                pendingError = errors::MediaToolException(errors::ErrorInfo::FromJson(data));
-                break;
-            }
-            case downloads::DownloaderEventType::Unknown:
-            default:
-                break;  // forward-compatible: ignore event names this build doesn't know
+        if (type == downloads::DownloaderEventType::Completed) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            completedReceived = true;
+        } else if (type == downloads::DownloaderEventType::Error) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            pendingError = errors::MediaToolException(errors::ErrorInfo::FromJson(data));
         }
+
+        if (onEvent) onEvent(type, data);
     };
 
     auto ignoreStderr = [](const std::string& /*line*/) {
@@ -155,8 +161,7 @@ void YtDlpProvider::Download(const downloads::DownloadOptions& options,
                 result = child->Wait();
             }
             throw errors::MediaToolException(errors::ErrorInfo::Make(
-                "E_DOWNLOAD_CANCELLED", errors::ErrorCategory::Cancelled,
-                "Download was cancelled.", "", /*recoverable=*/true));
+                cancelCode, errors::ErrorCategory::Cancelled, cancelMessage, "", /*recoverable=*/true));
         }
 
         if (auto finishedResult = child->WaitFor(200)) {
@@ -165,23 +170,108 @@ void YtDlpProvider::Download(const downloads::DownloadOptions& options,
         }
     }
 
-    std::optional<errors::MediaToolException> errorToThrow;
-    bool sawCompleted = false;
+    RunOutcome outcome;
+    outcome.processResult = result;
     {
         std::lock_guard<std::mutex> lock(stateMutex);
-        errorToThrow = pendingError;
-        sawCompleted = completedReceived;
+        outcome.error = pendingError;
+        outcome.completedReceived = completedReceived;
+    }
+    return outcome;
+}
+
+downloads::DownloadMetadata YtDlpProvider::Inspect(const std::string& url,
+                                                    downloads::CancelledCallback isCancelled) {
+    nlohmann::json params;
+    params["url"] = url;
+    nlohmann::json command;
+    command["command"] = "inspect";
+    command["params"] = params;
+
+    std::optional<downloads::DownloadMetadata> metadata;
+    auto onEvent = [&](downloads::DownloaderEventType type, const nlohmann::json& data) {
+        if (type == downloads::DownloaderEventType::Metadata) {
+            metadata = ParseDownloadMetadata(data);
+        }
+    };
+
+    const RunOutcome outcome =
+        RunPythonCommand(command, onEvent, isCancelled, "E_INSPECT_CANCELLED", "Inspection was cancelled.");
+
+    if (outcome.error) {
+        throw *outcome.error;
     }
 
-    if (errorToThrow) {
-        throw *errorToThrow;
+    if (!outcome.completedReceived || !metadata) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INSPECT_NO_RESULT", errors::ErrorCategory::EngineFailure,
+            "Downloader process exited without reporting metadata.",
+            "downloader.py exited with code " + std::to_string(outcome.processResult.exitCode) +
+                " without emitting a metadata event.",
+            /*recoverable=*/false));
     }
 
-    if (!sawCompleted) {
+    return *metadata;
+}
+
+void YtDlpProvider::Download(const downloads::DownloadOptions& options,
+                              downloads::MetadataCallback onMetadata,
+                              downloads::ProgressCallback onProgress,
+                              downloads::CompletedCallback onCompleted,
+                              downloads::CancelledCallback isCancelled) {
+    nlohmann::json params;
+    params["url"] = options.url;
+    params["outputDir"] = options.outputDirectory;
+    params["formatSelector"] = FormatSelectorForQuality(options.quality);
+    params["filenameBase"] = options.filenameBase;
+    if (!ffmpegLocation_.empty()) {
+        params["ffmpegLocation"] = ffmpegLocation_;
+    }
+    nlohmann::json command;
+    command["command"] = "download";
+    command["params"] = params;
+
+    auto onEvent = [&](downloads::DownloaderEventType type, const nlohmann::json& data) {
+        switch (type) {
+            case downloads::DownloaderEventType::Metadata:
+                onMetadata(ParseDownloadMetadata(data));
+                break;
+            case downloads::DownloaderEventType::Progress: {
+                jobs::Progress progress;
+                progress.processedBytes = OptionalUInt64(data, "downloadedBytes");
+                progress.totalBytes = OptionalUInt64(data, "totalBytes");
+                progress.speedBytesPerSecond = OptionalDouble(data, "speedBytesPerSecond");
+                progress.etaSeconds = OptionalDouble(data, "etaSeconds");
+                if (progress.processedBytes && progress.totalBytes && *progress.totalBytes > 0) {
+                    progress.percentage = (static_cast<double>(*progress.processedBytes) /
+                                           static_cast<double>(*progress.totalBytes)) * 100.0;
+                }
+                progress.statusMessage = data.value("statusMessage", std::string("Downloading"));
+                onProgress(progress);
+                break;
+            }
+            case downloads::DownloaderEventType::Completed:
+                onCompleted(data.value("outputPath", std::string()));
+                break;
+            case downloads::DownloaderEventType::Error:
+            case downloads::DownloaderEventType::Unknown:
+            default:
+                break;  // handled generically by RunPythonCommand, or forward-compatible no-op
+        }
+    };
+
+    const RunOutcome outcome =
+        RunPythonCommand(command, onEvent, isCancelled, "E_DOWNLOAD_CANCELLED", "Download was cancelled.");
+
+    if (outcome.error) {
+        throw *outcome.error;
+    }
+
+    if (!outcome.completedReceived) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_DOWNLOAD_NO_RESULT", errors::ErrorCategory::EngineFailure,
             "Downloader process exited without reporting completion.",
-            "downloader.py exited with code " + std::to_string(result.exitCode) +
+            "downloader.py exited with code " + std::to_string(outcome.processResult.exitCode) +
                 " without emitting a completed or error event.",
             /*recoverable=*/false));
     }

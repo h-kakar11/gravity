@@ -10,8 +10,10 @@
 #include <nlohmann/json.hpp>
 
 #include "core/downloads/IDownloadProvider.h"
+#include "core/downloads/QualityPreset.h"
 #include "core/errors/MediaToolException.h"
 #include "core/process/IProcessRunner.h"
+#include "engines/downloader/YtDlpFormatSelector.h"
 
 namespace {
 
@@ -122,7 +124,8 @@ mediatool::downloads::DownloadOptions MakeOptions() {
     mediatool::downloads::DownloadOptions options;
     options.url = "https://example.com/watch?v=abc123";
     options.outputDirectory = "C:\\out";
-    options.quality = "best";
+    options.quality = mediatool::downloads::QualityPreset::Best;
+    options.filenameBase = "Test Video";
     return options;
 }
 
@@ -163,7 +166,25 @@ TEST(YtDlpProvider, StartsPythonWithCommandStdinFlagAndWritesCommandJson) {
     EXPECT_EQ(sentCommand.at("command"), "download");
     EXPECT_EQ(sentCommand.at("params").at("url"), "https://example.com/watch?v=abc123");
     EXPECT_EQ(sentCommand.at("params").at("outputDir"), "C:\\out");
-    EXPECT_EQ(sentCommand.at("params").at("quality"), "best");
+    EXPECT_EQ(sentCommand.at("params").at("formatSelector"),
+              mediatool::downloader::FormatSelectorForQuality(mediatool::downloads::QualityPreset::Best));
+    EXPECT_EQ(sentCommand.at("params").at("filenameBase"), "Test Video");
+    EXPECT_FALSE(sentCommand.at("params").contains("ffmpegLocation"))
+        << "no ffmpeg location was injected into this provider -- the key should be omitted entirely";
+}
+
+TEST(YtDlpProvider, ForwardsFfmpegLocationWhenConfigured) {
+    FakeProcessRunner runner({
+        R"({"event":"completed","data":{"outputPath":"C:\\out\\v.mp4"}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py", "C:\\tools\\ffmpeg.exe");
+
+    provider.Download(
+        MakeOptions(), [](const auto&) {}, [](const auto&) {}, [](const std::string&) {},
+        [] { return false; });
+
+    const auto sentCommand = nlohmann::json::parse(runner.lastProcessState->writtenLines[0]);
+    EXPECT_EQ(sentCommand.at("params").at("ffmpegLocation"), "C:\\tools\\ffmpeg.exe");
 }
 
 TEST(YtDlpProvider, RoutesEventsToCallbacksAndReturnsCompletedPath) {
@@ -254,4 +275,99 @@ TEST(YtDlpProvider, CancellationTerminatesProcessAndThrowsCancelled) {
     EXPECT_TRUE(threw);
     ASSERT_NE(runner.lastProcessState, nullptr);
     EXPECT_TRUE(runner.lastProcessState->terminated);
+}
+
+TEST(YtDlpProvider, InspectSendsInspectCommandAndReturnsRichMetadata) {
+    FakeProcessRunner runner({
+        R"({"event":"metadata","data":{)"
+        R"("title":"Rich Video","uploader":"Some Channel","duration":99.5,)"
+        R"("webpageUrl":"https://example.com/watch?v=abc123","thumbnailUrl":"https://example.com/thumb.jpg",)"
+        R"("extractor":"generic","playlistIndex":null,"playlistCount":null,)"
+        R"("formats":[)"
+        R"({"formatId":"137","extension":"mp4","resolution":"1920x1080","width":1920,"height":1080,)"
+        R"("fps":30,"videoCodec":"avc1","audioCodec":null,"videoBitrateKbps":2500,"audioBitrateKbps":null,)"
+        R"("filesizeBytes":123456,"approxFilesizeBytes":null,"hasVideo":true,"hasAudio":false},)"
+        R"({"formatId":"140","extension":"m4a","resolution":null,"width":null,"height":null,"fps":null,)"
+        R"("videoCodec":null,"audioCodec":"mp4a","videoBitrateKbps":null,"audioBitrateKbps":128,)"
+        R"("filesizeBytes":45678,"approxFilesizeBytes":null,"hasVideo":false,"hasAudio":true})"
+        R"(]}})",
+        R"({"event":"completed","data":{}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    const auto metadata = provider.Inspect("https://example.com/watch?v=abc123", [] { return false; });
+
+    EXPECT_EQ(runner.lastArgs[0], "downloader.py");
+    EXPECT_EQ(runner.lastArgs[1], "--command-stdin");
+    const auto sentCommand = nlohmann::json::parse(runner.lastProcessState->writtenLines[0]);
+    EXPECT_EQ(sentCommand.at("command"), "inspect");
+    EXPECT_EQ(sentCommand.at("params").at("url"), "https://example.com/watch?v=abc123");
+
+    EXPECT_EQ(metadata.title, "Rich Video");
+    ASSERT_TRUE(metadata.uploader.has_value());
+    EXPECT_EQ(*metadata.uploader, "Some Channel");
+    ASSERT_TRUE(metadata.durationSeconds.has_value());
+    EXPECT_DOUBLE_EQ(*metadata.durationSeconds, 99.5);
+    ASSERT_TRUE(metadata.webpageUrl.has_value());
+    ASSERT_TRUE(metadata.thumbnailUrl.has_value());
+    ASSERT_TRUE(metadata.extractor.has_value());
+    EXPECT_EQ(*metadata.extractor, "generic");
+
+    ASSERT_EQ(metadata.formats.size(), 2u);
+    EXPECT_EQ(metadata.formats[0].formatId, "137");
+    EXPECT_TRUE(metadata.formats[0].hasVideo);
+    EXPECT_FALSE(metadata.formats[0].hasAudio);
+    ASSERT_TRUE(metadata.formats[0].resolution.has_value());
+    EXPECT_EQ(*metadata.formats[0].resolution, "1920x1080");
+    EXPECT_EQ(metadata.formats[1].formatId, "140");
+    EXPECT_FALSE(metadata.formats[1].hasVideo);
+    EXPECT_TRUE(metadata.formats[1].hasAudio);
+}
+
+TEST(YtDlpProvider, InspectThrowsMediaToolExceptionOnErrorEvent) {
+    FakeProcessRunner runner({
+        R"({"event":"error","data":{"code":"E_PLAYLIST_NOT_SUPPORTED","category":"UNSUPPORTED_FORMAT",)"
+        R"("message":"playlists not supported","details":"","recoverable":false}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    bool threw = false;
+    try {
+        provider.Inspect("https://example.com/playlist?list=abc", [] { return false; });
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        threw = true;
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::UnsupportedFormat);
+        EXPECT_EQ(ex.Info().code, "E_PLAYLIST_NOT_SUPPORTED");
+    }
+    EXPECT_TRUE(threw);
+}
+
+TEST(YtDlpProvider, InspectCancellationTerminatesProcessAndThrowsCancelled) {
+    FakeProcessRunner runner({}, /*exitCode=*/0, /*staysRunning=*/true);
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    bool threw = false;
+    try {
+        provider.Inspect("https://example.com/watch?v=abc123", [] { return true; });
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        threw = true;
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::Cancelled);
+    }
+    EXPECT_TRUE(threw);
+    ASSERT_NE(runner.lastProcessState, nullptr);
+    EXPECT_TRUE(runner.lastProcessState->terminated);
+}
+
+TEST(YtDlpProvider, InspectThrowsEngineFailureWhenProcessExitsWithoutMetadataOrError) {
+    FakeProcessRunner runner({}, /*exitCode=*/1, /*staysRunning=*/false);
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    bool threw = false;
+    try {
+        provider.Inspect("https://example.com/watch?v=abc123", [] { return false; });
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        threw = true;
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::EngineFailure);
+    }
+    EXPECT_TRUE(threw);
 }

@@ -63,18 +63,25 @@ process can later be extended to accept follow-up commands, e.g. cancel), and th
 process streams **event lines to stdout** until it exits. There is no `id`/response
 correlation here — one process instance == one logical operation.
 
+Full detail (every field, every error code, filename-handling responsibilities) lives in
+**`docs/protocols/downloader.md`** — this section is just the shape summary:
+
 ```json
-{"command": "download", "params": {"url": "...", "outputDir": "...", "quality": "best"}}
+{"command": "inspect", "params": {"url": "..."}}
+{"command": "download", "params": {"url": "...", "outputDir": "...", "formatSelector": "...", "filenameBase": "...", "ffmpegLocation": "..."}}
 ```
 ```json
-{"event": "metadata", "data": {"title": "...", "duration": 123, "playlistIndex": null, "playlistCount": null}}
+{"event": "metadata", "data": {"title": "...", "uploader": "...", "duration": 123, "webpageUrl": "...", "thumbnailUrl": "...", "extractor": "...", "playlistIndex": null, "playlistCount": null, "formats": [...]}}
 {"event": "progress", "data": {"downloadedBytes": 1048576, "totalBytes": 52428800, "speedBytesPerSecond": 2097152, "etaSeconds": 24, "statusMessage": "Downloading"}}
 {"event": "completed", "data": {"outputPath": "D:\\Videos\\My Video.mp4"}}
 {"event": "error", "data": {"code": "E_NETWORK", "category": "NETWORK_ERROR", "message": "...", "details": "...", "recoverable": true}}
 ```
 
-`downloader.py --selftest` emits a canned sequence of these exact events with no network
-access, so the protocol can be verified without hitting a real URL.
+`formatSelector` is a concrete yt-dlp selector string chosen by
+`engines/downloader/YtDlpFormatSelector.h` from a `QualityPreset` — `downloader.py` never
+interprets a quality preset itself (spec section 10). `downloader.py --selftest` emits a
+canned sequence of these exact events with no network access, so the protocol can be
+verified without hitting a real URL.
 
 ## Commands (React -> ... -> core)
 
@@ -88,12 +95,21 @@ access, so the protocol can be verified without hitting a real URL.
 | `resumeJob` | `{jobId: string}` | `{}` |
 | `retryJob` | `{jobId: string}` | `{}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
+| `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[]}` |
 | `getSettings` | `{}` | `{settings: Settings}` |
 | `updateSettings` | `{settings: object}` (partial) | `{settings: Settings}` |
 | `getHardwareInfo` | `{}` | `{hardwareInfo: HardwareInfo}` |
 
 Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
+
+### `createJob` params by `type`
+
+| `type` | `params` |
+|---|---|
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset}` (`quality` defaults to `"BEST"`) |
+| `"TEST"` | `{}` |
+| anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
 
 ## Events (core -> ... -> React)
 
@@ -154,6 +170,48 @@ RETRYING  -> RUNNING, FAILED
 `ErrorCategory` (UPPER_SNAKE_CASE): `"FILE_NOT_FOUND" | "INVALID_FILE" |
 "UNSUPPORTED_FORMAT" | "ENGINE_FAILURE" | "DOWNLOAD_FAILURE" | "NETWORK_ERROR" |
 "PERMISSION_ERROR" | "DISK_SPACE_ERROR" | "CANCELLED" | "UNKNOWN"`
+
+### `QualityPreset` (UPPER_SNAKE_CASE)
+`"BEST" | "2160P" | "1440P" | "1080P" | "720P" | "480P" | "AUDIO_ONLY"`
+
+The only download-quality vocabulary the frontend or the IPC layer ever uses. See
+`core/downloads/QualityPreset.h` and `docs/decisions.md` for why the concrete yt-dlp
+selector string this maps to is decided in C++, not in Python or the frontend.
+
+### `DownloadFormat`
+```ts
+{
+  formatId: string;
+  extension?: string;
+  resolution?: string;        // e.g. "1920x1080", video formats only
+  width?: number;
+  height?: number;
+  fps?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  videoBitrateKbps?: number;
+  audioBitrateKbps?: number;
+  filesizeBytes?: number;
+  approxFilesizeBytes?: number;
+  hasVideo: boolean;
+  hasAudio: boolean;
+}
+```
+
+### `DownloadMetadata`
+```ts
+{
+  title: string;
+  uploader?: string;
+  durationSeconds?: number;
+  webpageUrl?: string;
+  thumbnailUrl?: string;
+  extractor?: string;
+  playlistIndex?: number;
+  playlistCount?: number;
+  formats: DownloadFormat[];  // populated by inspectDownloadUrl; empty from mid-download events
+}
+```
 
 ### `FileInfo`
 ```ts
