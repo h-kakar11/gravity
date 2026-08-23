@@ -107,6 +107,37 @@ std::string DeduplicateFilename(const std::string& desiredPath, const IFileSyste
         "Exceeded " + std::to_string(kMaxDeduplicationAttempts) + " numbered variants"));
 }
 
+namespace {
+
+bool AnyFileHasBaseName(const std::vector<std::string>& names, const std::string& baseName) {
+    for (const auto& name : names) {
+        if (stdfs::path(name).stem().string() == baseName) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+std::string DeduplicateBaseName(const std::string& directory, const std::string& desiredBaseName,
+                                 const IFileSystem& fs) {
+    const std::vector<std::string> existing = fs.ListDirectory(directory);
+    if (!AnyFileHasBaseName(existing, desiredBaseName)) {
+        return desiredBaseName;
+    }
+
+    for (int i = 1; i <= kMaxDeduplicationAttempts; ++i) {
+        const std::string candidate = desiredBaseName + " (" + std::to_string(i) + ")";
+        if (!AnyFileHasBaseName(existing, candidate)) {
+            return candidate;
+        }
+    }
+
+    throw errors::MediaToolException(errors::ErrorInfo::Make(
+        "E_DEDUP_EXHAUSTED", errors::ErrorCategory::Unknown,
+        "Could not find a free base filename for " + desiredBaseName,
+        "Exceeded " + std::to_string(kMaxDeduplicationAttempts) + " numbered variants in " + directory));
+}
+
 std::string WithPlaylistIndex(const std::string& filename, int index, int totalCount) {
     const std::string totalDigits = std::to_string(totalCount > 0 ? totalCount : 1);
     std::ostringstream oss;

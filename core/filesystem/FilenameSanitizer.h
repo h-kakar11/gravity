@@ -20,6 +20,15 @@ std::string SanitizeWindowsFilename(const std::string& rawTitle);
 // first free "<name> (N).<ext>" variant by probing fs.Exists() with increasing N.
 std::string DeduplicateFilename(const std::string& desiredPath, const IFileSystem& fs);
 
+// Like DeduplicateFilename, but for callers who don't know the final extension yet
+// (e.g. a downloader whose output container is chosen by an external tool after the
+// fact -- spec section 29). Returns `desiredBaseName` unchanged if no file in
+// `directory` starts with it; otherwise finds the first "<name> (N)" variant with no
+// existing file of that base name, checked via fs.ListDirectory() rather than
+// fs.Exists() (which would need to know the extension).
+std::string DeduplicateBaseName(const std::string& directory, const std::string& desiredBaseName,
+                                 const IFileSystem& fs);
+
 // Prefixes `filename` with `index` zero-padded to totalCount's digit width, e.g.
 // index 3 of 42 -> "03 - <filename>".
 std::string WithPlaylistIndex(const std::string& filename, int index, int totalCount);

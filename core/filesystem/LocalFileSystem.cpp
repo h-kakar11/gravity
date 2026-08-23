@@ -230,4 +230,23 @@ std::optional<std::uint64_t> LocalFileSystem::GetAvailableDiskSpace(const std::s
     return static_cast<std::uint64_t>(info.available);
 }
 
+std::vector<std::string> LocalFileSystem::ListDirectory(const std::string& directory) const {
+    std::vector<std::string> names;
+    std::error_code existsEc;
+    if (!stdfs::exists(directory, existsEc) || existsEc) {
+        return names;
+    }
+
+    std::error_code iterEc;
+    for (auto it = stdfs::directory_iterator(
+             directory, stdfs::directory_options::skip_permission_denied, iterEc);
+         it != stdfs::directory_iterator(); it.increment(iterEc)) {
+        if (iterEc) {
+            break;
+        }
+        names.push_back(it->path().filename().string());
+    }
+    return names;
+}
+
 }  // namespace mediatool::filesystem

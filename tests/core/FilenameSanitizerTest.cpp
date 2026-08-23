@@ -9,6 +9,7 @@
 #include "core/filesystem/LocalFileSystem.h"
 
 namespace stdfs = std::filesystem;
+using mediatool::filesystem::DeduplicateBaseName;
 using mediatool::filesystem::DeduplicateFilename;
 using mediatool::filesystem::LocalFileSystem;
 using mediatool::filesystem::SanitizeWindowsFilename;
@@ -122,6 +123,26 @@ TEST_F(FilenameDedupTest, NumbersSequentiallyOnCollision) {
     Touch("video (2).mp4");
     const std::string expected3 = (stdfs::path(dir_) / "video (3).mp4").string();
     EXPECT_EQ(DeduplicateFilename(desired, fs_), expected3);
+}
+
+TEST_F(FilenameDedupTest, DeduplicateBaseNameReturnsDesiredNameWhenFree) {
+    EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video");
+}
+
+TEST_F(FilenameDedupTest, DeduplicateBaseNameNumbersSequentiallyRegardlessOfExtension) {
+    // Unlike DeduplicateFilename, the caller doesn't know the final extension yet (spec
+    // section 29 -- e.g. yt-dlp only decides the merge container after downloading), so
+    // collisions must be detected against ANY extension sharing the base name.
+    Touch("video.mp4");
+    EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video (1)");
+
+    Touch("video (1).mkv");
+    EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video (2)");
+}
+
+TEST_F(FilenameDedupTest, DeduplicateBaseNameIgnoresUnrelatedFilesSharingAPrefix) {
+    Touch("video (backup).mp4");  // stem is "video (backup)", not "video" -- must not collide
+    EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video");
 }
 
 TEST(WithPlaylistIndexTest, ZeroPadsToTotalCountDigitWidth) {

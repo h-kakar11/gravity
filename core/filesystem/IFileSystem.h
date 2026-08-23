@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "core/filesystem/FileInfo.h"
 
@@ -38,6 +39,12 @@ public:
 
     // nullopt if the path's drive/volume free space can't be determined.
     virtual std::optional<std::uint64_t> GetAvailableDiskSpace(const std::string& path) const = 0;
+
+    // Filenames (no directory component) of the immediate (non-recursive) contents of
+    // `directory`. Returns an empty vector -- never throws -- if `directory` doesn't
+    // exist, since a caller probing for name collisions in a not-yet-created output
+    // directory is a normal case, not an error (spec section 29).
+    virtual std::vector<std::string> ListDirectory(const std::string& directory) const = 0;
 };
 
 }  // namespace mediatool::filesystem

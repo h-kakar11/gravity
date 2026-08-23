@@ -29,6 +29,8 @@ public:
     std::string GetParentDirectory(const std::string& path) const override;
 
     std::optional<std::uint64_t> GetAvailableDiskSpace(const std::string& path) const override;
+
+    std::vector<std::string> ListDirectory(const std::string& directory) const override;
 };
 
 }  // namespace mediatool::filesystem

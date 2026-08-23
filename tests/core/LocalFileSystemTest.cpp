@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -138,6 +139,25 @@ TEST_F(LocalFileSystemTest, GetAvailableDiskSpaceReturnsValueForExistingPath) {
     const auto space = fs_.GetAvailableDiskSpace(root_);
     ASSERT_TRUE(space.has_value());
     EXPECT_GT(*space, 0u);
+}
+
+TEST_F(LocalFileSystemTest, ListDirectoryReturnsImmediateFilenamesOnly) {
+    WriteFile("a.txt", "1");
+    WriteFile("b.mp4", "2");
+    stdfs::create_directories(stdfs::path(root_) / "sub");
+    WriteFile("sub/nested.txt", "3");  // must NOT appear -- non-recursive
+
+    auto names = fs_.ListDirectory(root_);
+    std::sort(names.begin(), names.end());
+    ASSERT_EQ(names.size(), 3u);  // a.txt, b.mp4, sub
+    EXPECT_NE(std::find(names.begin(), names.end(), "a.txt"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "b.mp4"), names.end());
+    EXPECT_NE(std::find(names.begin(), names.end(), "sub"), names.end());
+}
+
+TEST_F(LocalFileSystemTest, ListDirectoryReturnsEmptyForNonexistentDirectory) {
+    const std::string missing = (stdfs::path(root_) / "does_not_exist").string();
+    EXPECT_TRUE(fs_.ListDirectory(missing).empty());
 }
 
 TEST_F(LocalFileSystemTest, GetAvailableDiskSpaceWalksUpForNonexistentPath) {
