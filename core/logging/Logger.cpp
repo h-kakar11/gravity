@@ -80,7 +80,14 @@ void Logger::Init(const std::string& logFilePath, LogLevel level) {
 
     auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
         logFilePath, kMaxLogFileBytes, kMaxRotatedFiles);
-    auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    // stderr, NOT stdout: mediatool-core's stdout is the NDJSON IPC channel
+    // (docs/ipc-contract.md) and must never carry anything else -- a single Log::Info
+    // call during RunIpcLoop() would otherwise interleave a plain-text line into the
+    // protocol stream mid-session (found via manual Phase 2 integration testing: the
+    // very first "IPC loop starting" info log corrupted the first stdout line every
+    // time). Python's downloader.py already follows this same stdout-is-protocol-only
+    // convention for the same reason -- see docs/protocols/downloader.md.
+    auto consoleSink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
 
     auto logger = std::make_shared<spdlog::logger>(
         "mediatool", spdlog::sinks_init_list{fileSink, consoleSink});
