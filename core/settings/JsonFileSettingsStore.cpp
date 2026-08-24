@@ -93,7 +93,11 @@ void JsonFileSettingsStore::Save(const Settings& settings) {
                 "Could not write the settings file.",
                 "Failed to open '" + tempPath.string() + "' for writing."));
         }
-        output << settings.ToJson().dump(2);
+        // error_handler_t::replace, not the strict default -- see the identical comment
+        // in core/queue/QueuePersistence.cpp. A user-supplied path (advanced.ffmpegPath
+        // etc., set via updateSettings) reaching here with an invalid byte should not be
+        // able to throw out of a file write.
+        output << settings.ToJson().dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         output.flush();
         if (!output) {
             throw errors::MediaToolException(errors::ErrorInfo::Make(

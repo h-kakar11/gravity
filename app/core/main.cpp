@@ -75,9 +75,20 @@ std::mutex g_stdoutMutex;
 // reconciliation actually relies on (spec section 57).
 std::int64_t g_eventSequence = 0;
 
+// nlohmann's default dump() is strict about UTF-8 and THROWS if a string anywhere in the
+// payload contains an invalid byte sequence (json.exception.type_error.316) -- found by
+// Phase 8 IPC fuzzing: a request line containing raw invalid UTF-8 bytes causes
+// json::parse() to fail with a diagnostic message that itself embeds a snippet of the
+// offending input, that message lands in this response's "error" field, and dump()
+// throwing on IT, uncaught, was an unconditional process crash reachable by anything sent
+// over stdin -- a remote DoS with a two-line reproduction. error_handler_t::replace makes
+// dump() substitute U+FFFD for an invalid byte instead of throwing, so serialization can
+// never fail regardless of what ended up in a string (a message, a filename, anything).
+constexpr auto kJsonDumpErrorHandler = nlohmann::json::error_handler_t::replace;
+
 void WriteLine(const json& payload) {
     std::lock_guard<std::mutex> lock(g_stdoutMutex);
-    std::cout << payload.dump() << std::endl;
+    std::cout << payload.dump(-1, ' ', false, kJsonDumpErrorHandler) << std::endl;
 }
 
 // Reads the counter without consuming a number. Used by getQueueSnapshot to tell the
@@ -91,7 +102,7 @@ void WriteEventLine(const events::Event& event) {
     std::lock_guard<std::mutex> lock(g_stdoutMutex);
     json payload = event.ToJson();
     payload["seq"] = ++g_eventSequence;
-    std::cout << payload.dump() << std::endl;
+    std::cout << payload.dump(-1, ' ', false, kJsonDumpErrorHandler) << std::endl;
 }
 
 // --- path resolution ---------------------------------------------------------------------
@@ -209,10 +220,22 @@ struct JobDependencies {
     media::IMediaEngine& mediaEngine;
 };
 
+// Real URLs run from a handful of characters to a few thousand (query strings, tracking
+// parameters); nothing legitimate approaches this. Bounds the same class of problem
+// RequirePath already bounds for paths -- found by Phase 8 IPC fuzzing: an unbounded url
+// string was accepted whole (duplicate-key computation, persisted queue state, eventually
+// a subprocess argv) with no upfront rejection.
+constexpr std::size_t kMaxUrlLength = 8192;
+
 // Shared by createJob{type:DOWNLOAD}, the job factory, and inspectDownloadUrl -- all three
 // take a raw URL from the frontend and must reject it up front (spec section 4) rather than
 // letting an obviously-unsupported string reach a subprocess launch.
 void ValidateDownloadUrlValue(downloads::IDownloadProvider& provider, const std::string& url) {
+    if (url.size() > kMaxUrlLength) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_DOWNLOAD_URL", errors::ErrorCategory::UnsupportedFormat,
+            "That URL is unreasonably long.", "length=" + std::to_string(url.size())));
+    }
     if (url.empty() || !provider.CanHandle(url)) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_INVALID_DOWNLOAD_URL", errors::ErrorCategory::UnsupportedFormat,

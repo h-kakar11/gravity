@@ -89,7 +89,14 @@ void QueuePersistence::Save(const PersistedQueue& queue) const {
                 "The queue state file could not be written.",
                 "path=" + writer.TemporaryPath()));
         }
-        output << queue.ToJson().dump(2) << "\n";
+        // error_handler_t::replace: a job's title/metadata can carry text this process
+        // did not choose the encoding of (e.g. from an external extractor). The default
+        // strict UTF-8 handling THROWS on an invalid byte instead of writing the file --
+        // found by Phase 8 fuzzing an analogous case on the IPC response path
+        // (app/core/main.cpp's WriteLine) and applied here too, since an uncaught throw
+        // from a background persistence write is a crash the IPC loop's own try/catch
+        // cannot reach.
+        output << queue.ToJson().dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
         output.flush();
         if (!output) {
             throw MediaToolException(ErrorInfo::Make(

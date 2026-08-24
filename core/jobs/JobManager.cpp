@@ -985,6 +985,17 @@ void JobManager::PersistIfDue(std::int64_t nowMs, bool force) {
                                 e.Info().details + ")");
         std::lock_guard<std::mutex> lock(mutex_);
         dirty_ = true;
+    } catch (const std::exception& e) {
+        // Deliberately broader than MediaToolException above: this runs on the scheduler
+        // thread, with no IPC-loop try/catch anywhere above it to fall back on, so ANY
+        // uncaught exception here -- not just this codebase's own exception type -- is an
+        // unconditional process crash. Phase 8 found exactly this: a job whose title or
+        // metadata contained a byte sequence nlohmann::json considers invalid UTF-8 threw
+        // json::type_error out of ToJson().dump() during a routine background save, which
+        // this catch previously did not see at all. Same "keep running in-memory" policy.
+        logging::Log::Error(kLogSubsystem, std::string("queue state could not be saved: ") + e.what());
+        std::lock_guard<std::mutex> lock(mutex_);
+        dirty_ = true;
     }
 }
 

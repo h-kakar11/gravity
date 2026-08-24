@@ -146,7 +146,12 @@ std::string MakeDuplicateKey(jobs::JobType type, const nlohmann::json& params) {
     // across two structurally identical param objects regardless of the order the caller
     // wrote them in. That is what makes this a usable identity rather than a hash of
     // whatever spelling the frontend happened to send.
-    return jobs::ToWireString(type) + "|" + params.dump();
+    // error_handler_t::replace, not the strict default -- see the identical comment in
+    // core/queue/QueuePersistence.cpp. This runs inside job creation, which the IPC
+    // loop's own try/catch would actually reach (unlike the persistence-thread case), but
+    // there's no reason to let a duplicate-key computation throw at all when it doesn't
+    // have to.
+    return jobs::ToWireString(type) + "|" + params.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 }  // namespace mediatool::queue
