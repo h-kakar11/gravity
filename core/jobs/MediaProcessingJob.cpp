@@ -37,22 +37,23 @@ media::CancelledCallback MediaProcessingJob::CancellationProbe() {
     return [this] { return IsCancellationRequested(); };
 }
 
-void MediaProcessingJob::SweepPreviousAttempt(const std::string& outputPath) {
-    const std::string directory = filesystem::paths::GetParentDirectory(outputPath);
-    const std::string filename = filesystem::paths::GetFilename(outputPath);
+void MediaProcessingJob::SweepPreviousAttempt() {
+    if (previousOutputPath_.empty()) return;  // first attempt -- nothing of ours to remove
+
+    const std::string directory = filesystem::paths::GetParentDirectory(previousOutputPath_);
+    const std::string filename = filesystem::paths::GetFilename(previousOutputPath_);
     const auto dot = filename.find_last_of('.');
     const std::string stem = dot == std::string::npos ? filename : filename.substr(0, dot);
     const std::string extension = dot == std::string::npos ? std::string() : filename.substr(dot);
-    const std::string temporary = stem + ".processing" + extension;
 
-    for (const std::string& candidate : {temporary, filename}) {
+    for (const std::string& candidate : {stem + ".processing" + extension, filename}) {
         const std::string path = filesystem::paths::Join(directory, candidate);
         try {
             if (fileSystem_.Exists(path)) fileSystem_.Delete(path);
         } catch (...) {
             // Best-effort: a sweep failure must never mask the real job outcome. If the
-            // stale file is genuinely undeletable the engine's own atomic rename will
-            // report a clear error instead.
+            // stale file is genuinely undeletable, deduplication simply picks the next free
+            // name instead.
         }
     }
 }
@@ -98,11 +99,14 @@ void MediaProcessingJob::Execute() {
     const std::string desiredPath = filesystem::paths::Join(
         options_.outputDirectory, desiredBase + "." + targetExtension);
 
-    // A retry of this job must not accumulate "name (1)", "name (2)", ... on every attempt,
-    // so sweep the previous attempt's artifacts first and only then resolve collisions --
-    // what remains at this point genuinely belongs to someone else.
-    SweepPreviousAttempt(desiredPath);
+    // Order matters. Sweep what a previous attempt of this job produced FIRST, so a retry
+    // reclaims its own name; then deduplicate, so anything still standing -- which is by
+    // definition not ours -- is left alone and worked around.
+    SweepPreviousAttempt();
     const std::string outputPath = filesystem::DeduplicateFilename(desiredPath, fileSystem_);
+    // Recorded before the engine runs: if this attempt is cancelled or killed partway, the
+    // next one still knows which path to clean up.
+    previousOutputPath_ = outputPath;
 
     nlohmann::json metadata = DescribeMetadata();
     metadata["inputPath"] = options_.inputPath;

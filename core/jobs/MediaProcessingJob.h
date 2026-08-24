@@ -63,16 +63,28 @@ protected:
     media::CancelledCallback CancellationProbe();
 
 private:
-    // Removes leftovers a previous attempt of THIS job may have left next to the output:
-    // AtomicWriter's "<name>.processing.<ext>" temporary, and a fully written output from
-    // an attempt that was later rejected. Only touches names this job itself chose, and
-    // only ever runs before the engine writes anything, so it cannot delete a user file
-    // that merely happens to sit in the same folder.
-    void SweepPreviousAttempt(const std::string& outputPath);
+    // Removes what a previous attempt of THIS job left behind: the exact output path that
+    // attempt chose, plus AtomicWriter's "<name>.processing.<ext>" sibling of it.
+    //
+    // It is driven by `previousOutputPath_` -- a path this job demonstrably created -- and
+    // never by "whatever currently sits at the name we would like". That distinction is the
+    // whole point: on a first attempt there is nothing to sweep, so a same-named file the
+    // user already had is deduplicated around rather than deleted. Without it, converting
+    // clip.mp4 into a folder that already contained an unrelated clip.mp3 would destroy the
+    // user's file.
+    //
+    // On a retry it means the job reclaims its own name instead of accumulating
+    // "clip (1).mp3", "clip (2).mp3" with every attempt (spec section 17).
+    void SweepPreviousAttempt();
 
     Options options_;
     media::IMediaEngine& engine_;
     filesystem::IFileSystem& fileSystem_;
+
+    // The output path the previous attempt of this job chose, or empty on the first
+    // attempt. Only ever read and written from Execute(), which the scheduler guarantees
+    // runs at most once at a time per job.
+    std::string previousOutputPath_;
 };
 
 }  // namespace mediatool::jobs
