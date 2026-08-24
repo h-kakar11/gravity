@@ -1,4 +1,4 @@
-// The queue screen (spec sections 30-35). One list for every kind of job, with the controls
+// The queue screen (spec sections 9-11). One list for every kind of job, with the controls
 // that are valid for each, the queue-level controls, filters, statistics, and a detail panel.
 //
 // The backend is authoritative for everything shown here: this component renders the store
@@ -10,16 +10,19 @@ import { useEffect, useMemo, useState } from "react";
 
 import JobDetailPanel from "../components/JobDetailPanel";
 import JobRow from "../components/JobRow";
-import { styles } from "../components/queueStyles";
 import {
   filterJobs,
   sortJobs,
   type QueueFilter,
   type QueueSort,
 } from "../state/queueReducer";
-import { useQueue } from "../state/useQueue";
+import type { QueueController } from "../state/useQueue";
 import type { HistoryScope } from "../types/queue";
 import { describeError } from "../utils/jobDisplay";
+import { AlertTriangleIcon, InboxIcon, PauseIcon, PlayIcon, RetryIcon, SearchIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
+import { EmptyState } from "../components/ui/EmptyState";
+import { SkeletonRow } from "../components/ui/Skeleton";
 
 const FILTERS: { id: QueueFilter; label: string }[] = [
   { id: "ALL", label: "All" },
@@ -47,15 +50,14 @@ const CLEAR_SCOPES: { id: HistoryScope; label: string }[] = [
 
 function Stat({ value, label }: { value: number; label: string }) {
   return (
-    <div style={styles.stat}>
-      <div style={styles.statValue}>{value}</div>
-      <div style={styles.statLabel}>{label}</div>
+    <div className="gv-stat">
+      <div className="gv-stat__value">{value}</div>
+      <div className="gv-stat__label">{label}</div>
     </div>
   );
 }
 
-export default function QueuePage() {
-  const queue = useQueue();
+export default function QueuePage({ queue }: { queue: QueueController }) {
   const { state } = queue;
 
   const [filter, setFilter] = useState<QueueFilter>("ALL");
@@ -81,41 +83,39 @@ export default function QueuePage() {
   const hasFailures = stats.failed > 0;
 
   return (
-    <div style={styles.page}>
-      <h1 style={styles.h1}>Queue</h1>
-      <p style={styles.subtitle}>
+    <div className="gv-enter">
+      <h1 className="gv-h1">Queue</h1>
+      <p className="gv-subtitle">
         Downloads, conversions and compressions all run through one queue. Pausing stops new
         jobs from starting; anything already running keeps going until it finishes or is
         cancelled.
       </p>
 
       {queue.actionError ? (
-        <div style={styles.errorBanner} role="alert">
-          <strong>{describeError(queue.actionError)}</strong>
-          <button
-            type="button"
-            style={{ ...styles.button, marginLeft: "0.75rem" }}
-            onClick={queue.clearActionError}
-          >
+        <div className="gv-banner gv-banner--error" role="alert">
+          <AlertTriangleIcon size={15} />
+          <div className="gv-banner__body">
+            <div className="gv-banner__title">{describeError(queue.actionError)}</div>
+          </div>
+          <Button variant="ghost" size="sm" onClick={queue.clearActionError}>
             Dismiss
-          </button>
+          </Button>
         </div>
       ) : null}
 
       {!state.loaded ? (
-        <div style={styles.errorBanner} role="status">
-          Connecting to the core process…
-          <button
-            type="button"
-            style={{ ...styles.button, marginLeft: "0.75rem" }}
-            onClick={() => void queue.refresh()}
-          >
+        <div className="gv-banner gv-banner--warning" role="status">
+          <AlertTriangleIcon size={15} />
+          <div className="gv-banner__body">
+            <div className="gv-banner__title">Connecting to the core process…</div>
+          </div>
+          <Button variant="ghost" size="sm" onClick={() => void queue.refresh()}>
             Retry
-          </button>
+          </Button>
         </div>
       ) : null}
 
-      <div style={styles.statsRow} aria-label="Queue statistics">
+      <div className="gv-stats-row" aria-label="Queue statistics">
         <Stat value={stats.running} label="Active" />
         <Stat value={stats.queued + stats.waiting} label="Queued" />
         <Stat value={stats.retryWait} label="Retrying" />
@@ -124,30 +124,31 @@ export default function QueuePage() {
         <Stat value={stats.cancelled + stats.skipped} label="Stopped" />
       </div>
 
-      <div style={styles.toolbar}>
-        <div style={styles.toolbarGroup}>
-          <button
-            type="button"
-            style={styles.buttonPrimary}
+      <div className="gv-toolbar">
+        <div className="gv-toolbar__group">
+          <Button
+            variant={paused ? "primary" : "secondary"}
+            icon={paused ? <PlayIcon size={14} /> : <PauseIcon size={14} />}
             onClick={() => void (paused ? queue.resumeQueue() : queue.pauseQueue())}
             aria-pressed={paused}
           >
             {paused ? "Resume queue" : "Pause queue"}
-          </button>
-          <span style={styles.toolbarLabel} role="status">
+          </Button>
+          <span className="gv-toolbar__label" role="status">
             {paused ? "Paused — no new jobs will start" : "Running"}
           </span>
         </div>
 
-        <div style={styles.toolbarGroup}>
-          <label style={styles.toolbarLabel} htmlFor="concurrency">
+        <div className="gv-toolbar__group">
+          <label className="gv-toolbar__label" htmlFor="concurrency">
             Run at once
           </label>
           <select
             id="concurrency"
+            className="gv-select"
+            style={{ width: "auto" }}
             value={state.maxConcurrency}
             onChange={(e) => void queue.setConcurrency(Number(e.target.value))}
-            style={styles.button}
           >
             {[1, 2, 3, 4, 6, 8].map((value) => (
               <option key={value} value={value}>
@@ -157,52 +158,54 @@ export default function QueuePage() {
           </select>
         </div>
 
-        <div style={styles.spacer} />
+        <div className="gv-spacer" />
 
-        <button
-          type="button"
-          style={hasFailures ? styles.button : { ...styles.button, ...styles.buttonDisabled }}
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<RetryIcon size={13} />}
           disabled={!hasFailures}
           title={hasFailures ? "Retry every failed job" : "There are no failed jobs to retry"}
           onClick={() => void queue.retryFailed()}
         >
           Retry all failed
-        </button>
+        </Button>
         {CLEAR_SCOPES.map(({ id, label }) => (
-          <button
+          <Button
             key={id}
-            type="button"
-            style={styles.button}
+            variant="ghost"
+            size="sm"
             title="Removes entries from this list. It never deletes files from disk."
             onClick={() => void queue.clearHistory(id)}
           >
             {label}
-          </button>
+          </Button>
         ))}
       </div>
 
-      <div style={styles.filterBar} role="tablist" aria-label="Filter jobs">
+      <div className="gv-tabs" role="tablist" aria-label="Filter jobs">
         {FILTERS.map(({ id, label }) => (
           <button
             key={id}
             type="button"
             role="tab"
             aria-selected={filter === id}
-            style={filter === id ? styles.filterTabActive : styles.filterTab}
+            className="gv-tab"
             onClick={() => setFilter(id)}
           >
             {label}
           </button>
         ))}
-        <div style={styles.spacer} />
-        <label style={styles.toolbarLabel} htmlFor="sort">
+        <div className="gv-spacer" />
+        <label className="gv-toolbar__label" htmlFor="sort">
           Sort
         </label>
         <select
           id="sort"
+          className="gv-select"
+          style={{ width: "auto" }}
           value={sort}
           onChange={(e) => setSort(e.target.value as QueueSort)}
-          style={styles.button}
         >
           {SORTS.map(({ id, label }) => (
             <option key={id} value={id}>
@@ -214,28 +217,49 @@ export default function QueuePage() {
 
       {sort !== "QUEUE_ORDER" ? (
         // Without this, re-sorting the list would look like it had re-prioritised the
-        // queue. It has not (spec section 34).
-        <p style={{ ...styles.subtitle, marginTop: 0 }} role="note">
+        // queue. It has not (spec section 9).
+        <p className="gv-hint" role="note" style={{ marginTop: "-0.5rem", marginBottom: "0.75rem" }}>
           This is a display order only — the scheduler still runs jobs in queue order. Switch
-          to “Queue order” to see what will actually run next.
+          to "Queue order" to see what will actually run next.
         </p>
       ) : null}
 
-      {visibleJobs.length === 0 ? (
-        <div style={styles.empty}>
-          {state.loaded
-            ? filter === "ALL"
-              ? "Nothing in the queue yet."
-              : "No jobs match this filter."
-            : "Loading…"}
+      {!state.loaded ? (
+        <div className="gv-list">
+          <SkeletonRow />
+          <SkeletonRow />
+          <SkeletonRow />
         </div>
+      ) : visibleJobs.length === 0 ? (
+        filter === "ALL" ? (
+          <EmptyState
+            icon={<InboxIcon size={28} />}
+            title="Nothing in the queue yet"
+            description="Start a download or a conversion and it will show up here."
+          />
+        ) : (
+          <EmptyState
+            icon={<SearchIcon size={26} />}
+            title="No jobs match this filter"
+            description="Try a different filter, or switch back to All."
+            action={
+              <Button variant="secondary" size="sm" onClick={() => setFilter("ALL")}>
+                Show all jobs
+              </Button>
+            }
+          />
+        )
       ) : (
-        <div style={styles.list}>
+        <div className="gv-list">
           {visibleJobs.map((job) => (
             <JobRow
               key={job.id}
               job={job}
-              nowMs={nowMs}
+              // Only a RETRY_WAIT row's countdown depends on the clock, so every other row
+              // gets a constant here -- an unchanging prop across the once-a-second tick,
+              // which is what lets JobRow's memoization actually skip re-rendering them
+              // (spec section 20).
+              nowMs={job.state === "RETRY_WAIT" ? nowMs : 0}
               selected={selectedId === job.id}
               onSelect={(id) => setSelectedId((current) => (current === id ? null : id))}
               onCancel={(id) => void queue.cancelJob(id)}

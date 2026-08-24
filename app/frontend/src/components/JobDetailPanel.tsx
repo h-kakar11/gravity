@@ -1,7 +1,8 @@
-// Everything known about one job (spec section 35). Shows diagnostics that help -- the id,
+// Everything known about one job (spec section 11). Shows diagnostics that help -- the id,
 // the error code, the dependency ids -- and deliberately not the internals that do not: no
 // ffmpeg argv, no yt-dlp command line, no raw stderr.
 
+import type { ReactNode } from "react";
 import type { JobPriority, JobSnapshot } from "../types/job";
 import {
   canChangePriority,
@@ -12,12 +13,12 @@ import {
   formatTimestamp,
   jobSubtitle,
   jobTitle,
-  JOB_STATE_LABELS,
   JOB_TYPE_LABELS,
   PRIORITY_LABELS,
   secondsUntilRetry,
 } from "../utils/jobDisplay";
-import { styles } from "./queueStyles";
+import { StatusBadge } from "./ui/StatusBadge";
+import { AlertTriangleIcon, XIcon } from "./icons";
 
 interface JobDetailPanelProps {
   job: JobSnapshot;
@@ -26,12 +27,12 @@ interface JobDetailPanelProps {
   onClose: () => void;
 }
 
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
+function Field({ label, value }: { label: string; value: ReactNode }) {
   if (value === undefined || value === null || value === "") return null;
   return (
     <>
-      <div style={styles.detailLabel}>{label}</div>
-      <div style={styles.detailValue}>{value}</div>
+      <div className="gv-detail__label">{label}</div>
+      <div className="gv-detail__value">{value}</div>
     </>
   );
 }
@@ -41,39 +42,42 @@ function metaString(job: JobSnapshot, key: string): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export default function JobDetailPanel({
-  job,
-  nowMs,
-  onSetPriority,
-  onClose,
-}: JobDetailPanelProps) {
+export default function JobDetailPanel({ job, nowMs, onSetPriority, onClose }: JobDetailPanelProps) {
   const retryIn = secondsUntilRetry(job, nowMs);
   const resultPath = typeof job.result?.outputPath === "string" ? job.result.outputPath : undefined;
   const priorityDisabled = !canChangePriority(job);
 
   return (
-    <section style={styles.detail} aria-label={`Details for ${jobTitle(job)}`}>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: "0.75rem" }}>
-        <h2 style={{ fontSize: "1rem", margin: 0 }}>{jobTitle(job)}</h2>
-        <div style={styles.spacer} />
-        <button type="button" style={styles.button} onClick={onClose} aria-label="Close job details">
-          Close
+    <section className="gv-panel gv-detail" aria-label={`Details for ${jobTitle(job)}`}>
+      <div className="gv-detail__header">
+        <h2 style={{ fontSize: "var(--text-base)", margin: 0 }}>{jobTitle(job)}</h2>
+        <div className="gv-spacer" />
+        <StatusBadge state={job.state} />
+        <button
+          type="button"
+          className="gv-icon-btn"
+          style={{ marginLeft: "0.75rem" }}
+          onClick={onClose}
+          aria-label="Close job details"
+        >
+          <XIcon size={14} />
         </button>
       </div>
 
-      <div style={styles.detailGrid}>
+      <div className="gv-detail__grid">
         <Field label="Job ID" value={<code>{job.id}</code>} />
         <Field label="Type" value={JOB_TYPE_LABELS[job.type]} />
-        <Field label="State" value={JOB_STATE_LABELS[job.state]} />
         <Field label="Operation" value={jobSubtitle(job)} />
 
-        <div style={styles.detailLabel}>Priority</div>
-        <div style={styles.detailValue}>
-          <label style={styles.srOnly} htmlFor={`priority-${job.id}`}>
+        <div className="gv-detail__label">Priority</div>
+        <div className="gv-detail__value">
+          <label className="sr-only" htmlFor={`priority-${job.id}`}>
             Priority for {jobTitle(job)}
           </label>
           <select
             id={`priority-${job.id}`}
+            className="gv-select"
+            style={{ width: "auto" }}
             value={job.priority}
             disabled={priorityDisabled}
             title={
@@ -82,7 +86,6 @@ export default function JobDetailPanel({
                 : "Changing priority reorders pending work; it never restarts a running job"
             }
             onChange={(e) => onSetPriority(job.id, e.target.value as JobPriority)}
-            style={priorityDisabled ? { ...styles.button, ...styles.buttonDisabled } : styles.button}
           >
             {(["LOW", "NORMAL", "HIGH"] as JobPriority[]).map((value) => (
               <option key={value} value={value}>
@@ -111,27 +114,30 @@ export default function JobDetailPanel({
               : job.progress.statusMessage
           }
         />
-        <Field label="Speed" value={
-          job.progress.speedBytesPerSecond !== undefined
-            ? formatSpeed(job.progress.speedBytesPerSecond)
-            : undefined
-        } />
-        <Field label="ETA" value={
-          job.progress.etaSeconds !== undefined ? formatDuration(job.progress.etaSeconds) : undefined
-        } />
-        <Field label="Transferred" value={
-          job.progress.totalBytes !== undefined
-            ? `${formatBytes(job.progress.processedBytes)} of ${formatBytes(job.progress.totalBytes)}`
-            : undefined
-        } />
+        <Field
+          label="Speed"
+          value={
+            job.progress.speedBytesPerSecond !== undefined
+              ? formatSpeed(job.progress.speedBytesPerSecond)
+              : undefined
+          }
+        />
+        <Field
+          label="ETA"
+          value={job.progress.etaSeconds !== undefined ? formatDuration(job.progress.etaSeconds) : undefined}
+        />
+        <Field
+          label="Transferred"
+          value={
+            job.progress.totalBytes !== undefined
+              ? `${formatBytes(job.progress.processedBytes)} of ${formatBytes(job.progress.totalBytes)}`
+              : undefined
+          }
+        />
 
         <Field
           label="Attempts"
-          value={
-            job.maxRetries > 0 || job.attempt > 0
-              ? `${job.attempt + 1} of ${job.maxRetries + 1}`
-              : undefined
-          }
+          value={job.maxRetries > 0 || job.attempt > 0 ? `${job.attempt + 1} of ${job.maxRetries + 1}` : undefined}
         />
         <Field label="Next retry" value={retryIn !== undefined ? `in ${retryIn}s` : undefined} />
         <Field label="Retry reason" value={job.retryReason} />
@@ -154,25 +160,28 @@ export default function JobDetailPanel({
 
         {job.error ? (
           <>
-            <div style={styles.detailLabel}>Error</div>
-            <div style={styles.detailValue}>
-              <div>{describeError(job.error)}</div>
-              {/* The code is shown as a diagnostic the user can quote in a bug report; the
-                  sentence above it is what they are meant to read. */}
-              <div style={{ color: "#6b7280", fontSize: "0.78rem", marginTop: "0.2rem" }}>
-                {job.error.code} ({job.error.category})
-                {job.error.recoverable ? " — this one can be retried" : ""}
+            <div className="gv-detail__label">Error</div>
+            <div className="gv-detail__value">
+              <div style={{ display: "flex", alignItems: "flex-start", gap: "0.4rem" }}>
+                <AlertTriangleIcon size={14} style={{ color: "var(--status-failed)", flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <div>{describeError(job.error)}</div>
+                  {/* The code is shown as a diagnostic the user can quote in a bug report;
+                      the sentence above it is what they are meant to read. */}
+                  <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-xs)", marginTop: "0.2rem" }}>
+                    {job.error.code} ({job.error.category})
+                    {job.error.recoverable ? " — this one can be retried" : ""}
+                  </div>
+                  {job.error.details && job.error.details !== job.error.message ? (
+                    <details style={{ marginTop: "0.3rem" }}>
+                      <summary style={{ cursor: "pointer", fontSize: "var(--text-xs)" }}>Technical details</summary>
+                      <pre style={{ whiteSpace: "pre-wrap", fontSize: "var(--text-xs)", margin: "0.3rem 0 0" }}>
+                        {job.error.details}
+                      </pre>
+                    </details>
+                  ) : null}
+                </div>
               </div>
-              {job.error.details && job.error.details !== job.error.message ? (
-                <details style={{ marginTop: "0.3rem" }}>
-                  <summary style={{ cursor: "pointer", fontSize: "0.78rem" }}>
-                    Technical details
-                  </summary>
-                  <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.75rem", margin: "0.3rem 0 0" }}>
-                    {job.error.details}
-                  </pre>
-                </details>
-              ) : null}
             </div>
           </>
         ) : null}
