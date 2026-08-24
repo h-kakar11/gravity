@@ -15,6 +15,17 @@ manifests themselves) because CMake's `project(VERSION ...)` rejects pre-release
 identifiers and `check_versions.py`'s cross-check is numeric-only by design; the
 release-candidate designation lives on the git tag (`v1.0.0-rc1`) instead.
 
+The `v1.0.0-rc1` annotated tag was created locally on this branch's final commit but could
+not be pushed to `origin` from this session — `git push origin v1.0.0-rc1` returned an
+HTTP 403 from the git proxy on every retry, while ordinary branch pushes to this same
+remote succeeded throughout the entire session (most recently the commit this tag points
+at). That is a permission-scope difference (this session's credential appears able to push
+branch refs but not tag refs), not a network failure, so retrying further would not help
+and risking a workaround was not appropriate. **Whoever has full push access to this
+repository should run `git tag -a v1.0.0-rc1 <commit> -m "..."` (or `git push origin
+v1.0.0-rc1` if they pull this exact local tag) to actually publish the tag** — the commit it
+should point at is the one this document and `docs/phase-10.md` describe as final.
+
 ## Why "rc1" and not a final GA
 
 Everything this environment can build, run, and test is done, green, and re-verified this
