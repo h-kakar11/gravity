@@ -25,7 +25,11 @@ std::string SystemClock::NowIso8601Utc() const {
     gmtime_r(&t, &utcTm);
 #endif
 
-    char buffer[32];
+    // 64, not the 24 characters this actually formats to: each %d is an int, so GCC's
+    // truncation analysis budgets 11 characters for every one of them and warns unless the
+    // buffer covers that worst case. Sizing past the doubt is cheaper than a pragma and
+    // keeps the build warning-free.
+    char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
                   utcTm.tm_year + 1900, utcTm.tm_mon + 1, utcTm.tm_mday, utcTm.tm_hour,
                   utcTm.tm_min, utcTm.tm_sec, static_cast<int>(ms.count()));
