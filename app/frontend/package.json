@@ -1,7 +1,7 @@
 {
   "name": "gravity-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Gravity's React/TypeScript frontend: application shell, design system, and the Home/Download/Convert & Compress/Queue/Settings screens.",
   "scripts": {

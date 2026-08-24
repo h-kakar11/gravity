@@ -1,7 +1,7 @@
 {
   "name": "mediatool-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Gravity's Tauri shell -- bridges app/frontend to the mediatool-core sidecar (see docs/ipc-contract.md).",
   "scripts": {
     "tauri": "tauri",

@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.21)
 # can't literally share one file -- they are kept numerically equal by convention and
 # checked by scripts/check-versions.* (see docs/phase-7.md "Versioning").
 project(Gravity
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Gravity -- a local-first media downloader, converter, and compressor (C++ core)"
     LANGUAGES CXX
 )

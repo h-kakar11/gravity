@@ -1,6 +1,6 @@
 [package]
 name = "mediatool-desktop"
-version = "0.1.0"
+version = "1.0.0"
 description = "Gravity desktop shell (Tauri) -- bridges the React frontend to the mediatool-core sidecar over stdio NDJSON."
 edition = "2021"
 rust-version = "1.77"
