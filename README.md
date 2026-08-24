@@ -150,4 +150,8 @@ real-network integration test.
 - `docs/phase-7.md` — the Phase 7 engineering report (packaging, resource resolution,
   branding, versioning, and exactly what could and couldn't be verified without a Windows
   machine)
+- `docs/phase-8.md` — the Phase 8 hardening report (adversarial IPC fuzzing, a real crash
+  found and fixed, a real functional bug in stderr capture and process cancellation found
+  and fixed, concurrency stress testing, and an investigated-not-dismissed environmental
+  finding)
 - `tests/e2e/README.md` — the end-to-end queue harnesses
