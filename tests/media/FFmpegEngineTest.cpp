@@ -5,6 +5,7 @@
 // call with an invocation call in the same test would conflate the two).
 
 #include "engines/ffmpeg/FFmpegEngine.h"
+#include "engines/ffmpeg/FFmpegDiscovery.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -53,26 +54,36 @@ const char* kCannedProbeJson = R"JSON(
 
 }  // namespace
 
-TEST(FFmpegEngineTest, IsAvailableFalseWhenDiscoveryFindsNothing) {
+// Successful executable discovery is memoized process-wide (see FFmpegDiscovery.h). These
+// tests script a MockProcessRunner to answer the lookup differently each time, so each one
+// has to start from an empty cache or it would silently assert against the previous test's
+// answer.
+class FFmpegEngineTest : public ::testing::Test {
+protected:
+    void SetUp() override { mediatool::media::ResetDiscoveryCacheForTesting(); }
+    void TearDown() override { mediatool::media::ResetDiscoveryCacheForTesting(); }
+};
+
+TEST_F(FFmpegEngineTest, IsAvailableFalseWhenDiscoveryFindsNothing) {
     MockProcessRunner runner({}, {}, /*exitCode=*/1);  // "where" finds nothing
     FFmpegEngine engine(runner);
     EXPECT_FALSE(engine.IsAvailable());
 }
 
-TEST(FFmpegEngineTest, IsAvailableTrueWhenDiscoverySucceeds) {
+TEST_F(FFmpegEngineTest, IsAvailableTrueWhenDiscoverySucceeds) {
     MockProcessRunner runner({"C:\\ffmpeg\\bin\\ffmpeg.exe"}, {}, /*exitCode=*/0);
     FFmpegEngine engine(runner);
     EXPECT_TRUE(engine.IsAvailable());
 }
 
-TEST(FFmpegEngineTest, IsAvailableTrueWithExplicitOverridesAndNoDiscoveryCall) {
+TEST_F(FFmpegEngineTest, IsAvailableTrueWithExplicitOverridesAndNoDiscoveryCall) {
     // exitCode=1 would fail discovery, but overrides bypass discovery entirely.
     MockProcessRunner runner({}, {}, /*exitCode=*/1);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
     EXPECT_TRUE(engine.IsAvailable());
 }
 
-TEST(FFmpegEngineTest, VersionReturnsFirstStdoutLine) {
+TEST_F(FFmpegEngineTest, VersionReturnsFirstStdoutLine) {
     MockProcessRunner runner({"ffmpeg version 6.0-full_build", "built with gcc"}, {}, 0);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"));
     auto version = engine.Version();
@@ -80,13 +91,13 @@ TEST(FFmpegEngineTest, VersionReturnsFirstStdoutLine) {
     EXPECT_EQ(*version, "ffmpeg version 6.0-full_build");
 }
 
-TEST(FFmpegEngineTest, VersionNulloptWhenNotDiscoverable) {
+TEST_F(FFmpegEngineTest, VersionNulloptWhenNotDiscoverable) {
     MockProcessRunner runner({}, {}, /*exitCode=*/1);
     FFmpegEngine engine(runner);
     EXPECT_FALSE(engine.Version().has_value());
 }
 
-TEST(FFmpegEngineTest, ProbeThrowsFileNotFoundForMissingPath) {
+TEST_F(FFmpegEngineTest, ProbeThrowsFileNotFoundForMissingPath) {
     MockProcessRunner runner({}, {}, 0);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
 
@@ -98,7 +109,7 @@ TEST(FFmpegEngineTest, ProbeThrowsFileNotFoundForMissingPath) {
     }
 }
 
-TEST(FFmpegEngineTest, ProbeThrowsEngineFailureWhenFfprobeNotDiscoverable) {
+TEST_F(FFmpegEngineTest, ProbeThrowsEngineFailureWhenFfprobeNotDiscoverable) {
     ScratchFile file(".mp4");
     MockProcessRunner runner({}, {}, /*exitCode=*/1);  // "where ffprobe" finds nothing
     FFmpegEngine engine(runner);
@@ -111,7 +122,7 @@ TEST(FFmpegEngineTest, ProbeThrowsEngineFailureWhenFfprobeNotDiscoverable) {
     }
 }
 
-TEST(FFmpegEngineTest, ProbeParsesFfprobeJsonIntoFileInfo) {
+TEST_F(FFmpegEngineTest, ProbeParsesFfprobeJsonIntoFileInfo) {
     ScratchFile file(".mp4");
     MockProcessRunner runner({kCannedProbeJson}, {}, /*exitCode=*/0);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
@@ -135,7 +146,7 @@ TEST(FFmpegEngineTest, ProbeParsesFfprobeJsonIntoFileInfo) {
     EXPECT_NEAR(*info.fps, 30000.0 / 1001.0, 0.001);
 }
 
-TEST(FFmpegEngineTest, ProbeThrowsInvalidFileWhenFfprobeExitsNonZero) {
+TEST_F(FFmpegEngineTest, ProbeThrowsInvalidFileWhenFfprobeExitsNonZero) {
     ScratchFile file(".mp4");
     MockProcessRunner runner({}, {"moov atom not found"}, /*exitCode=*/1);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
@@ -148,26 +159,23 @@ TEST(FFmpegEngineTest, ProbeThrowsInvalidFileWhenFfprobeExitsNonZero) {
     }
 }
 
-TEST(FFmpegEngineTest, UnimplementedOperationsThrowUnsupportedFormat) {
+TEST_F(FFmpegEngineTest, StillUnimplementedOperationsThrowUnsupportedFormat) {
+    // Convert/Compress are implemented now (see FFmpegEngineEncodeTest); these two remain
+    // declared-but-unimplemented and must say so honestly rather than fake a result.
     MockProcessRunner runner({}, {}, 0);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
     auto noopProgress = [](const mediatool::jobs::Progress&) {};
     auto neverCancelled = []() { return false; };
 
-    EXPECT_THROW(engine.Convert("in.mp4", "out.mp4", {}, noopProgress, neverCancelled),
-                 MediaToolException);
-    EXPECT_THROW(engine.Compress("in.mp4", "out.mp4", {}, noopProgress, neverCancelled),
-                 MediaToolException);
     EXPECT_THROW(engine.ExtractAudio("in.mp4", "out.mp3", noopProgress, neverCancelled),
                  MediaToolException);
     EXPECT_THROW(engine.ExtractFrames("in.mp4", "out_dir", {}, noopProgress, neverCancelled),
                  MediaToolException);
 
     try {
-        engine.Convert("in.mp4", "out.mp4", {}, noopProgress, neverCancelled);
+        engine.ExtractAudio("in.mp4", "out.mp3", noopProgress, neverCancelled);
         FAIL() << "expected MediaToolException";
     } catch (const MediaToolException& ex) {
         EXPECT_EQ(ex.Info().category, ErrorCategory::UnsupportedFormat);
-        EXPECT_NE(ex.Info().message.find("not implemented in Phase 1"), std::string::npos);
     }
 }

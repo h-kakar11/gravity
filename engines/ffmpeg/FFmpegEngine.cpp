@@ -1,6 +1,9 @@
 #include "engines/ffmpeg/FFmpegEngine.h"
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <memory>
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
@@ -9,7 +12,11 @@
 #include <vector>
 
 #include "core/errors/MediaToolException.h"
+#include "core/filesystem/AtomicWriter.h"
+#include "core/media/ProcessingOptions.h"
+#include "engines/ffmpeg/FFmpegArgumentBuilder.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
+#include "engines/ffmpeg/FFmpegProgressParser.h"
 
 namespace mediatool::media {
 
@@ -226,22 +233,247 @@ filesystem::FileInfo FFmpegEngine::Probe(const std::string& path) {
     return info;
 }
 
+void FFmpegEngine::RunEncode(
+    const std::string& operation, const std::string& inputPath, const std::string& outputPath,
+    const std::function<std::vector<std::string>(const std::string&, const filesystem::FileInfo&)>&
+        buildArgs,
+    ProgressCallback onProgress, CancelledCallback isCancelled) {
+    const auto cancelled = [&isCancelled] { return isCancelled && isCancelled(); };
+    const auto report = [&onProgress](const jobs::Progress& progress) {
+        if (onProgress) onProgress(progress);
+    };
+    const auto throwCancelled = [&operation]() {
+        throw MediaToolException(ErrorInfo::Make("E_FFMPEG_CANCELLED", ErrorCategory::Cancelled,
+                                                  operation + " was cancelled."));
+    };
+
+    std::error_code inputEc;
+    if (!fs::exists(inputPath, inputEc) || inputEc) {
+        throw MediaToolException(ErrorInfo::Make("E_INPUT_NOT_FOUND", ErrorCategory::FileNotFound,
+                                                  "The input file no longer exists.",
+                                                  "path=" + inputPath));
+    }
+    // Reading and writing the same file in one ffmpeg pass truncates the input before it
+    // has been read. Catch it here rather than letting ffmpeg destroy the source.
+    std::error_code sameEc;
+    if (fs::exists(outputPath, sameEc) && fs::equivalent(inputPath, outputPath, sameEc) && !sameEc) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_SAME_INPUT_OUTPUT", ErrorCategory::UnsupportedFormat,
+            "The output file would overwrite the input file.", "path=" + inputPath));
+    }
+
+    auto ffmpegPath = ResolveFfmpegPath();
+    if (!ffmpegPath.has_value()) {
+        throw MediaToolException(ErrorInfo::Make("E_FFMPEG_NOT_FOUND", ErrorCategory::EngineFailure,
+                                                  "ffmpeg was not found on this system", "",
+                                                  /*recoverable=*/true));
+    }
+
+    if (cancelled()) throwCancelled();
+
+    // The duration is what turns ffmpeg's out_time into a percentage. A file we cannot
+    // probe is not fatal -- the encode still runs, just without a percentage.
+    filesystem::FileInfo probed;
+    try {
+        probed = Probe(inputPath);
+    } catch (const MediaToolException&) {
+        probed.path = inputPath;
+    }
+
+    const std::string parentDirectory = fs::path(outputPath).parent_path().string();
+    if (!parentDirectory.empty()) {
+        std::error_code createEc;
+        fs::create_directories(parentDirectory, createEc);
+        if (createEc) {
+            throw MediaToolException(ErrorInfo::Make(
+                "E_OUTPUT_DIRECTORY_UNUSABLE", ErrorCategory::PermissionError,
+                "The output folder could not be created.",
+                "path=" + parentDirectory + " error=" + createEc.message()));
+        }
+    }
+
+    // Everything ffmpeg writes goes to the temporary path; the destructor removes it if we
+    // never reach Commit(), so a cancellation/failure/throw leaves no partial file behind.
+    filesystem::AtomicWriter writer(outputPath);
+    const std::vector<std::string> args = buildArgs(writer.TemporaryPath(), probed);
+
+    FFmpegProgressParser parser(probed.durationSeconds);
+    std::mutex progressMutex;
+    std::vector<jobs::Progress> pendingProgress;
+    std::vector<std::string> stderrLines;
+    std::atomic<bool> sawProgressBlock{false};
+
+    std::unique_ptr<process::IProcess> proc;
+    try {
+        proc = runner_.Start(
+            *ffmpegPath, args, process::ProcessOptions{},
+            [&](const std::string& line) {
+                std::lock_guard<std::mutex> lock(progressMutex);
+                parser.FeedLine(line);
+                if (auto progress = parser.TakeProgressIfReady()) {
+                    progress->statusMessage = operation;
+                    pendingProgress.push_back(*progress);
+                    sawProgressBlock = true;
+                }
+            },
+            [&](const std::string& line) {
+                std::lock_guard<std::mutex> lock(progressMutex);
+                // ffmpeg's stderr at -loglevel error is the diagnostic we surface when the
+                // exit code is non-zero. Bound it so a pathological run cannot grow without
+                // limit; the first lines are the ones that explain the failure.
+                if (stderrLines.size() < 100) stderrLines.push_back(line);
+            });
+    } catch (const MediaToolException& e) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_FFMPEG_LAUNCH_FAILED", ErrorCategory::EngineFailure,
+            "ffmpeg could not be started.", e.Info().details.empty() ? e.Info().message
+                                                                    : e.Info().details));
+    }
+    if (!proc) {
+        throw MediaToolException(ErrorInfo::Make("E_FFMPEG_LAUNCH_FAILED",
+                                                  ErrorCategory::EngineFailure,
+                                                  "ffmpeg could not be started.",
+                                                  "IProcessRunner::Start returned null"));
+    }
+
+    // Bounded escalation: ask nicely, wait a bounded grace period, then kill, then confirm.
+    // Never an unbounded wait -- a wedged child must not hold a scheduler slot forever.
+    const auto stopProcess = [&] {
+        proc->Terminate();
+        if (!proc->WaitFor(terminateGraceMs_).has_value()) {
+            proc->Kill();
+            proc->WaitFor(terminateGraceMs_);
+        }
+    };
+
+    constexpr int kPollIntervalMs = 100;
+    int msSinceProgress = 0;
+    std::optional<process::ProcessResult> result;
+    bool stalled = false;
+
+    while (true) {
+        {
+            std::vector<jobs::Progress> drained;
+            {
+                std::lock_guard<std::mutex> lock(progressMutex);
+                drained.swap(pendingProgress);
+            }
+            if (!drained.empty()) msSinceProgress = 0;
+            for (const auto& progress : drained) report(progress);
+        }
+
+        if (cancelled()) {
+            stopProcess();
+            throwCancelled();
+        }
+
+        result = proc->WaitFor(kPollIntervalMs);
+        if (result.has_value()) break;
+
+        msSinceProgress += kPollIntervalMs;
+        if (stallTimeoutMs_ > 0 && msSinceProgress >= stallTimeoutMs_) {
+            stalled = true;
+            stopProcess();
+            result = proc->WaitFor(terminateGraceMs_);
+            break;
+        }
+    }
+
+    // Drain whatever arrived between the last poll and the process exiting.
+    {
+        std::vector<jobs::Progress> drained;
+        {
+            std::lock_guard<std::mutex> lock(progressMutex);
+            drained.swap(pendingProgress);
+        }
+        for (const auto& progress : drained) report(progress);
+    }
+
+    if (stalled) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_FFMPEG_STALLED", ErrorCategory::EngineFailure,
+            "ffmpeg stopped responding and was terminated.",
+            "no progress for " + std::to_string(stallTimeoutMs_) + "ms; produced " +
+                (sawProgressBlock ? "some" : "no") + " progress before stalling"));
+    }
+
+    // A cancellation that lands while ffmpeg is exiting still means cancelled, not failed:
+    // reporting E_FFMPEG_FAILED for a process the user asked us to stop would be wrong.
+    if (cancelled()) throwCancelled();
+
+    const int exitCode = result.has_value() ? result->exitCode : -1;
+    if (exitCode != 0) {
+        std::string details;
+        {
+            std::lock_guard<std::mutex> lock(progressMutex);
+            details = JoinLines(stderrLines);
+        }
+        throw MediaToolException(ErrorInfo::Make(
+            "E_FFMPEG_FAILED", ErrorCategory::EngineFailure,
+            "ffmpeg could not " + ToLower(operation) + " this file.",
+            "exit code " + std::to_string(exitCode) + "\n" + details));
+    }
+
+    // "ffmpeg exited 0" is not proof of a usable file -- verify before committing.
+    std::error_code tempEc;
+    if (!fs::exists(writer.TemporaryPath(), tempEc) || tempEc) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_OUTPUT_MISSING", ErrorCategory::EngineFailure,
+            "ffmpeg reported success but produced no output file.",
+            "expected at " + writer.TemporaryPath()));
+    }
+    std::error_code sizeEc;
+    if (fs::file_size(writer.TemporaryPath(), sizeEc) == 0 || sizeEc) {
+        throw MediaToolException(ErrorInfo::Make("E_OUTPUT_EMPTY", ErrorCategory::EngineFailure,
+                                                  "ffmpeg produced an empty output file.",
+                                                  writer.TemporaryPath()));
+    }
+    try {
+        Probe(writer.TemporaryPath());
+    } catch (const MediaToolException& e) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_OUTPUT_VERIFICATION_FAILED", ErrorCategory::InvalidFile,
+            "The produced file failed verification and was discarded.", e.Info().details));
+    }
+
+    writer.Commit();
+
+    jobs::Progress done;
+    done.percentage = 100.0;
+    done.statusMessage = operation + " complete";
+    report(done);
+}
+
+void FFmpegEngine::Convert(const std::string& inputPath, const std::string& outputPath,
+                           const nlohmann::json& options, ProgressCallback onProgress,
+                           CancelledCallback isCancelled) {
+    const ConversionRequest request = ConversionRequest::FromJson(options);
+    RunEncode(
+        "Converting", inputPath, outputPath,
+        [&inputPath, &request](const std::string& tempPath, const filesystem::FileInfo&) {
+            return BuildConversionArgs(inputPath, tempPath, request);
+        },
+        std::move(onProgress), std::move(isCancelled));
+}
+
+void FFmpegEngine::Compress(const std::string& inputPath, const std::string& outputPath,
+                            const nlohmann::json& options, ProgressCallback onProgress,
+                            CancelledCallback isCancelled) {
+    const CompressionRequest request = CompressionRequest::FromJson(options);
+    RunEncode(
+        "Compressing", inputPath, outputPath,
+        [&inputPath, &request](const std::string& tempPath, const filesystem::FileInfo& probed) {
+            return BuildCompressionArgs(inputPath, tempPath, request, probed.videoCodec.has_value());
+        },
+        std::move(onProgress), std::move(isCancelled));
+}
+
 void FFmpegEngine::ThrowNotImplemented(const std::string& operation) const {
     throw MediaToolException(ErrorInfo::Make(
         "E_NOT_IMPLEMENTED", ErrorCategory::UnsupportedFormat,
         operation + " is not implemented in Phase 1",
         "FFmpegEngine::" + operation + " is intentionally out of scope for Phase 1 (spec section 16)",
         /*recoverable=*/false));
-}
-
-void FFmpegEngine::Convert(const std::string&, const std::string&, const nlohmann::json&,
-                           ProgressCallback, CancelledCallback) {
-    ThrowNotImplemented("Convert");
-}
-
-void FFmpegEngine::Compress(const std::string&, const std::string&, const nlohmann::json&,
-                            ProgressCallback, CancelledCallback) {
-    ThrowNotImplemented("Compress");
 }
 
 void FFmpegEngine::ExtractAudio(const std::string&, const std::string&, ProgressCallback,
