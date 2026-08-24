@@ -31,8 +31,11 @@
 #include "core/events/EventBus.h"
 #include "core/filesystem/FileInfo.h"
 #include "core/filesystem/LocalFileSystem.h"
+#include "core/filesystem/PathUtils.h"
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
+#include "core/jobs/CompressionJob.h"
+#include "core/jobs/ConversionJob.h"
 #include "core/jobs/DownloadJob.h"
 #include "core/jobs/JobManager.h"
 #include "core/jobs/JobTypes.h"
@@ -40,7 +43,10 @@
 #include "core/jobs/TestJob.h"
 #include "core/logging/Logger.h"
 #include "core/process/IProcessRunner.h"
+#include "core/media/ProcessingOptions.h"
 #include "core/process/RealProcessRunner.h"
+#include "core/queue/QueuePersistence.h"
+#include "core/queue/QueueTypes.h"
 #include "core/settings/JsonFileSettingsStore.h"
 #include "core/settings/Settings.h"
 #include "engines/downloader/YtDlpProvider.h"
@@ -59,8 +65,30 @@ namespace {
 // interleave a partial line.
 std::mutex g_stdoutMutex;
 
+// Monotonic counter stamped on every event line. Assigned INSIDE g_stdoutMutex (see
+// WriteEventLine) rather than where the event is constructed: several threads publish
+// concurrently, so numbering at construction time would hand out increasing numbers that
+// then reach the wire out of order. Numbering at the write point makes the sequence and the
+// byte order on stdout the same ordering, which is the property the frontend's event
+// reconciliation actually relies on (spec section 57).
+std::int64_t g_eventSequence = 0;
+
 void WriteLine(const json& payload) {
     std::lock_guard<std::mutex> lock(g_stdoutMutex);
+    std::cout << payload.dump() << std::endl;
+}
+
+// Reads the counter without consuming a number. Used by getQueueSnapshot to tell the
+// frontend how far the snapshot already accounts for.
+std::int64_t CurrentEventSequence() {
+    std::lock_guard<std::mutex> lock(g_stdoutMutex);
+    return g_eventSequence;
+}
+
+void WriteEventLine(const events::Event& event) {
+    std::lock_guard<std::mutex> lock(g_stdoutMutex);
+    json payload = event.ToJson();
+    payload["seq"] = ++g_eventSequence;
     std::cout << payload.dump() << std::endl;
 }
 
@@ -91,6 +119,148 @@ std::string ResolveDownloaderScript() {
 
 // --- the wired-up application -----------------------------------------------------------
 
+// --- IPC input validation ----------------------------------------------------------------
+// Everything below the IPC boundary treats request params as untrusted (spec section 54).
+// These helpers are the single place a raw JSON value becomes a typed, range-checked value;
+// no handler reads params.at(...) and uses the result directly.
+
+[[noreturn]] void ThrowInvalidParams(const std::string& message, const std::string& details = "") {
+    throw errors::MediaToolException(errors::ErrorInfo::Make(
+        "E_INVALID_PARAMS", errors::ErrorCategory::Unknown, message, details));
+}
+
+std::string RequireString(const json& params, const char* key) {
+    if (!params.contains(key) || !params.at(key).is_string())
+        ThrowInvalidParams(std::string("Missing or non-string parameter: ") + key);
+    return params.at(key).get<std::string>();
+}
+
+std::string RequireJobId(const json& params, const char* key = "jobId") {
+    const std::string id = RequireString(params, key);
+    // Job ids are opaque, but they are also map keys and log tokens: bound the length and
+    // reject control characters rather than passing an arbitrary blob straight through.
+    if (id.empty() || id.size() > 128)
+        ThrowInvalidParams("A job id must be between 1 and 128 characters.");
+    for (unsigned char c : id) {
+        if (c < 0x20 || c == 0x7f) ThrowInvalidParams("A job id must not contain control characters.");
+    }
+    return id;
+}
+
+// Validates a filesystem path that arrived over IPC. This process only ever receives paths
+// the user picked in their own file dialog, so the point is not to sandbox them -- it is to
+// reject the malformed values that would otherwise reach std::filesystem or a child
+// process argv, and to refuse relative ".." traversal outright since nothing legitimate
+// sends it (spec section 54).
+std::string RequirePath(const json& params, const char* key) {
+    const std::string path = RequireString(params, key);
+    if (path.empty()) ThrowInvalidParams(std::string(key) + " must not be empty.");
+    if (path.size() > 4096) ThrowInvalidParams(std::string(key) + " is unreasonably long.");
+    if (path.find('\0') != std::string::npos)
+        ThrowInvalidParams(std::string(key) + " must not contain a null character.");
+    for (const auto& part : stdfs::path(path)) {
+        if (part == "..")
+            ThrowInvalidParams("Paths containing \"..\" are not accepted.", key + std::string("=") + path);
+    }
+    return path;
+}
+
+// --- job construction --------------------------------------------------------------------
+// createJob and restart recovery must build a job the SAME way -- a job restored from the
+// state file has to behave exactly like the one the user originally asked for. So both go
+// through these builders, and the validated params are what get persisted.
+
+struct JobDependencies {
+    downloads::IDownloadProvider& provider;
+    filesystem::IFileSystem& fileSystem;
+    media::IMediaEngine& mediaEngine;
+};
+
+// Shared by createJob{type:DOWNLOAD}, the job factory, and inspectDownloadUrl -- all three
+// take a raw URL from the frontend and must reject it up front (spec section 4) rather than
+// letting an obviously-unsupported string reach a subprocess launch.
+void ValidateDownloadUrlValue(downloads::IDownloadProvider& provider, const std::string& url) {
+    if (url.empty() || !provider.CanHandle(url)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_DOWNLOAD_URL", errors::ErrorCategory::UnsupportedFormat,
+            "This URL is not a supported http/https media URL.", "url=" + url));
+    }
+}
+
+std::unique_ptr<jobs::Job> BuildDownloadJob(JobDependencies deps, const json& params) {
+    jobs::DownloadJob::Options options;
+    options.url = RequireString(params, "url");
+    options.outputDirectory = RequirePath(params, "outputDirectory");
+    ValidateDownloadUrlValue(deps.provider, options.url);
+    if (params.contains("quality")) {
+        try {
+            options.quality =
+                downloads::QualityPresetFromWireString(RequireString(params, "quality"));
+        } catch (const std::invalid_argument& e) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_QUALITY_PRESET", errors::ErrorCategory::UnsupportedFormat, e.what()));
+        }
+    }
+    return std::make_unique<jobs::DownloadJob>(options, deps.provider, deps.fileSystem,
+                                               &deps.mediaEngine);
+}
+
+std::unique_ptr<jobs::Job> BuildConversionJob(JobDependencies deps, const json& params) {
+    jobs::ConversionJob::Options options;
+    options.common.inputPath = RequirePath(params, "inputPath");
+    options.common.outputDirectory = RequirePath(params, "outputDirectory");
+    if (params.contains("outputFilenameBase"))
+        options.common.outputFilenameBase = RequireString(params, "outputFilenameBase");
+    // FromJson does the enum/range checking and throws UnsupportedFormat on anything it
+    // does not recognize -- deliberately no silent fallback to a default format.
+    options.request = media::ConversionRequest::FromJson(params);
+    return std::make_unique<jobs::ConversionJob>(options, deps.mediaEngine, deps.fileSystem);
+}
+
+std::unique_ptr<jobs::Job> BuildCompressionJob(JobDependencies deps, const json& params) {
+    jobs::CompressionJob::Options options;
+    options.common.inputPath = RequirePath(params, "inputPath");
+    options.common.outputDirectory = RequirePath(params, "outputDirectory");
+    if (params.contains("outputFilenameBase"))
+        options.common.outputFilenameBase = RequireString(params, "outputFilenameBase");
+    options.request = media::CompressionRequest::FromJson(params);
+    // Compression keeps the source container by default; the output still needs a concrete
+    // extension before the encode starts.
+    const std::string sourceExtension = filesystem::paths::GetExtension(options.common.inputPath);
+    options.outputExtension = params.contains("outputExtension")
+                                  ? RequireString(params, "outputExtension")
+                                  : (sourceExtension.empty() ? "mp4" : sourceExtension);
+    return std::make_unique<jobs::CompressionJob>(options, deps.mediaEngine, deps.fileSystem);
+}
+
+// The production IJobFactory. Restart recovery hands it a persisted JobSpec and gets back a
+// job wired to the real provider/filesystem/engine -- the same objects createJob uses.
+class RealJobFactory final : public jobs::IJobFactory {
+public:
+    RealJobFactory(downloads::IDownloadProvider& provider, filesystem::IFileSystem& fileSystem,
+                   media::IMediaEngine& mediaEngine)
+        : deps_{provider, fileSystem, mediaEngine} {}
+
+    std::unique_ptr<jobs::Job> Create(const queue::JobSpec& spec) override {
+        switch (spec.type) {
+            case jobs::JobType::Download: return BuildDownloadJob(deps_, spec.params);
+            case jobs::JobType::Conversion: return BuildConversionJob(deps_, spec.params);
+            case jobs::JobType::Compression: return BuildCompressionJob(deps_, spec.params);
+            case jobs::JobType::Test: return std::make_unique<jobs::TestJob>();
+            case jobs::JobType::Batch:
+            case jobs::JobType::Workflow:
+                break;
+        }
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
+            jobs::ToWireString(spec.type) + " jobs are not implemented yet.",
+            "see docs/roadmap.md"));
+    }
+
+private:
+    JobDependencies deps_;
+};
+
 struct AppContext {
     process::RealProcessRunner processRunner;
     events::EventBus eventBus;
@@ -99,6 +269,9 @@ struct AppContext {
     filesystem::LocalFileSystem fileSystem;
     media::FFmpegEngine ffmpegEngine;
     downloader::YtDlpProvider ytDlpProvider;
+    // Declared before jobManager: the manager takes a pointer to it at construction, so it
+    // has to be alive first (and outlive it, which reverse-order destruction gives us).
+    RealJobFactory jobFactory;
     jobs::JobManager jobManager;
 
     // Tracks each job's previous state purely to classify the Running state as either
@@ -106,6 +279,14 @@ struct AppContext {
     // the comment on PublishJobStateChanged below.
     std::mutex previousStateMutex;
     std::unordered_map<jobs::JobId, jobs::JobState> previousState;
+
+    static jobs::JobManager::Options MakeJobManagerOptions(const settings::Settings& settings) {
+        jobs::JobManager::Options options;
+        options.maxConcurrentJobs =
+            static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs));
+        options.stateFilePath = queue::QueuePersistence::DefaultStateFilePath();
+        return options;
+    }
 
     explicit AppContext(const settings::Settings& settings)
         : ffmpegEngine(processRunner,
@@ -122,7 +303,8 @@ struct AppContext {
                                                                       : std::optional<std::string>(
                                                                             settings.advanced.ffmpegPath))
                             .value_or("")),
-          jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs))) {}
+          jobFactory(ytDlpProvider, fileSystem, ffmpegEngine),
+          jobManager(MakeJobManagerOptions(settings), &jobFactory) {}
 };
 
 // --- event publishing from JobManager callbacks -----------------------------------------
@@ -131,6 +313,26 @@ json ProgressAndState(const jobs::Progress& progress, const char* stateWire) {
     json data = progress.ToJson();
     data["state"] = stateWire;
     return data;
+}
+
+// Every event this process publishes gets a monotonic sequence number from the JobManager,
+// so the frontend can drop anything that arrives after a newer event it already applied
+// (spec section 57). Publishing goes through here so no call site can forget.
+void Publish(AppContext& app, events::EventType type, json data,
+             std::optional<std::string> jobId = std::nullopt) {
+    app.eventBus.Publish(events::MakeEvent(type, std::move(data), std::move(jobId)));
+}
+
+json QueueStateData(AppContext& app) {
+    const auto snapshot = app.jobManager.GetQueueSnapshot();
+    return {{"runState", queue::ToWireString(snapshot.runState)},
+            {"maxConcurrency", snapshot.maxConcurrency},
+            {"statistics", snapshot.statistics.ToJson()},
+            {"pendingOrder", snapshot.pendingOrder}};
+}
+
+void PublishQueueChanged(AppContext& app) {
+    Publish(app, events::EventType::QueueChanged, QueueStateData(app));
 }
 
 void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobState state) {
@@ -144,57 +346,87 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
         app.previousState[id] = state;
     }
 
+    // Every job event carries the job's revision alongside its state. Combined with the
+    // event sequence number that gives the frontend two independent ways to reject a stale
+    // update, which matters because progress and state events travel the same channel.
+    json data{{"state", jobs::ToWireString(state)}};
+    std::optional<jobs::JobManager::JobSnapshot> snapshot;
+    try {
+        snapshot = app.jobManager.GetJob(id);
+        data["revision"] = snapshot->revision;
+    } catch (const errors::MediaToolException&) {
+        // The job was cleared from history between the transition and this lookup. The
+        // event is still worth publishing; it just carries no revision.
+    }
+
     switch (state) {
         case JobState::Starting:
-            app.eventBus.Publish(events::MakeEvent(events::EventType::JobStarted,
-                                                    {{"state", "STARTING"}}, id));
+            Publish(app, events::EventType::JobStarted, data, id);
             return;
         case JobState::Running:
             if (previous == JobState::Paused) {
-                app.eventBus.Publish(
-                    events::MakeEvent(events::EventType::JobResumed, {{"state", "RUNNING"}}, id));
+                Publish(app, events::EventType::JobResumed, data, id);
             } else {
-                // Covers the normal Starting->Running step and a Retrying->Running restart --
-                // the wire protocol has no separate "restarted after retry" event.
-                app.eventBus.Publish(
-                    events::MakeEvent(events::EventType::JobStarted, {{"state", "RUNNING"}}, id));
+                // Covers the normal Starting->Running step and a Retrying->Running restart.
+                Publish(app, events::EventType::JobStarted, data, id);
             }
             return;
         case JobState::Paused:
-            app.eventBus.Publish(
-                events::MakeEvent(events::EventType::JobPaused, {{"state", "PAUSED"}}, id));
+            Publish(app, events::EventType::JobPaused, data, id);
             return;
-        case JobState::Completed: {
-            auto snapshot = app.jobManager.GetJob(id);
-            json data{{"state", "COMPLETED"}};
-            if (snapshot.result) data["result"] = *snapshot.result;
-            app.eventBus.Publish(events::MakeEvent(events::EventType::JobCompleted, data, id));
+        case JobState::Completed:
+            if (snapshot && snapshot->result) data["result"] = *snapshot->result;
+            Publish(app, events::EventType::JobCompleted, data, id);
             return;
-        }
-        case JobState::Failed: {
-            auto snapshot = app.jobManager.GetJob(id);
-            json data{{"state", "FAILED"}};
-            if (snapshot.error) data["error"] = snapshot.error->ToJson();
-            app.eventBus.Publish(events::MakeEvent(events::EventType::JobFailed, data, id));
+        case JobState::Failed:
+            if (snapshot && snapshot->error) data["error"] = snapshot->error->ToJson();
+            Publish(app, events::EventType::JobFailed, data, id);
             return;
-        }
         case JobState::Cancelled:
-            app.eventBus.Publish(
-                events::MakeEvent(events::EventType::JobCancelled, {{"state", "CANCELLED"}}, id));
+            Publish(app, events::EventType::JobCancelled, data, id);
+            return;
+        case JobState::Skipped:
+            if (snapshot && snapshot->error) data["error"] = snapshot->error->ToJson();
+            Publish(app, events::EventType::JobSkipped, data, id);
             return;
         case JobState::Queued:
+        case JobState::Waiting:
+            // A job becoming runnable, or becoming blocked again, as its dependencies
+            // resolve. jobQueued carries both -- the payload's `state` distinguishes them.
+            Publish(app, events::EventType::JobQueued, data, id);
+            return;
+        case JobState::RetryWait:
+            // The jobRetryScheduled event (published from the retry callback) carries the
+            // attempt count and delay; this transition on its own would say less.
+            return;
         case JobState::Retrying:
-            // Queued is announced explicitly by the createJob handler (JobManager has no
-            // "transitioned into Queued" callback since a Job starts Queued at
-            // construction); Retrying is a momentary internal state with no wire event of
-            // its own -- the follow-up Retrying->Running transition above covers it.
+            // A momentary internal state with no wire event of its own -- the follow-up
+            // Retrying->Running transition above covers it.
             return;
     }
 }
 
 void PublishJobProgress(AppContext& app, const jobs::JobId& id, const jobs::Progress& progress) {
-    app.eventBus.Publish(
-        events::MakeEvent(events::EventType::JobProgress, ProgressAndState(progress, "RUNNING"), id));
+    // Already throttled by JobManager (spec section 28) -- this is not the place to add a
+    // second, competing rate limit.
+    Publish(app, events::EventType::JobProgress, ProgressAndState(progress, "RUNNING"), id);
+}
+
+void PublishRetryScheduled(AppContext& app, const jobs::JobId& id, int attempt,
+                           std::int64_t delayMs, const std::string& reason) {
+    json data{{"state", "RETRY_WAIT"},
+              {"attempt", attempt},
+              {"delayMs", delayMs},
+              {"reason", reason}};
+    try {
+        const auto snapshot = app.jobManager.GetJob(id);
+        data["revision"] = snapshot.revision;
+        data["maxRetries"] = snapshot.maxRetries;
+        if (snapshot.nextRetryAtMs) data["nextRetryAtMs"] = *snapshot.nextRetryAtMs;
+        if (snapshot.error) data["error"] = snapshot.error->ToJson();
+    } catch (const errors::MediaToolException&) {
+    }
+    Publish(app, events::EventType::JobRetryScheduled, data, id);
 }
 
 // --- command handlers --------------------------------------------------------------------
@@ -257,15 +489,8 @@ json DownloadMetadataToJson(const downloads::DownloadMetadata& metadata) {
     return j;
 }
 
-// Shared by createJob{type:DOWNLOAD} and inspectDownloadUrl -- both take a raw URL from
-// the frontend and must reject it up front (spec section 4) rather than letting an
-// obviously-unsupported string reach a subprocess launch.
 void ValidateDownloadUrl(AppContext& app, const std::string& url) {
-    if (url.empty() || !app.ytDlpProvider.CanHandle(url)) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_DOWNLOAD_URL", errors::ErrorCategory::UnsupportedFormat,
-            "This URL is not a supported http/https media URL.", "url=" + url));
-    }
+    ValidateDownloadUrlValue(app.ytDlpProvider, url);
 }
 
 json HandleInspectDownloadUrl(AppContext& app, const json& params) {
@@ -275,70 +500,130 @@ json HandleInspectDownloadUrl(AppContext& app, const json& params) {
     return {{"metadata", DownloadMetadataToJson(metadata)}};
 }
 
-json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
-    const std::string url = jobParams.at("url").get<std::string>();
-    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
-    ValidateDownloadUrl(app, url);
-    if (outputDirectory.empty()) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
-            "An output directory is required."));
-    }
-
-    // A coarse floor, not a real "will this download fit" check (that needs the file
-    // size, which isn't known until Inspect() runs inside the job) -- catches the
-    // "drive is already essentially full" case up front (spec section 11).
-    constexpr std::uint64_t kMinFreeBytesForDownload = 100ull * 1024 * 1024;
+// A coarse floor, not a real "will this download fit" check (that needs the file size,
+// which isn't known until Inspect() runs inside the job) -- catches the "drive is already
+// essentially full" case up front (spec section 11).
+void RequireSomeFreeSpace(AppContext& app, const std::string& outputDirectory) {
+    constexpr std::uint64_t kMinFreeBytes = 100ull * 1024 * 1024;
     if (auto available = app.fileSystem.GetAvailableDiskSpace(outputDirectory);
-        available && *available < kMinFreeBytesForDownload) {
+        available && *available < kMinFreeBytes) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_INSUFFICIENT_DISK_SPACE", errors::ErrorCategory::DiskSpaceError,
             "Not enough free disk space at the selected output directory.",
             "available=" + std::to_string(*available) + " bytes"));
     }
+}
 
-    downloads::QualityPreset quality = downloads::QualityPreset::Best;
-    if (jobParams.contains("quality")) {
-        try {
-            quality = downloads::QualityPresetFromWireString(jobParams.at("quality").get<std::string>());
-        } catch (const std::invalid_argument& e) {
-            throw errors::MediaToolException(errors::ErrorInfo::Make(
-                "E_INVALID_QUALITY_PRESET", errors::ErrorCategory::Unknown, e.what()));
+// Reads the scheduling options every job type accepts, independent of what the job does.
+jobs::JobManager::SubmitRequest ParseSubmitRequest(AppContext& app, jobs::JobType type,
+                                                   const json& params, const json& jobParams) {
+    jobs::JobManager::SubmitRequest request;
+    request.spec.type = type;
+    request.spec.params = jobParams;
+
+    if (params.contains("priority"))
+        request.priority = queue::JobPriorityFromWireString(RequireString(params, "priority"));
+
+    if (params.contains("dependsOn")) {
+        const auto& dependsOn = params.at("dependsOn");
+        if (!dependsOn.is_array()) ThrowInvalidParams("dependsOn must be an array of job ids.");
+        if (dependsOn.size() > 32) ThrowInvalidParams("A job may declare at most 32 dependencies.");
+        for (const auto& entry : dependsOn) {
+            if (!entry.is_string()) ThrowInvalidParams("dependsOn entries must be strings.");
+            const std::string dependencyId = entry.get<std::string>();
+            // Checked here as well as in the scheduler so the caller gets a message naming
+            // the unknown id rather than a generic insert failure.
+            app.jobManager.GetJob(dependencyId);
+            request.dependencies.push_back(dependencyId);
         }
     }
-
-    jobs::DownloadJob::Options options;
-    options.url = url;
-    options.outputDirectory = outputDirectory;
-    options.quality = quality;
-
-    auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem, &app.ffmpegEngine);
-    const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
-    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
-    return {{"jobId", id}};
+    if (params.contains("parentJobId")) {
+        const std::string parent = RequireJobId(params, "parentJobId");
+        app.jobManager.GetJob(parent);
+        request.parentJobId = parent;
+    }
+    if (params.contains("retryPolicy")) {
+        // FromJson validates and throws on out-of-range values; nothing is clamped silently.
+        request.retryPolicy = queue::RetryPolicy::FromJson(params.at("retryPolicy"));
+    }
+    if (params.contains("allowDuplicate")) {
+        if (!params.at("allowDuplicate").is_boolean())
+            ThrowInvalidParams("allowDuplicate must be a boolean.");
+        request.allowDuplicate = params.at("allowDuplicate").get<bool>();
+    }
+    request.duplicateKey = queue::MakeDuplicateKey(type, jobParams);
+    return request;
 }
 
 json HandleCreateJob(AppContext& app, const json& params) {
-    const std::string typeWire = params.at("type").get<std::string>();
-
-    if (typeWire == "DOWNLOAD") {
-        return HandleCreateDownloadJob(app, params.at("params"));
+    const std::string typeWire = RequireString(params, "type");
+    jobs::JobType type;
+    try {
+        type = jobs::JobTypeFromWireString(typeWire);
+    } catch (const std::invalid_argument&) {
+        ThrowInvalidParams("Unknown job type: " + typeWire);
     }
 
-    if (typeWire != "TEST") {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
-            "Only TEST and DOWNLOAD jobs are implemented so far -- " + typeWire +
-                " is scaffolded (see docs/roadmap.md) but not runnable yet.",
-            "", false));
+    const json jobParams = params.value("params", json::object());
+    if (!jobParams.is_object()) ThrowInvalidParams("params must be an object.");
+
+    const std::string duplicateKey = queue::MakeDuplicateKey(type, jobParams);
+    const bool allowDuplicate =
+        params.contains("allowDuplicate") && params.at("allowDuplicate").is_boolean() &&
+        params.at("allowDuplicate").get<bool>();
+
+    JobDependencies deps{app.ytDlpProvider, app.fileSystem, app.ffmpegEngine};
+    std::unique_ptr<jobs::Job> job;
+    switch (type) {
+        case jobs::JobType::Download:
+            RequireSomeFreeSpace(app, RequirePath(jobParams, "outputDirectory"));
+            job = BuildDownloadJob(deps, jobParams);
+            break;
+        case jobs::JobType::Conversion:
+            RequireSomeFreeSpace(app, RequirePath(jobParams, "outputDirectory"));
+            job = BuildConversionJob(deps, jobParams);
+            break;
+        case jobs::JobType::Compression:
+            RequireSomeFreeSpace(app, RequirePath(jobParams, "outputDirectory"));
+            job = BuildCompressionJob(deps, jobParams);
+            break;
+        case jobs::JobType::Test:
+            job = std::make_unique<jobs::TestJob>();
+            break;
+        case jobs::JobType::Batch:
+        case jobs::JobType::Workflow:
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
+                typeWire + " jobs are scaffolded (see docs/roadmap.md) but not runnable yet.",
+                "", false));
     }
 
-    auto job = std::make_unique<jobs::TestJob>();
+    auto request = ParseSubmitRequest(app, type, params, jobParams);
     const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
-    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
-    return {{"jobId", id}};
+    try {
+        app.jobManager.SubmitJob(std::move(job), request);
+    } catch (const errors::MediaToolException& e) {
+        if (e.Info().code == "E_DUPLICATE_JOB" && !allowDuplicate) {
+            // Policy: reject the duplicate and name the job it collided with, so the UI can
+            // focus the existing one rather than quietly starting a second identical
+            // download (spec section 20).
+            errors::ErrorInfo info = e.Info();
+            info.recoverable = true;
+            throw errors::MediaToolException(info);
+        }
+        throw;
+    }
+
+    json created{{"state", "QUEUED"}, {"type", typeWire}};
+    try {
+        const auto snapshot = app.jobManager.GetJob(id);
+        created["state"] = jobs::ToWireString(snapshot.state);
+        created["revision"] = snapshot.revision;
+    } catch (const errors::MediaToolException&) {
+    }
+    Publish(app, events::EventType::JobCreated, created, id);
+    PublishQueueChanged(app);
+    return {{"jobId", id}, {"duplicateKey", duplicateKey}};
 }
 
 json HandleGetJob(AppContext& app, const json& params) {
@@ -352,23 +637,117 @@ json HandleListJobs(AppContext& app, const json&) {
 }
 
 json HandleCancelJob(AppContext& app, const json& params) {
-    app.jobManager.CancelJob(params.at("jobId").get<std::string>());
+    app.jobManager.CancelJob(RequireJobId(params));
     return json::object();
 }
 
 json HandlePauseJob(AppContext& app, const json& params) {
-    app.jobManager.PauseJob(params.at("jobId").get<std::string>());
+    app.jobManager.PauseJob(RequireJobId(params));
     return json::object();
 }
 
 json HandleResumeJob(AppContext& app, const json& params) {
-    app.jobManager.ResumeJob(params.at("jobId").get<std::string>());
+    app.jobManager.ResumeJob(RequireJobId(params));
     return json::object();
 }
 
 json HandleRetryJob(AppContext& app, const json& params) {
-    app.jobManager.RetryJob(params.at("jobId").get<std::string>());
+    app.jobManager.RetryJob(RequireJobId(params));
     return json::object();
+}
+
+json HandleRemoveJob(AppContext& app, const json& params) {
+    app.jobManager.RemoveJob(RequireJobId(params));
+    return json::object();
+}
+
+// --- queue commands ------------------------------------------------------------------------
+// The complete queue state in one round trip. The frontend calls this on start and on
+// reconnect; incremental events keep it current in between (spec section 29).
+json HandleGetQueueSnapshot(AppContext& app, const json&) {
+    // Sequence read BEFORE the snapshot on purpose. The frontend applies events with
+    // seq > sequence, so this direction can only ever make it re-apply an event the
+    // snapshot already contains -- harmless, since every event assigns state rather than
+    // mutating it incrementally. Reading afterwards could make it skip an event whose
+    // effect had not landed in the snapshot yet, which would leave the two out of step.
+    const std::int64_t sequence = CurrentEventSequence();
+    auto queueJson = app.jobManager.GetQueueSnapshot().ToJson();
+    queueJson["sequence"] = sequence;
+    return {{"queue", queueJson}};
+}
+
+json HandleSetJobPriority(AppContext& app, const json& params) {
+    app.jobManager.SetJobPriority(RequireJobId(params),
+                                  queue::JobPriorityFromWireString(RequireString(params, "priority")));
+    PublishQueueChanged(app);
+    return json::object();
+}
+
+json HandleMoveJob(AppContext& app, const json& params) {
+    app.jobManager.MoveJob(RequireJobId(params),
+                           queue::MoveDirectionFromWireString(RequireString(params, "direction")));
+    PublishQueueChanged(app);
+    return json::object();
+}
+
+json HandlePauseQueue(AppContext& app, const json&) {
+    app.jobManager.PauseQueue();
+    PublishQueueChanged(app);
+    return {{"runState", "PAUSED"}};
+}
+
+json HandleResumeQueue(AppContext& app, const json&) {
+    app.jobManager.ResumeQueue();
+    PublishQueueChanged(app);
+    return {{"runState", "RUNNING"}};
+}
+
+json HandleSetConcurrency(AppContext& app, const json& params) {
+    if (!params.contains("maxConcurrency") || !params.at("maxConcurrency").is_number_integer())
+        ThrowInvalidParams("maxConcurrency must be a whole number.");
+    const std::int64_t requested = params.at("maxConcurrency").get<std::int64_t>();
+    // Bounded rather than trusted: this crosses the IPC boundary, and an absurd value would
+    // mean an absurd number of concurrent ffmpeg processes (spec section 54).
+    if (requested < 1 || requested > 16)
+        ThrowInvalidParams("maxConcurrency must be between 1 and 16.",
+                           "got " + std::to_string(requested));
+
+    app.jobManager.SetMaxConcurrency(static_cast<std::size_t>(requested));
+
+    // Keep the persisted setting in step, so the choice survives a restart the same way the
+    // rest of Settings does.
+    settings::Settings updated = app.settingsStore.Load();
+    updated.processing.concurrentJobs = static_cast<int>(requested);
+    app.settingsStore.Save(updated);
+
+    PublishQueueChanged(app);
+    return {{"maxConcurrency", requested}};
+}
+
+json HandleClearHistory(AppContext& app, const json& params) {
+    const queue::HistoryScope scope =
+        params.contains("scope") ? queue::HistoryScopeFromWireString(RequireString(params, "scope"))
+                                 : queue::HistoryScope::All;
+    // Queue history and media files are separate concerns: this removes queue entries and
+    // never touches a file on disk (spec section 27).
+    const auto removed = app.jobManager.ClearHistory(scope);
+    PublishQueueChanged(app);
+    return {{"removedJobIds", removed}, {"removedCount", removed.size()}};
+}
+
+json HandleRetryFailedJobs(AppContext& app, const json&) {
+    const auto retried = app.jobManager.RetryAllFailed();
+    PublishQueueChanged(app);
+    return {{"retriedJobIds", retried}, {"retriedCount", retried.size()}};
+}
+
+// The closed sets of enum values the frontend is allowed to send, so it can build its
+// pickers from the backend's truth rather than a hand-copied list that can drift.
+json HandleGetProcessingCapabilities(AppContext& app, const json&) {
+    return {{"targetFormats", media::AllTargetFormatWireStrings()},
+            {"compressionPresets", json::array({"LOW", "MEDIUM", "HIGH"})},
+            {"priorities", json::array({"LOW", "NORMAL", "HIGH"})},
+            {"ffmpegAvailable", app.ffmpegEngine.IsAvailable()}};
 }
 
 json HandleInspectFile(AppContext& app, const json& params) {
@@ -408,6 +787,16 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"pauseJob", HandlePauseJob},
         {"resumeJob", HandleResumeJob},
         {"retryJob", HandleRetryJob},
+        {"removeJob", HandleRemoveJob},
+        {"getQueueSnapshot", HandleGetQueueSnapshot},
+        {"setJobPriority", HandleSetJobPriority},
+        {"moveJob", HandleMoveJob},
+        {"pauseQueue", HandlePauseQueue},
+        {"resumeQueue", HandleResumeQueue},
+        {"setConcurrency", HandleSetConcurrency},
+        {"clearHistory", HandleClearHistory},
+        {"retryFailedJobs", HandleRetryFailedJobs},
+        {"getProcessingCapabilities", HandleGetProcessingCapabilities},
         {"inspectFile", HandleInspectFile},
         {"inspectDownloadUrl", HandleInspectDownloadUrl},
         {"getCapabilities", HandleGetCapabilities},
@@ -425,10 +814,27 @@ void RunIpcLoop(AppContext& app) {
         [&app](const jobs::JobId& id, jobs::JobState state) { PublishJobStateChanged(app, id, state); });
     app.jobManager.OnJobProgress(
         [&app](const jobs::JobId& id, const jobs::Progress& progress) { PublishJobProgress(app, id, progress); });
-    app.eventBus.Subscribe([](const events::Event& event) { WriteLine(event.ToJson()); });
+    app.jobManager.OnRetryScheduled([&app](const jobs::JobId& id, int attempt, std::int64_t delayMs,
+                                           const std::string& reason) {
+        PublishRetryScheduled(app, id, attempt, delayMs, reason);
+    });
+    app.jobManager.OnQueueChanged([&app] { PublishQueueChanged(app); });
+    app.eventBus.Subscribe([](const events::Event& event) { WriteEventLine(event); });
     logging::Logger::SetEventSink([&app](events::Event event) { app.eventBus.Publish(event); });
 
     logging::Log::Info("mediatool-core", "IPC loop starting");
+
+    // Restored after the subscribers are attached so the frontend sees the recovery events,
+    // and before the first request is read so a getQueueSnapshot cannot race it.
+    const auto recovery = app.jobManager.RestoreFromDisk();
+    if (recovery.status == queue::LoadOutcome::Status::Recovered) {
+        logging::Log::Warning("mediatool-core",
+                              "queue state could not be read: " + recovery.diagnostic);
+    } else if (recovery.restoredJobs > 0 || recovery.interruptedJobs > 0) {
+        logging::Log::Info("mediatool-core",
+                           "restored " + std::to_string(recovery.restoredJobs) + " queued jobs (" +
+                               std::to_string(recovery.interruptedJobs) + " interrupted)");
+    }
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -466,6 +872,9 @@ void RunIpcLoop(AppContext& app) {
     }
 
     logging::Log::Info("mediatool-core", "stdin closed, shutting down");
+    // Stops the scheduler, waits for in-flight jobs, and writes final queue state. Without
+    // this the last few transitions would only exist in memory.
+    app.jobManager.Shutdown();
 }
 
 // --- self-test --------------------------------------------------------------------------

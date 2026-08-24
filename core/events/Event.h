@@ -25,6 +25,14 @@ enum class EventType {
     JobCompleted,
     JobFailed,
     JobCancelled,
+    // A dependency failed or was cancelled, so this job will never run (Phase 5).
+    JobSkipped,
+    // An automatic retry has been scheduled; data carries attempt/delayMs/reason.
+    JobRetryScheduled,
+    // Queue-level change: pause/resume, concurrency, ordering, or aggregate counts. Carries
+    // the queue's run state, concurrency and statistics so a listener does not have to
+    // round-trip getQueueSnapshot for the common case.
+    QueueChanged,
     FileDetected,
     HardwareDetected,
     DownloadMetadataReceived,
@@ -41,6 +49,11 @@ struct Event {
 
     // Serializes to the exact NDJSON line shape from docs/ipc-contract.md:
     // {"event": "...", "jobId"?: "...", "timestamp": "...", "data": {...}}
+    //
+    // Note the absence of a sequence number here. Ordering is a property of the stdout
+    // channel, not of the event itself, so the `seq` field is stamped by whatever writes
+    // the line -- under the same lock that serializes writes, which is what makes wire
+    // order and sequence order the same thing (see app/core/main.cpp).
     nlohmann::json ToJson() const;
 };
 
