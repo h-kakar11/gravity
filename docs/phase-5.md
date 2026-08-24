@@ -327,7 +327,7 @@ finished.
 ### Format
 
 A single versioned JSON document (`schemaVersion: 1`) at
-`%LOCALAPPDATA%\MediaTool\queue.json`, written through `filesystem::AtomicWriter`.
+`%LOCALAPPDATA%\Gravity\queue.json`, written through `filesystem::AtomicWriter`.
 
 `AtomicWriter` was evaluated for this and is the right tool: it already implements exactly
 the write-temp / rename-over pattern this needs, and its destructor removes the temporary on

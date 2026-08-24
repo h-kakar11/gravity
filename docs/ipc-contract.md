@@ -1,7 +1,7 @@
-# MediaTool IPC & Wire Contract
+# Gravity IPC & Wire Contract
 
 This is the single source of truth for every name, enum value, and JSON shape that
-crosses a process boundary in MediaTool:
+crosses a process boundary in Gravity:
 
 ```
 React/TypeScript  <--Tauri IPC-->  Rust (Tauri shell)  <--stdio NDJSON-->  C++ core (mediatool-core)
@@ -412,7 +412,7 @@ possibility (e.g. don't positionally-index arrays where a keyed object would do)
 ## Durable queue state
 
 Separate from this wire contract, and versioned separately: the queue's own state file at
-`%LOCALAPPDATA%\MediaTool\queue.json` carries `schemaVersion` (currently `1`). Bump it for
+`%LOCALAPPDATA%\Gravity\queue.json` carries `schemaVersion` (currently `1`). Bump it for
 an incompatible on-disk change and add a migration.
 
 The reader is deliberately forgiving in one direction and strict in the other. Missing

@@ -23,6 +23,14 @@ five-screen product (Home, Download, Convert & Compress, Queue, Settings) replac
 Phase 1-5 developer-console look, plus toasts, motion, an accessibility pass, and 18 new
 frontend tests. See `docs/phase-6.md` for the full report.
 
+**Phase 7 — COMPLETED (with real, documented limitations).** Distribution engineering:
+CWD-independent resource resolution, FFmpeg/sidecar bundling *mechanism* (the actual FFmpeg
+and Python+yt-dlp binaries were not sourced/bundled in this session — no Windows machine
+available), NSIS packaging configuration, a real product icon, consistent Gravity branding
+throughout (including the on-disk `%LOCALAPPDATA%\Gravity\` data directory, renamed from
+`MediaTool`), and a single version source of truth. See `docs/phase-7.md` for exactly what
+was and wasn't verified.
+
 Everything below is planned, not built.
 
 ## Downloads (remaining)

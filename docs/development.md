@@ -129,6 +129,24 @@ failed" — anything else is a real regression.
 Do not reach for `SKIP_UNLESS_WINDOWS()` to quiet a test that fails for a
 platform-independent reason.
 
+## Building a release / installer
+
+See `docs/phase-7.md` for the full account, including what was and wasn't verified in this
+project's own (Windows-less) development environment. Summary, on Windows:
+
+```powershell
+cmake --preset windows-mingw-release
+cmake --build --preset windows-mingw-release
+./scripts/prepare-release-resources.ps1     # stages this repo's own build outputs; see
+                                             # app/desktop/src-tauri/resources/README.md
+                                             # for the FFmpeg/Python steps it does NOT do
+cd app/frontend && npm install && npm run build
+cd ../desktop && npm install && npm run build   # tauri build -- produces the NSIS installer
+python3 scripts/check_versions.py               # before tagging a release
+```
+
+Output: `app/desktop/src-tauri/target/release/bundle/nsis/Gravity_<version>_x64-setup.exe`.
+
 ## Why some choices were made
 
 - **GLOB-based CMake source lists** (`file(GLOB_RECURSE ... CONFIGURE_DEPENDS ...)`):
