@@ -3,7 +3,18 @@
 // exported here so the wire format (docs/ipc-contract.md) has exactly one place it can leak.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CoreCommand, CommandParams, CommandResult, CoreEvent, DownloadJobParams } from "../types/ipc";
+import type {
+  CoreCommand,
+  CommandParams,
+  CommandResult,
+  CoreEvent,
+  CompressionJobParams,
+  ConversionJobParams,
+  CreateJobScheduling,
+  DownloadJobParams,
+} from "../types/ipc";
+import type { JobPriority } from "../types/job";
+import type { HistoryScope, MoveDirection } from "../types/queue";
 import type { ErrorInfo } from "../types/error";
 
 function isErrorInfo(value: unknown): value is ErrorInfo {
@@ -106,9 +117,56 @@ export const resumeJob = (jobId: string) => sendCommand("resumeJob", { jobId });
 export const retryJob = (jobId: string) => sendCommand("retryJob", { jobId });
 export const inspectFile = (path: string) => sendCommand("inspectFile", { path });
 export const inspectDownloadUrl = (url: string) => sendCommand("inspectDownloadUrl", { url });
-export const createDownloadJob = (params: DownloadJobParams) =>
-  sendCommand("createJob", { type: "DOWNLOAD", params: params as unknown as Record<string, unknown> });
+export const createDownloadJob = (
+  params: DownloadJobParams,
+  scheduling: CreateJobScheduling = {},
+) =>
+  sendCommand("createJob", {
+    type: "DOWNLOAD",
+    params: params as unknown as Record<string, unknown>,
+    ...scheduling,
+  });
+export const removeJob = (jobId: string) => sendCommand("removeJob", { jobId });
 export const getCapabilities = (path: string) => sendCommand("getCapabilities", { path });
+
+// --- queue commands ------------------------------------------------------------------------
+// The whole queue in one round trip. Called on mount and on reconnect; incremental events
+// keep it current in between (docs/ipc-contract.md "getQueueSnapshot").
+export const getQueueSnapshot = () => sendCommand("getQueueSnapshot", {});
+export const setJobPriority = (jobId: string, priority: JobPriority) =>
+  sendCommand("setJobPriority", { jobId, priority });
+export const moveJob = (jobId: string, direction: MoveDirection) =>
+  sendCommand("moveJob", { jobId, direction });
+export const pauseQueue = () => sendCommand("pauseQueue", {});
+export const resumeQueue = () => sendCommand("resumeQueue", {});
+export const setConcurrency = (maxConcurrency: number) =>
+  sendCommand("setConcurrency", { maxConcurrency });
+export const clearHistory = (scope: HistoryScope) => sendCommand("clearHistory", { scope });
+export const retryFailedJobs = () => sendCommand("retryFailedJobs", {});
+export const getProcessingCapabilities = () => sendCommand("getProcessingCapabilities", {});
+
+// --- typed job creation ----------------------------------------------------------------------
+// One helper per job type so no caller has to remember which params belong to which type.
+// `scheduling` carries the options every type shares (priority, dependsOn, ...).
+export const createConversionJob = (
+  params: ConversionJobParams,
+  scheduling: CreateJobScheduling = {},
+) =>
+  sendCommand("createJob", {
+    type: "CONVERSION",
+    params: params as unknown as Record<string, unknown>,
+    ...scheduling,
+  });
+
+export const createCompressionJob = (
+  params: CompressionJobParams,
+  scheduling: CreateJobScheduling = {},
+) =>
+  sendCommand("createJob", {
+    type: "COMPRESSION",
+    params: params as unknown as Record<string, unknown>,
+    ...scheduling,
+  });
 export const getSettings = () => sendCommand("getSettings", {});
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
 

@@ -2,7 +2,8 @@
 // allowed to construct these request/event shapes by hand -- everything else in the
 // frontend calls its typed methods instead of touching the wire format directly.
 
-import type { JobSnapshot, JobType } from "./job";
+import type { JobPriority, JobSnapshot, JobState, JobType } from "./job";
+import type { HistoryScope, MoveDirection, QueueRunState, QueueSnapshot } from "./queue";
 import type { FileInfo } from "./fileInfo";
 import type { HardwareInfo } from "./hardware";
 import type { Settings } from "./settings";
@@ -18,6 +19,16 @@ export type CoreCommand =
   | "pauseJob"
   | "resumeJob"
   | "retryJob"
+  | "removeJob"
+  | "getQueueSnapshot"
+  | "setJobPriority"
+  | "moveJob"
+  | "pauseQueue"
+  | "resumeQueue"
+  | "setConcurrency"
+  | "clearHistory"
+  | "retryFailedJobs"
+  | "getProcessingCapabilities"
   | "inspectFile"
   | "inspectDownloadUrl"
   | "getCapabilities"
@@ -34,15 +45,76 @@ export interface DownloadJobParams {
   quality?: QualityPreset;
 }
 
+// The closed set of containers a conversion can target. Kept in sync with
+// core/media/ProcessingOptions.h; getProcessingCapabilities returns the backend's own copy
+// so a picker can be built from truth rather than from this list.
+export type TargetFormat =
+  | "MP4"
+  | "MKV"
+  | "WEBM"
+  | "MOV"
+  | "GIF"
+  | "MP3"
+  | "WAV"
+  | "M4A"
+  | "FLAC"
+  | "OPUS";
+
+export type CompressionPreset = "LOW" | "MEDIUM" | "HIGH";
+
+export interface ConversionJobParams {
+  inputPath: string;
+  outputDirectory: string;
+  targetFormat: TargetFormat;
+  outputFilenameBase?: string;
+  audioBitrateKbps?: number;
+  gifFps?: number;
+  maxHeight?: number;
+}
+
+export interface CompressionJobParams {
+  inputPath: string;
+  outputDirectory: string;
+  preset?: CompressionPreset;
+  outputFilenameBase?: string;
+  outputExtension?: string;
+  maxHeight?: number;
+  audioBitrateKbps?: number;
+}
+
+// Scheduling options every createJob call accepts, independent of job type.
+export interface CreateJobScheduling {
+  priority?: JobPriority;
+  dependsOn?: string[];
+  parentJobId?: string;
+  allowDuplicate?: boolean;
+  retryPolicy?: {
+    maxRetries?: number;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+    multiplier?: number;
+  };
+}
+
 // Params for each command, keyed by command name.
 export interface CommandParams {
-  createJob: { type: JobType; params: Record<string, unknown> };
+  createJob: { type: JobType; params: Record<string, unknown> } & CreateJobScheduling;
   getJob: { jobId: string };
   listJobs: Record<string, never>;
   cancelJob: { jobId: string };
   pauseJob: { jobId: string };
   resumeJob: { jobId: string };
   retryJob: { jobId: string };
+  removeJob: { jobId: string };
+  getQueueSnapshot: Record<string, never>;
+  setJobPriority: { jobId: string; priority: JobPriority };
+  moveJob: { jobId: string; direction: MoveDirection };
+  pauseQueue: Record<string, never>;
+  resumeQueue: Record<string, never>;
+  setConcurrency: { maxConcurrency: number };
+  clearHistory: { scope: HistoryScope };
+  retryFailedJobs: Record<string, never>;
+  getProcessingCapabilities: Record<string, never>;
   inspectFile: { path: string };
   inspectDownloadUrl: { url: string };
   getCapabilities: { path: string };
@@ -53,13 +125,28 @@ export interface CommandParams {
 
 // Result for each command, keyed by command name.
 export interface CommandResult {
-  createJob: { jobId: string };
+  createJob: { jobId: string; duplicateKey: string };
   getJob: { job: JobSnapshot };
   listJobs: { jobs: JobSnapshot[] };
   cancelJob: Record<string, never>;
   pauseJob: Record<string, never>;
   resumeJob: Record<string, never>;
   retryJob: Record<string, never>;
+  removeJob: Record<string, never>;
+  getQueueSnapshot: { queue: QueueSnapshot };
+  setJobPriority: Record<string, never>;
+  moveJob: Record<string, never>;
+  pauseQueue: { runState: QueueRunState };
+  resumeQueue: { runState: QueueRunState };
+  setConcurrency: { maxConcurrency: number };
+  clearHistory: { removedJobIds: string[]; removedCount: number };
+  retryFailedJobs: { retriedJobIds: string[]; retriedCount: number };
+  getProcessingCapabilities: {
+    targetFormats: TargetFormat[];
+    compressionPresets: CompressionPreset[];
+    priorities: JobPriority[];
+    ffmpegAvailable: boolean;
+  };
   inspectFile: { fileInfo: FileInfo };
   inspectDownloadUrl: { metadata: DownloadMetadata };
   getCapabilities: { capabilities: string[] };
@@ -91,23 +178,47 @@ export type CoreEventName =
   | "jobCompleted"
   | "jobFailed"
   | "jobCancelled"
+  | "jobSkipped"
+  | "jobRetryScheduled"
+  | "queueChanged"
   | "fileDetected"
   | "hardwareDetected"
   | "downloadMetadataReceived"
   | "logEvent";
 
-// Data payload per event name. Job lifecycle events always carry at least `{state}`;
-// jobProgress additionally carries the full Progress object.
+// Fields every job lifecycle event carries. `revision` is the job's own monotonic counter;
+// combined with the envelope's `seq` it gives two independent ways to reject a stale update.
+interface JobEventBase {
+  state: JobState;
+  revision?: number;
+}
+
+// Data payload per event name.
 export interface CoreEventData {
-  jobCreated: { state: "QUEUED" };
-  jobQueued: { state: "QUEUED" };
-  jobStarted: { state: "STARTING" | "RUNNING" };
+  jobCreated: JobEventBase & { type?: JobType };
+  jobQueued: JobEventBase;
+  jobStarted: JobEventBase;
   jobProgress: { state: "RUNNING" } & Progress;
-  jobPaused: { state: "PAUSED" };
-  jobResumed: { state: "RUNNING" };
-  jobCompleted: { state: "COMPLETED"; result?: Record<string, unknown> };
-  jobFailed: { state: "FAILED"; error: ErrorInfo };
-  jobCancelled: { state: "CANCELLED" };
+  jobPaused: JobEventBase;
+  jobResumed: JobEventBase;
+  jobCompleted: JobEventBase & { result?: Record<string, unknown> };
+  jobFailed: JobEventBase & { error: ErrorInfo };
+  jobCancelled: JobEventBase;
+  jobSkipped: JobEventBase & { error?: ErrorInfo };
+  jobRetryScheduled: JobEventBase & {
+    attempt: number;
+    delayMs: number;
+    reason: string;
+    maxRetries?: number;
+    nextRetryAtMs?: number;
+    error?: ErrorInfo;
+  };
+  queueChanged: {
+    runState: QueueRunState;
+    maxConcurrency: number;
+    statistics: import("./queue").QueueStatistics;
+    pendingOrder: string[];
+  };
   fileDetected: { fileInfo: FileInfo };
   hardwareDetected: { hardwareInfo: HardwareInfo };
   downloadMetadataReceived: {
@@ -125,5 +236,23 @@ export interface CoreEvent<E extends CoreEventName = CoreEventName> {
   event: E;
   jobId?: string;
   timestamp: string;
+  // Monotonic per core process, stamped as the line is written, so sequence order and
+  // arrival order are the same thing (spec section 57).
+  seq: number;
   data: CoreEventData[E];
 }
+
+// Every event whose payload describes one specific job's lifecycle.
+export const JOB_LIFECYCLE_EVENTS: ReadonlySet<CoreEventName> = new Set<CoreEventName>([
+  "jobCreated",
+  "jobQueued",
+  "jobStarted",
+  "jobProgress",
+  "jobPaused",
+  "jobResumed",
+  "jobCompleted",
+  "jobFailed",
+  "jobCancelled",
+  "jobSkipped",
+  "jobRetryScheduled",
+]);
