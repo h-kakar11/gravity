@@ -1005,6 +1005,41 @@ TEST_F(JobManagerQueueTest, InterruptedJobsComeBackAsRetryableFailures) {
     ExpectConsistent(manager);
 }
 
+TEST_F(JobManagerQueueTest, RestoreSweepsAStaleProcessingArtifactLeftByACrash) {
+    // A real crash (SIGKILL, power loss -- not a graceful shutdown, which already cleans up
+    // via AtomicWriter's own destructor) never runs that destructor, so a CONVERSION/
+    // COMPRESSION job that was actively writing can leave "<name>.processing.<ext>" sitting
+    // in its output directory forever if the job is never retried. RestoreFromDisk() must
+    // sweep it on the very next startup, not only when the same job happens to be retried.
+    const stdfs::path outputDir = tempDir_ / "out";
+    stdfs::create_directories(outputDir);
+    const stdfs::path stale = outputDir / "crashvictim.processing.mp4";
+    { std::ofstream(stale) << "partial bytes from the crashed attempt"; }
+    const stdfs::path unrelated = outputDir / "someone-elses-file.mp4";
+    { std::ofstream(unrelated) << "a real, unrelated file that must survive"; }
+
+    ScriptedJobFactory factory;
+    const JobId id = "job-crashed-compression";
+    {
+        mediatool::queue::PersistedQueue persisted;
+        mediatool::queue::JobRecord record;
+        record.id = id;
+        record.spec.type = JobType::Compression;
+        record.spec.params = {{"behaviour", "succeed"}, {"outputDirectory", outputDir.string()}};
+        record.state = JobState::Running;  // as if the process died mid-write
+        record.sequence = 1;
+        persisted.records.push_back(record);
+        mediatool::queue::QueuePersistence(StatePath()).Save(persisted);
+    }
+
+    JobManager manager(MakeOptions(1, StatePath()), &factory, clock_);
+    manager.RestoreFromDisk();
+
+    EXPECT_FALSE(stdfs::exists(stale)) << "the stale .processing scratch file must be swept";
+    EXPECT_TRUE(stdfs::exists(unrelated)) << "a real file that merely shares the directory "
+                                              "must never be touched by the sweep";
+}
+
 TEST_F(JobManagerQueueTest, DependenciesAndOrderingSurviveARestart) {
     ScriptedJobFactory factory;
     JobId parent;

@@ -84,6 +84,21 @@ def main():
         out_dir = params["outputDir"]
         os.makedirs(out_dir, exist_ok=True)
         output = os.path.join(out_dir, params["filenameBase"] + ".mp4")
+
+        if os.environ.get("FAKE_DL_HANG"):
+            # Simulate a real in-progress download: yt-dlp's own partial artifact on
+            # disk, then hang until the parent terminates/kills us -- exactly what a
+            # real cancellation mid-download looks like (spec section 27/50).
+            partial = os.path.join(out_dir, params["filenameBase"] + ".mp4.part")
+            with open(partial, "wb") as f:
+                f.write(b"partial bytes, not a real container")
+            emit("progress", {"percentage": 10.0, "processedBytes": 1000,
+                              "totalBytes": 10000, "speedBytesPerSecond": 5000.0,
+                              "etaSeconds": 5.0, "statusMessage": "Downloading"})
+            import time
+            time.sleep(300)
+            return 0
+
         # A real, probeable file -- DownloadJob verifies its output with ffprobe, so
         # writing junk bytes here would fail verification and prove nothing.
         os.system(

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <utility>
 
 #include "core/errors/MediaToolException.h"
@@ -19,6 +20,37 @@ constexpr const char* kLogSubsystem = "JobManager";
 // a polling interval -- every state change wakes the scheduler explicitly -- just a
 // backstop so a missed notification degrades into a small delay rather than a wedged queue.
 constexpr std::int64_t kSchedulerIdleTimeoutMs = 1'000;
+
+// A CONVERSION/COMPRESSION job that was actively writing when the app was killed
+// abruptly (crash, power loss, force-kill -- not a graceful shutdown, which already
+// cleans up via MediaProcessingJob's own AtomicWriter destructor) can leave a
+// "<name>.processing.<ext>" scratch file behind: nothing ever ran that destructor.
+// ".processing." is a marker AtomicWriter alone writes (see core/filesystem/AtomicWriter.h)
+// -- never something a real media file or a job's *final* output is named -- so any file
+// matching it in a directory we know an interrupted job was writing into is provably ours
+// to remove. Best-effort: a sweep failure must never block startup.
+void SweepStaleProcessingArtifacts(const std::string& directory) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (directory.empty() || !fs::is_directory(directory, ec)) return;
+    for (const auto& entry : fs::directory_iterator(directory, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        if (entry.path().filename().string().find(".processing.") == std::string::npos) continue;
+        std::error_code removeEc;
+        fs::remove(entry.path(), removeEc);
+        if (removeEc) {
+            logging::Log::Warning(
+                kLogSubsystem,
+                "could not remove stale processing artifact: " + entry.path().string());
+        } else {
+            logging::Log::Warning(kLogSubsystem,
+                                   "removed stale processing artifact left by an "
+                                   "unexpected shutdown: " +
+                                       entry.path().string());
+        }
+    }
+}
 
 }  // namespace
 
@@ -1024,8 +1056,17 @@ JobManager::RecoveryReport JobManager::RestoreFromDisk() {
     std::vector<queue::JobRecord> records = outcome.queue.records;
     const auto interrupted = queue::ApplyRestartRecovery(records);
     report.interruptedJobs = static_cast<int>(interrupted.size());
-    for (const auto& id : interrupted)
+    for (const auto& id : interrupted) {
         logging::Log::Warning(kLogSubsystem, "job " + id + " was interrupted by a shutdown");
+        const auto it = std::find_if(records.begin(), records.end(),
+                                     [&id](const queue::JobRecord& r) { return r.id == id; });
+        if (it == records.end()) continue;
+        if (it->spec.type != JobType::Conversion && it->spec.type != JobType::Compression) continue;
+        const auto& params = it->spec.params;
+        if (params.contains("outputDirectory") && params["outputDirectory"].is_string()) {
+            SweepStaleProcessingArtifacts(params["outputDirectory"].get<std::string>());
+        }
+    }
 
     // Records are restored in the persisted pending order first so dependencies and queue
     // positions land the way they were saved; SchedulerCore::Insert rejects a dependency it

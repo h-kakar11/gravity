@@ -293,6 +293,35 @@ def main():
           f"{by_id[src]['completedAt']} -> {by_id[conv]['startedAt']}")
     c4.close()
 
+    print("\n=== 7. Cancellation of a real running download leaves no partial file ===")
+    # Real Terminate()/Kill() escalation against a real child process (spec section 27),
+    # mirroring the FFmpeg cancellation coverage in queue_ffmpeg_e2e.py -- the download
+    # path has its own CleanupArtifacts() and deserves the same real-subprocess proof,
+    # not just the mocked DownloadJobTest coverage.
+    before = set(os.listdir(out))
+    c5 = Core(FAKE_DL_HANG="1")
+    cancel_id = c5.ok("createJob", {"type": "DOWNLOAD", "params": {
+        "url": "https://example.com/watch?v=tocancel", "outputDirectory": out,
+        "quality": "BEST"}})["jobId"]
+    deadline = time.time() + 30
+    st = None
+    while time.time() < deadline:
+        st = c5.job(cancel_id)["state"]
+        if st == "RUNNING":
+            break
+        time.sleep(0.05)
+    check("job reached RUNNING before cancel", st == "RUNNING", str(st))
+    # Give the fake downloader a moment to actually write its .part artifact before
+    # cancelling, so the cleanup this test verifies has something real to clean up.
+    time.sleep(0.3)
+    c5.ok("cancelJob", {"jobId": cancel_id})
+    by_id = c5.wait_terminal([cancel_id])
+    check("cancelled download ends CANCELLED", by_id[cancel_id]["state"] == "CANCELLED",
+          by_id[cancel_id]["state"])
+    leftover = set(os.listdir(out)) - before
+    check("cancellation left no new file behind", leftover == set(), str(leftover))
+    c5.close()
+
     print(f"\n{'=' * 60}")
     print(f"PASSED {len(PASS)} / {len(PASS) + len(FAIL)}")
     for name in FAIL:

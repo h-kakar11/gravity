@@ -7,6 +7,7 @@ disk. Verifies the Phase 5 queue behaviours end to end.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -427,7 +428,58 @@ def main():
           by_id[still]["state"])
     c3.close()
 
-    print("\n=== 15. Version info (About panel) ===")
+    print("\n=== 15. A real crash mid-processing recovers cleanly, no leaked files ===")
+    # Unlike graceful cancellation/shutdown (sections 7 and 13, which already clean up via
+    # AtomicWriter's own destructor), SIGKILL never runs that destructor. This proves the
+    # real recovery path: the interrupted job comes back FAILED with a real explanation, and
+    # the stale "<name>.processing.<ext>" scratch file the crash left behind is swept on the
+    # very next startup -- not only if that specific job happens to be retried.
+    c5 = Core("before-crash")
+    c5.ok("setConcurrency", {"maxConcurrency": 1})
+    crash_id = c5.ok("createJob", {"type": "COMPRESSION", "params": {
+        "inputPath": long_clip, "outputDirectory": out,
+        "preset": "HIGH", "outputFilenameBase": "crashvictim"}})["jobId"]
+    deadline = time.time() + 60
+    st = None
+    while time.time() < deadline:
+        st = c5.ok("getJob", {"jobId": crash_id})["job"]["state"]
+        if st == "RUNNING":
+            break
+        time.sleep(0.05)
+    check("crash-test job reached RUNNING", st == "RUNNING", str(st))
+    time.sleep(1.0)  # let ffmpeg actually write real bytes to the .processing file
+    partial = [f for f in os.listdir(out) if f.startswith("crashvictim")]
+    check("a real .processing scratch file exists before the crash",
+          any(".processing." in f for f in partial), str(partial))
+    core_pid = c5.proc.pid
+    os.kill(core_pid, signal.SIGKILL)
+    c5.proc.wait(timeout=10)
+    # A real crash orphans the ffmpeg child too (nothing runs the normal Terminate/Kill
+    # escalation) -- clean it up so it can't race the restart's own sweep below.
+    subprocess.run(["pkill", "-9", "-f", "ffmpeg.*crashvictim"], stderr=subprocess.DEVNULL)
+    time.sleep(0.3)
+
+    c6 = Core("after-crash")
+    snap = c6.ok("getQueueSnapshot")["queue"]
+    by_id = {j["id"]: j for j in snap["jobs"]}
+    check("the crashed job recovered to FAILED, not COMPLETED or stuck RUNNING",
+          by_id.get(crash_id, {}).get("state") == "FAILED",
+          str(by_id.get(crash_id, {}).get("state")))
+    check("recovery explains why, for the detail panel",
+          "interrupted" in by_id.get(crash_id, {}).get("retryReason", "").lower(),
+          by_id.get(crash_id, {}).get("retryReason"))
+    leftover = [f for f in os.listdir(out) if f.startswith("crashvictim")]
+    check("the stale .processing file was swept on restart, before any retry",
+          leftover == [], str(leftover))
+    after_crash_id = c6.ok("createJob", {"type": "CONVERSION", "params": {
+        "inputPath": sources[0], "outputDirectory": out,
+        "targetFormat": "MKV", "outputFilenameBase": "afterCrash"}})["jobId"]
+    by_id = c6.wait_states([after_crash_id])
+    check("the queue is still fully usable after a real crash",
+          by_id[after_crash_id]["state"] == "COMPLETED", by_id[after_crash_id]["state"])
+    c6.close()
+
+    print("\n=== 16. Version info (About panel) ===")
     c4 = Core("version-check")
     info = c4.ok("getVersionInfo")["versionInfo"]
     check("gravityVersion is present", bool(info.get("gravityVersion")), str(info))
