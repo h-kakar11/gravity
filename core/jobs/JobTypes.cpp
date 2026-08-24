@@ -29,12 +29,15 @@ JobType JobTypeFromWireString(const std::string& wire) {
 std::string ToWireString(JobState state) {
     switch (state) {
         case JobState::Queued: return "QUEUED";
+        case JobState::Waiting: return "WAITING";
         case JobState::Starting: return "STARTING";
         case JobState::Running: return "RUNNING";
         case JobState::Paused: return "PAUSED";
+        case JobState::RetryWait: return "RETRY_WAIT";
         case JobState::Completed: return "COMPLETED";
         case JobState::Failed: return "FAILED";
         case JobState::Cancelled: return "CANCELLED";
+        case JobState::Skipped: return "SKIPPED";
         case JobState::Retrying: return "RETRYING";
     }
     throw std::invalid_argument("Unrecognized JobState enum value");
@@ -42,12 +45,15 @@ std::string ToWireString(JobState state) {
 
 JobState JobStateFromWireString(const std::string& wire) {
     if (wire == "QUEUED") return JobState::Queued;
+    if (wire == "WAITING") return JobState::Waiting;
     if (wire == "STARTING") return JobState::Starting;
     if (wire == "RUNNING") return JobState::Running;
     if (wire == "PAUSED") return JobState::Paused;
+    if (wire == "RETRY_WAIT") return JobState::RetryWait;
     if (wire == "COMPLETED") return JobState::Completed;
     if (wire == "FAILED") return JobState::Failed;
     if (wire == "CANCELLED") return JobState::Cancelled;
+    if (wire == "SKIPPED") return JobState::Skipped;
     if (wire == "RETRYING") return JobState::Retrying;
     throw std::invalid_argument("Unrecognized JobState wire string: " + wire);
 }
@@ -55,14 +61,36 @@ JobState JobStateFromWireString(const std::string& wire) {
 bool IsActiveState(JobState state) {
     switch (state) {
         case JobState::Queued:
+        case JobState::Waiting:
         case JobState::Starting:
         case JobState::Running:
         case JobState::Paused:
+        case JobState::RetryWait:
         case JobState::Retrying:
             return true;
         case JobState::Completed:
         case JobState::Failed:
         case JobState::Cancelled:
+        case JobState::Skipped:
+            return false;
+    }
+    return false;
+}
+
+bool IsExecutingState(JobState state) {
+    switch (state) {
+        case JobState::Starting:
+        case JobState::Running:
+        case JobState::Paused:
+        case JobState::Retrying:
+            return true;
+        case JobState::Queued:
+        case JobState::Waiting:
+        case JobState::RetryWait:
+        case JobState::Completed:
+        case JobState::Failed:
+        case JobState::Cancelled:
+        case JobState::Skipped:
             return false;
     }
     return false;
@@ -73,6 +101,7 @@ bool IsTerminalState(JobState state) {
         case JobState::Completed:
         case JobState::Failed:
         case JobState::Cancelled:
+        case JobState::Skipped:
             return true;
         default:
             return false;

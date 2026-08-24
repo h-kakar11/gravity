@@ -21,6 +21,21 @@ Job::Job(JobType type, common::IClock& clock)
     createdAt_ = clock_.NowIso8601Utc();
 }
 
+void Job::AdoptRestoredId(const JobId& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (id.empty()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_JOB_ID", errors::ErrorCategory::Unknown, "A restored job id must not be empty."));
+    }
+    if (state_ != JobState::Queued || startedAt_.has_value()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_JOB_INVALID_OPERATION", errors::ErrorCategory::Unknown,
+            "A job's id can only be adopted before it has run.",
+            "job " + id_ + " is " + ToWireString(state_)));
+    }
+    id_ = id;
+}
+
 JobState Job::State() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return state_;
@@ -136,9 +151,13 @@ void Job::RequestCancel() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (IsTerminalState(state_)) return;  // already done, nothing to do
         cancellationRequested_ = true;
-        if (state_ == JobState::Queued) {
-            // No worker thread will ever run Execute() for a still-Queued job, so
-            // nothing else will ever notice the flag -- finalize the transition here.
+        if (state_ == JobState::Queued || state_ == JobState::Waiting ||
+            state_ == JobState::RetryWait) {
+            // None of these states has a worker thread running Execute(), so nothing else
+            // will ever notice the flag -- finalize the transition here. This is also what
+            // makes "cancel during retry backoff" stick: the job reaches Cancelled before
+            // the backoff can elapse, and Cancelled has no outgoing transitions, so the
+            // scheduler can never start the pending attempt (spec section 39, case 4).
             transitionedHere = TransitionLocked(JobState::Cancelled);
             if (transitionedHere) completedAt_ = clock_.NowIso8601Utc();
         }
@@ -255,6 +274,70 @@ void Job::MarkRetrying() {
     }
     if (!transitioned) ThrowInvalidTransition(previous, JobState::Retrying);
     FireStateChanged(JobState::Retrying);
+}
+
+void Job::MarkWaiting() {
+    JobState previous;
+    bool transitioned;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        previous = state_;
+        transitioned = TransitionLocked(JobState::Waiting);
+        if (transitioned) {
+            // Coming back from Skipped: the previous skip reason no longer applies, and
+            // leaving it visible would make a job that is about to run look broken.
+            error_.reset();
+            completedAt_.reset();
+        }
+    }
+    if (!transitioned) ThrowInvalidTransition(previous, JobState::Waiting);
+    FireStateChanged(JobState::Waiting);
+}
+
+void Job::MarkQueued() {
+    JobState previous;
+    bool transitioned;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        previous = state_;
+        transitioned = TransitionLocked(JobState::Queued);
+    }
+    if (!transitioned) ThrowInvalidTransition(previous, JobState::Queued);
+    FireStateChanged(JobState::Queued);
+}
+
+void Job::MarkRetryWait() {
+    JobState previous;
+    bool transitioned;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        previous = state_;
+        transitioned = TransitionLocked(JobState::RetryWait);
+        if (transitioned) {
+            // The failure that earned this retry stays in error_ on purpose -- the UI shows
+            // it as "retrying because <reason>". Only completedAt_ is cleared, since the
+            // job is demonstrably not finished.
+            completedAt_.reset();
+        }
+    }
+    if (!transitioned) ThrowInvalidTransition(previous, JobState::RetryWait);
+    FireStateChanged(JobState::RetryWait);
+}
+
+void Job::MarkSkipped(errors::ErrorInfo reason) {
+    JobState previous;
+    bool transitioned;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        previous = state_;
+        transitioned = TransitionLocked(JobState::Skipped);
+        if (transitioned) {
+            error_ = std::move(reason);
+            completedAt_ = clock_.NowIso8601Utc();
+        }
+    }
+    if (!transitioned) ThrowInvalidTransition(previous, JobState::Skipped);
+    FireStateChanged(JobState::Skipped);
 }
 
 }  // namespace mediatool::jobs

@@ -53,6 +53,16 @@ public:
     const JobId& Id() const { return id_; }
     JobType Type() const { return type_; }
 
+    // Adopts an id that already exists elsewhere -- specifically, the id a job was
+    // persisted under, so that a queue restored from disk after a restart keeps the ids
+    // the user's UI and the state file already refer to. Rebuilding the Job necessarily
+    // generates a fresh id in the constructor; this replaces it before anyone can observe
+    // the new one.
+    //
+    // Only legal on a job that has never run: throws if the job has left Queued or has a
+    // startedAt timestamp. This is not a general-purpose setter.
+    void AdoptRestoredId(const JobId& id);
+
     // --- Thread-safe snapshots -----------------------------------------------------
     JobState State() const;
     Progress GetProgress() const;
@@ -106,8 +116,20 @@ public:
     void MarkCompleted();
     void MarkFailed(errors::ErrorInfo error);
     void MarkCancelled();
-    // Only valid from Failed. Clears the cancellation flag so a fresh run starts clean.
+    // Only valid from Failed or RetryWait. Clears the cancellation flag so a fresh run
+    // starts clean.
     void MarkRetrying();
+
+    // Blocked on an unmet dependency. Valid from Queued or Skipped.
+    void MarkWaiting();
+    // Dependencies are all satisfied; the job may now be scheduled. Valid from Waiting.
+    void MarkQueued();
+    // A transient failure earned an automatic retry. Valid from Failed. `error` is kept
+    // visible so the UI can show *why* a retry is pending.
+    void MarkRetryWait();
+    // A dependency failed or was cancelled, so this job will never run. `reason` is stored
+    // as the job's error so the frontend can explain the skip.
+    void MarkSkipped(errors::ErrorInfo reason);
 
 protected:
     // Replaces the stored progress with `progress` and notifies the progress callback.
@@ -128,7 +150,7 @@ private:
     void FireProgress(const Progress& progress);
     [[noreturn]] void ThrowInvalidTransition(JobState from, JobState to) const;
 
-    const JobId id_;
+    JobId id_;
     const JobType type_;
 
     std::unique_ptr<common::IClock> ownedClock_;
