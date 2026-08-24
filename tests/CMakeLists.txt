@@ -7,6 +7,7 @@ file(GLOB_RECURSE MEDIATOOL_TEST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/core/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/media/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/downloads/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/queue/*.cpp"
 )
 
 add_executable(mediatool_tests ${MEDIATOOL_TEST_SOURCES})
