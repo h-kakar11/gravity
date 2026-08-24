@@ -129,3 +129,42 @@ To keep it "clean and minimal" as you requested:
 1.  **Keep the Home Screen simple.**
 2.  **Add a "Mode" toggle** on the home screen: **[Standard]** vs **[Pro]**.
 3.  The **[Pro]** mode unlocks the "Batch Downloader," "Auto-Rename," and "Advanced Bitrate" options.
+
+
+
+
+
+
+
+
+
+
+### 🛠 The "Power User" Tools
+*   **Batch Renaming:** Automatically rename 100 files at once after conversion.
+*   **Dynamic Resolution Selection:** A dropdown that lists only the available resolutions for a specific link (e.g., 1080p, 1440p, 4K).
+*   **"Ghost" Processing:** Continue the queue in the background even if the app is minimized.
+*   **Chunked Downloading:** Better handling for very large files to prevent crashes/timeout.
+
+### 🎨 Creative/Media Boosters
+*   **Image Batch Conversion:** Convert a whole folder of .PNGs to .WebP in one click.
+*   **Speed Ramping/Slow-Mo:** A simple slider for video files during the "conversion" step.
+*   **Auto-Captioning:** Using a local model to generate .SRT files for downloaded videos.
+*   **Bitrate Optimization:** A "Smart" button that picks the best bitrate for the target file size.
+
+### 🔄 Workflow & Automation
+*   **Watch Folders:** Automatically detect any file dropped into a specific folder and start the process.
+*   **Scheduled Tasks:** "Download this playlist every day at 6:00 PM."
+*   **Hotkeys:** Global shortcuts to "Paste Link" or "Check Status" without clicking.
+*   **Drag-to-Target:** Drag a file directly onto a "Compress" button to skip the menu.
+
+### 🔍 Quality of Life (QoL)
+*   **Session History:** A "Recently Used" section for links and files.
+*   **Copy to Clipboard:** One-click button to copy the local file path after it's done.
+*   **Progress Estimates:** Not just a % bar, but "X mins remaining" and "Current speed (MB/s)."
+*   **Notification System:** Desktop toasts when a job is finished or failed.
+*   **Multi-Profile Save:** Save "Presets" (e.g., a "Gaming" preset that optimizes video for high-motion).
+
+### 🚀 Performance "Flex" (Showcasing your Rust/C++)
+*   **Hardware Acceleration:** A toggle to use NVIDIA/AMD/Intel GPU encoding (NVENC/AMF).
+*   **Parallel Processing:** The ability to process 4-8 images/videos at the exact same time.
+*   **Zero-Copy Transfer:** Using high-speed memory management to move data between the processing engine and the UI.
