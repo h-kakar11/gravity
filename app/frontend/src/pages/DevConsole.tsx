@@ -1,38 +1,48 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+// Diagnostics screen (spec section 4: reachable only from Settings > Developer, not primary
+// navigation). Exercises the IPC pipeline directly -- self-test job, native drag & drop,
+// settings/hardware round trip -- for debugging, not as a product screen.
+//
+// Reads jobs from the same queue store as every other screen (App.tsx's single useQueue()
+// instance) instead of opening its own subscription, so this and the Queue page can never
+// show two different ideas of a job's state.
+
+import { useCallback, useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useJobs } from "../hooks/useJobs";
 import * as coreClient from "../services/coreClient";
 import type { FileInfo } from "../types/fileInfo";
 import type { HardwareInfo } from "../types/hardware";
 import type { Settings } from "../types/settings";
 import type { ErrorInfo } from "../types/error";
-import type { JobState } from "../types/job";
 import { asErrorInfo } from "../utils/errors";
-
-// TODO(spec section 34): replace this plain dev console with the dark-mode, curved-card
-// premium home screen once the IPC pipeline it proves out (spec sections 33, 42) is solid.
-
-const CANCELLABLE_STATES: ReadonlySet<JobState> = new Set(["QUEUED", "STARTING", "RUNNING", "PAUSED"]);
+import { describeError } from "../utils/jobDisplay";
+import type { QueueController } from "../state/useQueue";
+import { AlertTriangleIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
 
 function ErrorBanner({ error }: { error: ErrorInfo | null }) {
   if (!error) return null;
   return (
-    <div style={styles.errorBanner}>
-      <strong>{error.category}</strong> ({error.code}): {error.message}
-      {error.details && error.details !== error.message ? (
-        <div style={styles.errorDetails}>{error.details}</div>
-      ) : null}
+    <div className="gv-banner gv-banner--error" role="alert">
+      <AlertTriangleIcon size={15} />
+      <div className="gv-banner__body">
+        <div className="gv-banner__title">{describeError(error)}</div>
+        {error.details && error.details !== error.message ? (
+          <div className="gv-banner__detail">{error.details}</div>
+        ) : null}
+      </div>
     </div>
   );
 }
 
 function JsonBlock({ value }: { value: unknown }) {
-  return <pre style={styles.jsonBlock}>{JSON.stringify(value, null, 2)}</pre>;
+  return (
+    <pre style={{ margin: 0, fontSize: "0.75rem", overflow: "auto", maxHeight: 280 }}>
+      {JSON.stringify(value, null, 2)}
+    </pre>
+  );
 }
 
-export default function DevConsole() {
-  const { jobs, connectionError, createTestJob, cancelJob } = useJobs();
-
+export default function DevConsole({ queue }: { queue: QueueController }) {
   const [testJobId, setTestJobId] = useState<string | null>(null);
   const [selfTestBusy, setSelfTestBusy] = useState(false);
   const [selfTestError, setSelfTestError] = useState<ErrorInfo | null>(null);
@@ -47,7 +57,7 @@ export default function DevConsole() {
   const [hardwareInfo, setHardwareInfo] = useState<HardwareInfo | null>(null);
   const [panelError, setPanelError] = useState<ErrorInfo | null>(null);
 
-  const testJob = useMemo(() => jobs.find((j) => j.id === testJobId) ?? null, [jobs, testJobId]);
+  const testJob = testJobId ? queue.state.jobs[testJobId] : undefined;
 
   useEffect(() => {
     coreClient
@@ -78,11 +88,6 @@ export default function DevConsole() {
   }, []);
 
   useEffect(() => {
-    // Tauri v2 native drag & drop: the window's "tauri://drag-drop" event, exposed here via
-    // the webview module's onDragDropEvent. Deliberately NOT the HTML5 DataTransfer API --
-    // only this Tauri-native event carries a real filesystem path for the dropped file.
-    // Requires a matching drag-drop capability entry for this window in the Rust shell's
-    // tauri.conf.json / src-tauri/capabilities/*.json, or the event never fires (see summary).
     let unlisten: (() => void) | undefined;
     let cancelled = false;
 
@@ -117,184 +122,116 @@ export default function DevConsole() {
     setSelfTestBusy(true);
     setSelfTestError(null);
     try {
-      const jobId = await createTestJob();
+      const { jobId } = await coreClient.createJob({ type: "TEST", params: {} });
       setTestJobId(jobId);
     } catch (err) {
       setSelfTestError(asErrorInfo(err));
     } finally {
       setSelfTestBusy(false);
     }
-  }, [createTestJob]);
+  }, []);
 
-  const handleCancelTestJob = useCallback(async () => {
-    if (!testJobId) return;
-    setSelfTestBusy(true);
-    setSelfTestError(null);
-    try {
-      await cancelJob(testJobId);
-    } catch (err) {
-      setSelfTestError(asErrorInfo(err));
-    } finally {
-      setSelfTestBusy(false);
-    }
-  }, [testJobId, cancelJob]);
-
-  const canCancelTestJob = testJob !== null && CANCELLABLE_STATES.has(testJob.state);
+  const canCancelTestJob = testJob !== undefined && queue.jobs.some((j) => j.id === testJob.id) && ["QUEUED", "STARTING", "RUNNING"].includes(testJob.state);
 
   return (
-    <div style={styles.page}>
-      <h1 style={styles.h1}>MediaTool Dev Console</h1>
-      <p style={styles.subtitle}>
-        Phase 1 IPC proving ground -- not the final UI (spec section 34). Exercises the
-        React &lt;-&gt; Rust &lt;-&gt; C++ core pipeline end-to-end (spec sections 33, 42).
+    <div className="gv-enter">
+      <h1 className="gv-h1">Developer console</h1>
+      <p className="gv-subtitle">
+        Raw IPC inspection tools used while building Gravity. Not part of the normal workflow
+        (reached only from Settings).
       </p>
 
-      {connectionError ? (
-        <div style={styles.errorBanner}>
-          <strong>Core process not reachable:</strong> {connectionError}
+      {!queue.state.loaded ? (
+        <div className="gv-banner gv-banner--error" role="alert">
+          <AlertTriangleIcon size={15} />
+          <div className="gv-banner__body">
+            <div className="gv-banner__title">Core process not reachable</div>
+          </div>
         </div>
       ) : (
-        <div style={styles.okBanner}>Core process reachable.</div>
+        <div className="gv-banner gv-banner--success" role="status">
+          Core process reachable.
+        </div>
       )}
 
-      <section style={styles.section}>
-        <h2 style={styles.h2}>Self-Test Job</h2>
-        <div style={styles.row}>
-          <button onClick={() => void runSelfTest()} disabled={selfTestBusy}>
-            Run Self-Test
-          </button>
-          <button onClick={() => void handleCancelTestJob()} disabled={!canCancelTestJob || selfTestBusy}>
+      <section className="gv-card" style={{ marginBottom: "1.25rem" }}>
+        <h2 className="gv-section-title">Self-test job</h2>
+        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+          <Button variant="secondary" size="sm" busy={selfTestBusy} onClick={() => void runSelfTest()}>
+            Run self-test
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={!canCancelTestJob}
+            onClick={() => testJob && void queue.cancelJob(testJob.id)}
+          >
             Cancel
-          </button>
+          </Button>
         </div>
         <ErrorBanner error={selfTestError} />
         {testJob ? (
-          <div style={styles.card}>
+          <div style={{ fontSize: "0.85rem" }}>
             <div>
-              job <code>{testJob.id}</code> -- state <strong>{testJob.state}</strong>
+              job <code>{testJob.id}</code> — state <strong>{testJob.state}</strong>
             </div>
             <div>percentage: {testJob.progress.percentage ?? "n/a"}</div>
             <div>status: {testJob.progress.statusMessage}</div>
             {testJob.error ? <ErrorBanner error={testJob.error} /> : null}
           </div>
         ) : (
-          <p style={styles.muted}>No self-test job started yet.</p>
+          <p className="gv-hint">No self-test job started yet.</p>
         )}
       </section>
 
-      <section style={styles.section}>
-        <h2 style={styles.h2}>Drop a File</h2>
-        <div style={isDragActive ? styles.dropZoneActive : styles.dropZone}>
-          Drag a file from Windows Explorer onto this window.
-          {droppedPath ? <div style={styles.muted}>Last dropped: {droppedPath}</div> : null}
+      <section className="gv-card" style={{ marginBottom: "1.25rem" }}>
+        <h2 className="gv-section-title">Drop a file</h2>
+        <div
+          style={{
+            border: `2px dashed ${isDragActive ? "var(--accent)" : "var(--border-default)"}`,
+            borderRadius: 8,
+            padding: "2rem",
+            textAlign: "center",
+            color: "var(--text-secondary)",
+          }}
+        >
+          Drag a file onto this window.
+          {droppedPath ? <div className="gv-hint">Last dropped: {droppedPath}</div> : null}
         </div>
         <ErrorBanner error={dropError} />
         {droppedFileInfo ? (
-          <div style={styles.row}>
-            <div style={styles.card}>
-              <h3 style={styles.h3}>inspectFile result</h3>
+          <div className="gv-grid-2" style={{ marginTop: "0.75rem" }}>
+            <div>
+              <h3 style={{ fontSize: "0.85rem" }}>inspectFile result</h3>
               <JsonBlock value={droppedFileInfo} />
             </div>
-            <div style={styles.card}>
-              <h3 style={styles.h3}>getCapabilities result</h3>
+            <div>
+              <h3 style={{ fontSize: "0.85rem" }}>getCapabilities result</h3>
               <JsonBlock value={droppedCapabilities} />
             </div>
           </div>
         ) : null}
       </section>
 
-      <section style={styles.section}>
-        <h2 style={styles.h2}>Settings &amp; Hardware</h2>
+      <section className="gv-card" style={{ marginBottom: "1.25rem" }}>
+        <h2 className="gv-section-title">Settings &amp; hardware</h2>
         <ErrorBanner error={panelError} />
-        <div style={styles.row}>
-          <div style={styles.card}>
-            <h3 style={styles.h3}>getSettings</h3>
-            {settings ? <JsonBlock value={settings} /> : <p style={styles.muted}>Loading...</p>}
+        <div className="gv-grid-2">
+          <div>
+            <h3 style={{ fontSize: "0.85rem" }}>getSettings</h3>
+            {settings ? <JsonBlock value={settings} /> : <p className="gv-hint">Loading…</p>}
           </div>
-          <div style={styles.card}>
-            <h3 style={styles.h3}>getHardwareInfo</h3>
-            {hardwareInfo ? <JsonBlock value={hardwareInfo} /> : <p style={styles.muted}>Loading...</p>}
+          <div>
+            <h3 style={{ fontSize: "0.85rem" }}>getHardwareInfo</h3>
+            {hardwareInfo ? <JsonBlock value={hardwareInfo} /> : <p className="gv-hint">Loading…</p>}
           </div>
         </div>
       </section>
 
-      <section style={styles.section}>
-        <h2 style={styles.h2}>All Jobs ({jobs.length})</h2>
-        <JsonBlock value={jobs} />
+      <section className="gv-card">
+        <h2 className="gv-section-title">All jobs ({queue.jobs.length})</h2>
+        <JsonBlock value={queue.jobs} />
       </section>
     </div>
   );
 }
-
-const styles: Record<string, CSSProperties> = {
-  page: {
-    fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif",
-    maxWidth: 960,
-    margin: "0 auto",
-    padding: "1.5rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "1rem",
-  },
-  h1: { fontSize: "1.5rem", margin: 0 },
-  h2: { fontSize: "1.1rem", margin: "0 0 0.5rem 0" },
-  h3: { fontSize: "0.95rem", margin: "0 0 0.5rem 0" },
-  subtitle: { color: "#555", marginTop: 0 },
-  section: {
-    border: "1px solid #ddd",
-    borderRadius: 8,
-    padding: "1rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "0.5rem",
-  },
-  row: { display: "flex", gap: "1rem", flexWrap: "wrap" },
-  card: {
-    flex: "1 1 300px",
-    border: "1px solid #eee",
-    borderRadius: 6,
-    padding: "0.75rem",
-    background: "#fafafa",
-  },
-  jsonBlock: {
-    margin: 0,
-    fontSize: "0.8rem",
-    overflowX: "auto",
-    whiteSpace: "pre",
-    maxHeight: 300,
-    overflowY: "auto",
-  },
-  dropZone: {
-    border: "2px dashed #bbb",
-    borderRadius: 8,
-    padding: "2rem",
-    textAlign: "center",
-    color: "#666",
-  },
-  dropZoneActive: {
-    border: "2px dashed #3b82f6",
-    borderRadius: 8,
-    padding: "2rem",
-    textAlign: "center",
-    color: "#1d4ed8",
-    background: "#eff6ff",
-  },
-  errorBanner: {
-    border: "1px solid #f5c2c7",
-    background: "#f8d7da",
-    color: "#842029",
-    borderRadius: 6,
-    padding: "0.5rem 0.75rem",
-    fontSize: "0.9rem",
-  },
-  errorDetails: { fontSize: "0.8rem", marginTop: "0.25rem", whiteSpace: "pre-wrap" },
-  okBanner: {
-    border: "1px solid #badbcc",
-    background: "#d1e7dd",
-    color: "#0f5132",
-    borderRadius: 6,
-    padding: "0.5rem 0.75rem",
-    fontSize: "0.9rem",
-  },
-  muted: { color: "#888", fontSize: "0.85rem" },
-};

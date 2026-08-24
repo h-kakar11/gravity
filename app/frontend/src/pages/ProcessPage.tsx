@@ -9,24 +9,34 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { styles } from "../components/queueStyles";
 import * as coreClient from "../services/coreClient";
 import type { ErrorInfo } from "../types/error";
 import type { JobPriority } from "../types/job";
 import type { CompressionPreset, TargetFormat } from "../types/ipc";
 import { asErrorInfo } from "../utils/errors";
 import { describeError } from "../utils/jobDisplay";
+import { AlertTriangleIcon, CheckCircleIcon, CompressIcon, ConvertIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
 
 type Mode = "CONVERT" | "COMPRESS" | "CONVERT_THEN_COMPRESS";
 
-const MODES: { id: Mode; label: string; hint: string }[] = [
-  { id: "CONVERT", label: "Convert", hint: "Change the file's format." },
-  { id: "COMPRESS", label: "Compress", hint: "Re-encode smaller, same format." },
+const MODES: { id: Mode; label: string; icon: React.ComponentType<{ size?: number }>; hint: string }[] = [
+  { id: "CONVERT", label: "Convert", icon: ConvertIcon, hint: "Change the file's format." },
+  { id: "COMPRESS", label: "Compress", icon: CompressIcon, hint: "Re-encode smaller, same format." },
   {
     id: "CONVERT_THEN_COMPRESS",
     label: "Convert, then compress",
+    icon: ConvertIcon,
     hint: "Two linked jobs. The second waits for the first and uses its output.",
   },
+];
+
+// Plain-language presets rather than raw FFmpeg terminology (spec section 8). Wire values
+// stay LOW/MEDIUM/HIGH -- only the words shown to the user change.
+const PRESET_OPTIONS: { id: CompressionPreset; label: string; hint: string }[] = [
+  { id: "LOW", label: "Smaller file", hint: "Most compression, some quality loss." },
+  { id: "MEDIUM", label: "Balanced", hint: "A middle ground between size and quality." },
+  { id: "HIGH", label: "High quality", hint: "Largest file, least quality loss." },
 ];
 
 export default function ProcessPage() {
@@ -81,7 +91,7 @@ export default function ProcessPage() {
           { ...common, preset, maxHeight: parsedMaxHeight },
           { priority },
         );
-        setNotice(`Compression queued (${jobId}). Watch it on the Queue tab.`);
+        setNotice(`Compression queued (${jobId}). Watch it on the Queue page.`);
         return;
       }
 
@@ -91,7 +101,7 @@ export default function ProcessPage() {
       );
 
       if (mode === "CONVERT") {
-        setNotice(`Conversion queued (${conversion.jobId}). Watch it on the Queue tab.`);
+        setNotice(`Conversion queued (${conversion.jobId}). Watch it on the Queue page.`);
         return;
       }
 
@@ -125,90 +135,103 @@ export default function ProcessPage() {
   const showPreset = mode !== "CONVERT";
 
   return (
-    <div style={styles.page}>
-      <h1 style={styles.h1}>Convert &amp; Compress</h1>
-      <p style={styles.subtitle}>
-        Local files only. Everything queued here joins the same queue as downloads.
-      </p>
+    <div className="gv-enter">
+      <h1 className="gv-h1">Convert &amp; Compress</h1>
+      <p className="gv-subtitle">Local files only. Everything queued here joins the same queue as downloads.</p>
 
       {ffmpegAvailable === false ? (
-        <div style={styles.errorBanner} role="alert">
-          FFmpeg was not found on this system, so conversion and compression cannot run. Install
-          it, or set its path under Advanced settings.
+        <div className="gv-banner gv-banner--warning" role="alert">
+          <AlertTriangleIcon size={15} />
+          <div className="gv-banner__body">
+            <div className="gv-banner__title">FFmpeg not found</div>
+            <div className="gv-banner__detail">
+              Conversion and compression can't run until FFmpeg is installed, or its path is set
+              in Settings.
+            </div>
+          </div>
         </div>
       ) : null}
 
       {error ? (
-        <div style={styles.errorBanner} role="alert">
-          <strong>{describeError(error)}</strong>
-          {error.details && error.details !== error.message ? (
-            <div style={{ fontSize: "0.78rem", marginTop: "0.25rem" }}>{error.details}</div>
-          ) : null}
+        <div className="gv-banner gv-banner--error" role="alert">
+          <AlertTriangleIcon size={15} />
+          <div className="gv-banner__body">
+            <div className="gv-banner__title">{describeError(error)}</div>
+            {error.details && error.details !== error.message ? (
+              <div className="gv-banner__detail">{error.details}</div>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
       {notice ? (
-        <div
-          style={{ ...styles.errorBanner, borderColor: "#86efac", background: "#f0fdf4", color: "#166534" }}
-          role="status"
-        >
-          {notice}
+        <div className="gv-banner gv-banner--success" role="status">
+          <CheckCircleIcon size={15} />
+          <div className="gv-banner__body">
+            <div className="gv-banner__title">{notice}</div>
+          </div>
         </div>
       ) : null}
 
-      <div style={styles.filterBar} role="tablist" aria-label="Operation">
-        {MODES.map(({ id, label }) => (
+      <div className="gv-tabs" role="tablist" aria-label="Operation">
+        {MODES.map(({ id, label, icon: Glyph, hint }) => (
           <button
             key={id}
             type="button"
             role="tab"
             aria-selected={mode === id}
-            style={mode === id ? styles.filterTabActive : styles.filterTab}
+            className="gv-tab"
+            title={hint}
             onClick={() => setMode(id)}
           >
-            {label}
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+              <Glyph size={14} />
+              {label}
+            </span>
           </button>
         ))}
       </div>
-      <p style={styles.subtitle}>{MODES.find((m) => m.id === mode)?.hint}</p>
+      <p className="gv-subtitle" style={{ marginTop: "-0.5rem" }}>
+        {MODES.find((m) => m.id === mode)?.hint}
+      </p>
 
-      <div style={{ display: "grid", gap: "0.75rem", maxWidth: 640 }}>
-        <div>
-          <label htmlFor="inputPath" style={styles.toolbarLabel}>
+      <div className="gv-panel" style={{ display: "grid", gap: "1rem", maxWidth: 640 }}>
+        <div className="gv-field">
+          <label className="gv-label" htmlFor="inputPath">
             Input file
           </label>
           <input
             id="inputPath"
+            className="gv-input"
             value={inputPath}
             onChange={(e) => setInputPath(e.target.value)}
-            placeholder="C:\Users\you\Videos\clip.mp4"
-            style={{ ...styles.button, width: "100%", cursor: "text" }}
+            placeholder="Choose a local file"
           />
         </div>
 
-        <div>
-          <label htmlFor="outputDirectory" style={styles.toolbarLabel}>
+        <div className="gv-field">
+          <label className="gv-label" htmlFor="outputDirectory">
             Output folder
           </label>
           <input
             id="outputDirectory"
+            className="gv-input"
             value={outputDirectory}
             onChange={(e) => setOutputDirectory(e.target.value)}
-            placeholder="C:\Users\you\Videos\out"
-            style={{ ...styles.button, width: "100%", cursor: "text" }}
+            placeholder="Choose a destination folder"
           />
         </div>
 
         {showFormat ? (
-          <div>
-            <label htmlFor="targetFormat" style={styles.toolbarLabel}>
+          <div className="gv-field">
+            <label className="gv-label" htmlFor="targetFormat">
               Convert to
             </label>
             <select
               id="targetFormat"
+              className="gv-select"
               value={targetFormat}
               onChange={(e) => setTargetFormat(e.target.value as TargetFormat)}
-              style={{ ...styles.button, width: "100%" }}
             >
               {(formats.length > 0 ? formats : [targetFormat]).map((value) => (
                 <option key={value} value={value}>
@@ -220,58 +243,56 @@ export default function ProcessPage() {
         ) : null}
 
         {showPreset ? (
-          <div>
-            <label htmlFor="preset" style={styles.toolbarLabel}>
+          <div className="gv-field">
+            <label className="gv-label" htmlFor="preset">
               Compression quality
             </label>
             <select
               id="preset"
+              className="gv-select"
               value={preset}
               onChange={(e) => setPreset(e.target.value as CompressionPreset)}
-              style={{ ...styles.button, width: "100%" }}
             >
-              <option value="LOW">Low — smallest file</option>
-              <option value="MEDIUM">Medium — balanced</option>
-              <option value="HIGH">High — best quality</option>
+              {PRESET_OPTIONS.map(({ id, label }) => (
+                <option key={id} value={id}>
+                  {label}
+                </option>
+              ))}
             </select>
+            <span className="gv-hint">{PRESET_OPTIONS.find((p) => p.id === preset)?.hint}</span>
           </div>
         ) : null}
 
-        <div>
-          <label htmlFor="maxHeight" style={styles.toolbarLabel}>
+        <div className="gv-field">
+          <label className="gv-label" htmlFor="maxHeight">
             Maximum height in pixels (optional)
           </label>
           <input
             id="maxHeight"
+            className="gv-input"
             value={maxHeight}
             inputMode="numeric"
             onChange={(e) => setMaxHeight(e.target.value)}
             placeholder="e.g. 720 — leave empty to keep the source size"
             aria-invalid={maxHeightInvalid}
             aria-describedby={maxHeightInvalid ? "maxHeightError" : undefined}
-            style={{
-              ...styles.button,
-              width: "100%",
-              cursor: "text",
-              borderColor: maxHeightInvalid ? "#b91c1c" : "#ccc",
-            }}
           />
           {maxHeightInvalid ? (
-            <div id="maxHeightError" style={{ color: "#b91c1c", fontSize: "0.78rem" }}>
+            <span id="maxHeightError" className="gv-hint" style={{ color: "var(--status-failed)" }}>
               Enter a whole number of 16 or more, or leave it empty.
-            </div>
+            </span>
           ) : null}
         </div>
 
-        <div>
-          <label htmlFor="jobPriority" style={styles.toolbarLabel}>
+        <div className="gv-field">
+          <label className="gv-label" htmlFor="jobPriority">
             Priority
           </label>
           <select
             id="jobPriority"
+            className="gv-select"
             value={priority}
             onChange={(e) => setPriority(e.target.value as JobPriority)}
-            style={{ ...styles.button, width: "100%" }}
           >
             <option value="LOW">Low</option>
             <option value="NORMAL">Normal</option>
@@ -280,14 +301,9 @@ export default function ProcessPage() {
         </div>
 
         <div>
-          <button
-            type="button"
-            disabled={!canSubmit}
-            onClick={() => void submit()}
-            style={canSubmit ? styles.buttonPrimary : { ...styles.buttonPrimary, ...styles.buttonDisabled }}
-          >
-            {submitting ? "Queueing…" : "Add to queue"}
-          </button>
+          <Button variant="primary" busy={submitting} disabled={!canSubmit} onClick={() => void submit()}>
+            Add to queue
+          </Button>
         </div>
       </div>
     </div>

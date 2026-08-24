@@ -168,6 +168,8 @@ export const createCompressionJob = (
     ...scheduling,
   });
 export const getSettings = () => sendCommand("getSettings", {});
+export const updateSettings = (settings: Partial<import("../types/settings").Settings>) =>
+  sendCommand("updateSettings", { settings });
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
 
 // Reveals a completed download's output file in Windows Explorer via the Rust
