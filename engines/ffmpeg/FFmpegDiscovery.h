@@ -3,14 +3,19 @@
 // Locates the ffmpeg/ffprobe executables (spec section 16, spec section 42: both the
 // "found" and "not found" paths must be tested without a real binary).
 //
-// Discovery strategy: if an explicit override path is supplied (e.g. pinned via
-// Settings), it is trusted verbatim and returned without touching the process runner.
-// Otherwise the bare command name is resolved by shelling out to the Windows `where`
-// utility through the injected IProcessRunner -- `where <name>` prints the absolute path
-// of the first match on PATH to stdout and exits non-zero when nothing is found. Using
-// `where` (a real executable, not a shell builtin) keeps this a structured-argv process
-// launch like every other invocation in the codebase, and keeps discovery fully
-// testable against a fake IProcessRunner (spec section 37) with no real ffmpeg install.
+// Discovery strategy, in order (Phase 7, "do not assume FFmpeg is installed separately"):
+//   1. An explicit override path (e.g. pinned via Settings) is trusted verbatim and
+//      returned without touching the process runner or the filesystem.
+//   2. A binary bundled next to mediatool-core.exe -- `bin/ffmpeg.exe` or `ffmpeg.exe`
+//      alongside it, the packaged app's own copy, so a normal install needs nothing the
+//      user has to separately obtain (see docs/phase-7.md "Resource discovery").
+//   3. The bare command name resolved by shelling out to the Windows `where` utility
+//      through the injected IProcessRunner -- `where <name>` prints the absolute path of
+//      the first match on PATH to stdout and exits non-zero when nothing is found. Using
+//      `where` (a real executable, not a shell builtin) keeps this a structured-argv
+//      process launch like every other invocation in the codebase, and keeps discovery
+//      fully testable against a fake IProcessRunner (spec section 37) with no real ffmpeg
+//      install. Kept as a fallback so a user who already has FFmpeg on PATH still works.
 //
 // Never throws: any launch failure or "not found" result becomes std::nullopt.
 

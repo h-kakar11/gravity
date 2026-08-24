@@ -30,6 +30,7 @@
 #include "core/errors/MediaToolException.h"
 #include "core/events/Event.h"
 #include "core/events/EventBus.h"
+#include "core/filesystem/ExecutablePath.h"
 #include "core/filesystem/FileInfo.h"
 #include "core/filesystem/LocalFileSystem.h"
 #include "core/filesystem/PathUtils.h"
@@ -94,8 +95,13 @@ void WriteEventLine(const events::Event& event) {
 }
 
 // --- path resolution ---------------------------------------------------------------------
-// Phase 1 dev-convenience resolution, mirroring the same MEDIATOOL_CORE_PATH-style
-// override pattern used on the Rust side (app/desktop/src-tauri) -- see docs/development.md.
+// Env var overrides mirror the same MEDIATOOL_CORE_PATH-style pattern used on the Rust
+// side (app/desktop/src-tauri) -- see docs/development.md. Below the override, defaults
+// resolve relative to this executable's own directory, never the process's current
+// working directory (Phase 7, "no CWD dependency" -- a Start Menu shortcut, a Desktop
+// shortcut, and `npm run tauri dev` all set CWD differently, and a packaged install must
+// work regardless of which one launched it). Falls back to a repo-relative dev path only
+// when the executable directory itself can't be determined at all.
 std::string EnvOr(const char* name, const std::string& fallback) {
     const char* value = std::getenv(name);
     return (value && *value) ? std::string(value) : fallback;
@@ -104,18 +110,44 @@ std::string EnvOr(const char* name, const std::string& fallback) {
 // A literal (non-bare-command) path is passed straight through to CreateProcess on
 // Windows without a PATH search, and CreateProcess does not reliably accept a
 // forward-slash path there the way POSIX-style tools do -- construct through
-// std::filesystem::path and normalize to the native separator so the relative dev-mode
-// default actually resolves instead of failing with "cannot find the file specified".
+// std::filesystem::path and normalize to the native separator so the resolved default
+// actually resolves instead of failing with "cannot find the file specified".
 std::string NativePath(const std::string& value) {
     return stdfs::path(value).make_preferred().string();
 }
 
+// Where a packaged install's bundled resources live. MEDIATOOL_RESOURCE_DIR, when set, is
+// authoritative -- it is how the Rust shell (core_bridge.rs) tells this process exactly
+// where Tauri placed bundle.resources, which is the one place that genuinely knows (it
+// wrote tauri.conf.json). Absent that -- this binary launched directly, e.g. --selftest
+// during development -- falls back to <executable directory>/resources, and finally to
+// the working directory if even the executable's own location can't be determined.
+stdfs::path ResourceDirectory() {
+    if (const char* fromShell = std::getenv("MEDIATOOL_RESOURCE_DIR"); fromShell && *fromShell) {
+        return stdfs::path(fromShell);
+    }
+    if (auto exeDir = filesystem::ExecutableDirectory(); exeDir.has_value()) {
+        return stdfs::path(*exeDir) / "resources";
+    }
+    return stdfs::path(".");
+}
+
 std::string ResolvePythonExecutable() {
-    return NativePath(EnvOr("MEDIATOOL_PYTHON_PATH", "python/downloader/.venv/Scripts/python.exe"));
+    if (const char* override = std::getenv("MEDIATOOL_PYTHON_PATH"); override && *override) {
+        return NativePath(override);
+    }
+#ifdef _WIN32
+    return NativePath((ResourceDirectory() / "python" / "python.exe").string());
+#else
+    return NativePath((ResourceDirectory() / "python" / "bin" / "python3").string());
+#endif
 }
 
 std::string ResolveDownloaderScript() {
-    return NativePath(EnvOr("MEDIATOOL_DOWNLOADER_SCRIPT", "python/downloader/downloader.py"));
+    if (const char* override = std::getenv("MEDIATOOL_DOWNLOADER_SCRIPT"); override && *override) {
+        return NativePath(override);
+    }
+    return NativePath((ResourceDirectory() / "downloader" / "downloader.py").string());
 }
 
 // --- the wired-up application -----------------------------------------------------------
@@ -915,7 +947,7 @@ void PrintStep(const std::string& title) {
 }
 
 void RunSelfTest(AppContext& app) {
-    std::cout << "MediaTool Phase 1 self-test\n";
+    std::cout << "Gravity core self-test\n";
     std::cout << "(proving the foundation, not the finished product -- see docs/architecture.md)\n";
 
     PrintStep("1. FFmpeg discovery");
