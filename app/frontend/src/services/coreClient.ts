@@ -171,6 +171,7 @@ export const getSettings = () => sendCommand("getSettings", {});
 export const updateSettings = (settings: Partial<import("../types/settings").Settings>) =>
   sendCommand("updateSettings", { settings });
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
+export const getVersionInfo = () => sendCommand("getVersionInfo", {});
 
 // Reveals a completed download's output file in Windows Explorer via the Rust
 // `open_containing_folder` Tauri command (app/desktop/src-tauri/src/lib.rs) -- never a raw

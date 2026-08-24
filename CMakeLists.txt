@@ -29,6 +29,16 @@ endif()
 
 option(MEDIATOOL_BUILD_TESTS "Build the GoogleTest suite" ON)
 
+# core/GravityVersion.h.in -> <build dir>/core/GravityVersion.h -- lets the C++ core report
+# its own version (spec: an About panel showing "Gravity version") without a second,
+# hand-maintained copy of the number project() already declares above.
+configure_file(
+    "${CMAKE_SOURCE_DIR}/core/GravityVersion.h.in"
+    "${CMAKE_BINARY_DIR}/core/GravityVersion.h"
+    @ONLY
+)
+include_directories("${CMAKE_BINARY_DIR}")
+
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(reproc++ CONFIG REQUIRED)

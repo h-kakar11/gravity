@@ -427,6 +427,14 @@ def main():
           by_id[still]["state"])
     c3.close()
 
+    print("\n=== 15. Version info (About panel) ===")
+    c4 = Core("version-check")
+    info = c4.ok("getVersionInfo")["versionInfo"]
+    check("gravityVersion is present", bool(info.get("gravityVersion")), str(info))
+    check("ffmpegVersion is present against a real ffmpeg install",
+          "ffmpeg" in info.get("ffmpegVersion", "").lower(), str(info.get("ffmpegVersion")))
+    c4.close()
+
     print(f"\n{'=' * 60}")
     print(f"PASSED {len(PASS)} / {len(PASS) + len(FAIL)}")
     if FAIL:

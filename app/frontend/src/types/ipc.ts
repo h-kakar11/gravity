@@ -6,6 +6,7 @@ import type { JobPriority, JobSnapshot, JobState, JobType } from "./job";
 import type { HistoryScope, MoveDirection, QueueRunState, QueueSnapshot } from "./queue";
 import type { FileInfo } from "./fileInfo";
 import type { HardwareInfo } from "./hardware";
+import type { VersionInfo } from "./version";
 import type { Settings } from "./settings";
 import type { ErrorInfo } from "./error";
 import type { Progress } from "./progress";
@@ -34,7 +35,8 @@ export type CoreCommand =
   | "getCapabilities"
   | "getSettings"
   | "updateSettings"
-  | "getHardwareInfo";
+  | "getHardwareInfo"
+  | "getVersionInfo";
 
 // Params a DOWNLOAD-type createJob call takes, nested under CommandParams["createJob"].params
 // (see docs/ipc-contract.md "createJob params by type"). `quality` defaults to "BEST" on
@@ -134,6 +136,7 @@ export interface CommandParams {
   getSettings: Record<string, never>;
   updateSettings: { settings: Partial<Settings> };
   getHardwareInfo: Record<string, never>;
+  getVersionInfo: Record<string, never>;
 }
 
 // Result for each command, keyed by command name.
@@ -166,6 +169,7 @@ export interface CommandResult {
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };
   getHardwareInfo: { hardwareInfo: HardwareInfo };
+  getVersionInfo: { versionInfo: VersionInfo };
 }
 
 // Envelope written to mediatool-core's stdin (via the Tauri `send_core_command` command).

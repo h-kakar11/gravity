@@ -364,6 +364,15 @@ def run_command_stdin() -> int:
     return 1
 
 
+def run_version() -> int:
+    """Prints yt-dlp's own version string to stdout and exits -- used by getVersionInfo
+    (the About panel) to show what's actually installed, not a number this script invents.
+    Deliberately the ONE mode that is not NDJSON: there's no request/response to correlate,
+    just a version string a human or the C++ core reads directly."""
+    print(getattr(yt_dlp, "version", None) and yt_dlp.version.__version__ or "unknown")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gravity yt-dlp downloader bridge")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -371,10 +380,14 @@ def main() -> int:
                        help="Emit a canned NDJSON sequence, no network access")
     mode.add_argument("--command-stdin", action="store_true",
                        help="Read one JSON command from stdin (inspect or download)")
+    mode.add_argument("--version", action="store_true",
+                       help="Print yt-dlp's own version string and exit")
     args = parser.parse_args()
 
     if args.selftest:
         return run_selftest()
+    if args.version:
+        return run_version()
     return run_command_stdin()
 
 

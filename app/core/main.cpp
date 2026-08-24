@@ -23,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/GravityVersion.h"
 #include "core/downloads/IDownloadProvider.h"
 #include "core/downloads/NdjsonLineProtocol.h"
 #include "core/downloads/QualityPreset.h"
@@ -862,6 +863,40 @@ json HandleGetHardwareInfo(AppContext& app, const json&) {
     return {{"hardwareInfo", app.hardwareDetector.Detect().ToJson()}};
 }
 
+// Runs the downloader script's own --version mode (a single line on stdout, not NDJSON --
+// see python/downloader/downloader.py's run_version()) and returns whatever it printed, or
+// nullopt if the process couldn't be launched or produced nothing usable. Never throws:
+// this is diagnostic information for an About panel, not something a missing Python
+// installation should turn into a hard IPC failure.
+std::optional<std::string> DiscoverYtDlpVersion(AppContext& app) {
+    try {
+        std::vector<std::string> lines;
+        auto proc = app.processRunner.Start(
+            ResolvePythonExecutable(), {ResolveDownloaderScript(), "--version"}, {},
+            [&lines](const std::string& line) { lines.push_back(line); }, [](const std::string&) {});
+        const auto result = proc->WaitFor(5000);
+        if (!result.has_value() || result->exitCode != 0 || lines.empty()) return std::nullopt;
+        return lines.front();
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// About panel data (spec: "Gravity version, FFmpeg version, yt-dlp version"). Every field
+// is best-effort -- a missing FFmpeg or Python install is a normal, already-surfaced state
+// elsewhere (Settings, the processing capabilities check), not a reason for this command to
+// fail; absent fields are simply omitted rather than reported as an error.
+json HandleGetVersionInfo(AppContext& app, const json&) {
+    json result = {{"gravityVersion", kGravityVersion}};
+    if (auto ffmpegVersion = app.ffmpegEngine.Version(); ffmpegVersion.has_value()) {
+        result["ffmpegVersion"] = *ffmpegVersion;
+    }
+    if (auto ytDlpVersion = DiscoverYtDlpVersion(app); ytDlpVersion.has_value()) {
+        result["ytDlpVersion"] = *ytDlpVersion;
+    }
+    return {{"versionInfo", result}};
+}
+
 using Handler = std::function<json(AppContext&, const json&)>;
 
 const std::unordered_map<std::string, Handler>& CommandTable() {
@@ -889,6 +924,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
         {"getHardwareInfo", HandleGetHardwareInfo},
+        {"getVersionInfo", HandleGetVersionInfo},
     };
     return table;
 }

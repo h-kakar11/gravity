@@ -21,6 +21,7 @@ import * as coreClient from "../services/coreClient";
 import type { Route } from "../components/AppShell";
 import type { ErrorInfo } from "../types/error";
 import type { Settings } from "../types/settings";
+import type { VersionInfo } from "../types/version";
 import { asErrorInfo } from "../utils/errors";
 import { describeError } from "../utils/jobDisplay";
 import { AlertTriangleIcon, CheckCircleIcon, SettingsIcon } from "../components/icons";
@@ -38,6 +39,7 @@ export default function SettingsPage({ onNavigate, onNotificationsEnabledChange 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [ffmpegPathDraft, setFfmpegPathDraft] = useState("");
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -49,6 +51,12 @@ export default function SettingsPage({ onNavigate, onNotificationsEnabledChange 
         setFfmpegPathDraft(s.advanced.ffmpegPath);
       })
       .catch((err) => active && setError(asErrorInfo(err)));
+    // Best-effort: a version string failing to load is a detail worth showing "unknown"
+    // for, never a reason to block the rest of the Settings page.
+    coreClient
+      .getVersionInfo()
+      .then(({ versionInfo: v }) => active && setVersionInfo(v))
+      .catch(() => {});
     return () => {
       active = false;
     };
@@ -165,6 +173,39 @@ export default function SettingsPage({ onNavigate, onNotificationsEnabledChange 
                   </Button>
                 </div>
               </div>
+            </div>
+          </section>
+
+          <section style={{ marginBottom: "2rem" }}>
+            <h2 className="gv-section-title">About</h2>
+            <div className="gv-card">
+              <div className="gv-detail__grid" style={{ fontSize: "var(--text-sm)" }}>
+                <div className="gv-detail__label">Gravity</div>
+                <div className="gv-detail__value">
+                  {versionInfo ? versionInfo.gravityVersion : <Skeleton width={50} />}
+                </div>
+                <div className="gv-detail__label">FFmpeg</div>
+                <div className="gv-detail__value">
+                  {versionInfo === null ? (
+                    <Skeleton width={140} />
+                  ) : (
+                    versionInfo.ffmpegVersion ?? "Not found — see Advanced below"
+                  )}
+                </div>
+                <div className="gv-detail__label">yt-dlp</div>
+                <div className="gv-detail__value">
+                  {versionInfo === null ? (
+                    <Skeleton width={90} />
+                  ) : (
+                    versionInfo.ytDlpVersion ?? "Not available"
+                  )}
+                </div>
+              </div>
+              <p style={{ margin: "0.9rem 0 0", fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>
+                Gravity runs entirely on your machine — no accounts, no telemetry, no cloud
+                processing. FFmpeg and yt-dlp are separate open-source projects Gravity relies
+                on and does not modify; see their own projects for license details.
+              </p>
             </div>
           </section>
 

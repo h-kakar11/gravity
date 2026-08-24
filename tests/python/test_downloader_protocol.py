@@ -7,6 +7,7 @@ yt_dlp, so that absence is itself part of what a couple of these tests verify.
 """
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -166,6 +167,34 @@ class CommandStdinProtocolTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(events[-1]["event"], "error")
         self.assertIn("yt_dlp", events[-1]["data"]["message"])
+
+
+class VersionModeTest(unittest.TestCase):
+    """--version (Phase 9's About panel) is deliberately the one mode that is NOT NDJSON --
+    just a bare version string on stdout, since there's no request to correlate a response
+    to."""
+
+    def test_cli_invocation_exits_zero_with_one_line_of_output(self):
+        result = subprocess.run(
+            [sys.executable, str(DOWNLOADER_SCRIPT), "--version"],
+            capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.strip().splitlines()), 1)
+
+    def test_reports_unknown_when_yt_dlp_is_not_installed(self):
+        # The actual "not installed" behavior, tested directly against the function rather
+        # than a subprocess -- this suite's ambient interpreter has no yt_dlp (module
+        # docstring), so downloader.yt_dlp is already None here.
+        self.assertIsNone(downloader.yt_dlp)
+        buffer = io.StringIO()
+        original_stdout = sys.stdout
+        sys.stdout = buffer
+        try:
+            exit_code = downloader.run_version()
+        finally:
+            sys.stdout = original_stdout
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(buffer.getvalue().strip(), "unknown")
 
 
 if __name__ == "__main__":
