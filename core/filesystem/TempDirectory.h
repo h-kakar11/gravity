@@ -1,7 +1,7 @@
 #pragma once
 
 // Per-job isolated scratch space (spec section 12): equivalent to
-// %LOCALAPPDATA%\MediaTool\temp\job-<id>\. RAII-owned so a job's temp files are
+// %LOCALAPPDATA%\Gravity\temp\job-<id>\. RAII-owned so a job's temp files are
 // guaranteed cleaned up on any exit path (success, failure, exception) unless the job
 // explicitly promotes its output out first via Release().
 
@@ -17,7 +17,7 @@ public:
     // hook tests use so they never touch the real user profile. When unset, the
     // MEDIATOOL_TEMP_BASE_DIR environment variable is checked next (same purpose, for
     // callers that can't inject a constructor argument), then %LOCALAPPDATA%, then a
-    // ".mediatool-temp" directory under the current working directory as a last resort.
+    // ".gravity-temp" directory under the current working directory as a last resort.
     //
     // Throws errors::MediaToolException (ErrorCategory::PermissionError) if the
     // directory can't be created.

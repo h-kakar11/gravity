@@ -53,6 +53,9 @@ settings.local.json
 # Ad hoc manual downloader integration test output (docs/protocols/downloader.md) --
 # real downloaded media, never committed (spec section 42).
 /.manual-test-output/
+# TempDirectory's CWD-relative fallback when LOCALAPPDATA is unset (non-Windows dev/CI) --
+# see core/filesystem/TempDirectory.cpp.
+/.gravity-temp/
 
 # --- Local tooling state (not project source) ---
 /.claude/

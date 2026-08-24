@@ -12,7 +12,7 @@
 
 namespace mediatool::settings {
 
-// The real production settings path: "%LOCALAPPDATA%\MediaTool\settings.json". Reads
+// The real production settings path: "%LOCALAPPDATA%\Gravity\settings.json". Reads
 // LOCALAPPDATA from the environment; never throws.
 std::string DefaultSettingsFilePath();
 

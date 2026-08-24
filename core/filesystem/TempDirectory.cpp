@@ -25,7 +25,7 @@ std::string ResolveBaseDir(const std::optional<std::string>& overrideBaseDir) {
         return localAppData;
     }
     // No LOCALAPPDATA (non-Windows dev/CI environment) -- fall back under the CWD.
-    return (stdfs::current_path() / ".mediatool-temp").string();
+    return (stdfs::current_path() / ".gravity-temp").string();
 }
 
 std::string LeafDirName(const std::string& jobId) {
