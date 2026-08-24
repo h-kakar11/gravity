@@ -72,6 +72,7 @@ public:
         switch (behaviour_) {
             case Behaviour::Succeed:
                 ReportProgress(Progress{.percentage = 100.0, .statusMessage = "done"});
+                if (!outputPath_.empty()) SetResult({{"outputPath", outputPath_}});
                 return;
             case Behaviour::Fail:
                 throw MediaToolException(error_);
@@ -99,6 +100,12 @@ public:
     // Flipped so a later attempt of the same job can behave differently from the first.
     void SetBehaviour(Behaviour behaviour) { behaviour_ = behaviour; }
 
+    // Publishes an outputPath, so a following pipeline stage has something to resolve.
+    void PublishOutput(std::string path) { outputPath_ = std::move(path); }
+    void ApplyResolvedInput(const std::string& inputPath) override { resolvedInput = inputPath; }
+
+    std::string resolvedInput;
+
     std::atomic<int> executions{0};
     std::atomic<bool> started{false};
 
@@ -106,6 +113,7 @@ private:
     std::atomic<Behaviour> behaviour_;
     ErrorInfo error_;
     std::atomic<bool> release_{false};
+    std::string outputPath_;
 };
 
 // Rebuilds jobs from specs after a restart. `params.behaviour` decides what the rebuilt job
@@ -1166,6 +1174,70 @@ TEST_F(JobManagerQueueTest, ProgressDoesNotTriggerPersistence) {
     ASSERT_TRUE(stdfs::exists(StatePath()));
     const auto size = stdfs::file_size(StatePath());
     EXPECT_GT(size, 0u);
+}
+
+// --- pipeline input resolution ------------------------------------------------------------
+
+TEST_F(JobManagerQueueTest, ADependentTakesItsInputFromTheProducersActualOutput) {
+    // Spec section 19. The producing job's output path is not knowable when the pipeline is
+    // declared, so the follower names the job instead and the backend resolves it.
+    JobManager manager(MakeOptions(2), nullptr, clock_);
+
+    auto producerJob = std::make_unique<ScriptedJob>(JobType::Download, ScriptedJob::Behaviour::Succeed);
+    producerJob->PublishOutput("/downloads/Some Title (2).mp4");
+    const JobId producer = manager.SubmitJob(std::move(producerJob), MakeRequest(JobType::Download));
+
+    auto followerRequest = MakeRequest(JobType::Conversion);
+    followerRequest.spec.params["inputFromJobId"] = producer;
+    followerRequest.dependencies = {producer};
+    auto followerJob = std::make_unique<ScriptedJob>(JobType::Conversion, ScriptedJob::Behaviour::Succeed);
+    ScriptedJob* follower = followerJob.get();
+    const JobId followerId = manager.SubmitJob(std::move(followerJob), followerRequest);
+
+    manager.RunSchedulerPassForTesting();
+    manager.RunSchedulerPassForTesting();
+
+    EXPECT_EQ(manager.GetJob(followerId).state, JobState::Completed);
+    EXPECT_EQ(follower->resolvedInput, "/downloads/Some Title (2).mp4")
+        << "the follower must read the path the producer actually wrote";
+    ExpectConsistent(manager);
+}
+
+TEST_F(JobManagerQueueTest, AJobWithNoResolvedInputIsLeftAlone) {
+    JobManager manager(MakeOptions(1), nullptr, clock_);
+    auto job = std::make_unique<ScriptedJob>(JobType::Conversion, ScriptedJob::Behaviour::Succeed);
+    ScriptedJob* raw = job.get();
+    manager.SubmitJob(std::move(job), MakeRequest(JobType::Conversion));
+
+    manager.RunSchedulerPassForTesting();
+
+    EXPECT_TRUE(raw->resolvedInput.empty()) << "a job that declared no source must not be rewritten";
+}
+
+TEST_F(JobManagerQueueTest, AProducerThatRecordedNoOutputFailsTheDependentClearly) {
+    // The scheduler guarantees the producer COMPLETED, so a missing outputPath here is a
+    // real inconsistency and must be reported as such rather than surfacing later as a
+    // confusing "input file not found" against an empty path.
+    JobManager manager(MakeOptions(2), nullptr, clock_);
+    const JobId producer = manager.SubmitJob(
+        std::make_unique<ScriptedJob>(JobType::Download, ScriptedJob::Behaviour::Succeed),
+        MakeRequest(JobType::Download));  // succeeds but publishes no result
+
+    auto followerRequest = MakeRequest(JobType::Conversion);
+    followerRequest.spec.params["inputFromJobId"] = producer;
+    followerRequest.dependencies = {producer};
+    const JobId followerId = manager.SubmitJob(
+        std::make_unique<ScriptedJob>(JobType::Conversion, ScriptedJob::Behaviour::Succeed),
+        followerRequest);
+
+    manager.RunSchedulerPassForTesting();
+    manager.RunSchedulerPassForTesting();
+
+    const auto snapshot = manager.GetJob(followerId);
+    EXPECT_EQ(snapshot.state, JobState::Failed);
+    ASSERT_TRUE(snapshot.error.has_value());
+    EXPECT_EQ(snapshot.error->code, "E_DEPENDENCY_OUTPUT_MISSING");
+    ExpectConsistent(manager);
 }
 
 // --- stress ---------------------------------------------------------------------------------

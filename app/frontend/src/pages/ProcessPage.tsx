@@ -1,10 +1,11 @@
 // Creates conversion and compression jobs, and the download -> convert -> compress pipeline
 // that the dependency model exists for (spec section 19).
 //
-// The pipeline is built by the BACKEND, not here: this page submits the jobs together with
-// a `dependsOn` link and the backend decides when each may start. The frontend never polls
-// for a job to finish and then submits the next one -- that would be exactly the
-// "manually poll and construct a second unrelated operation" design the spec rules out.
+// The pipeline is built by the BACKEND, not here. This page submits the second job naming
+// the first via `inputFromJobId`; the backend links them, decides when each may start, and
+// resolves the real input path once the producer has actually run. The frontend never polls
+// for a job to finish and then submits the next one, and -- just as importantly -- never
+// guesses what path a job will produce.
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -94,22 +95,21 @@ export default function ProcessPage() {
         return;
       }
 
-      // The compression's input is the conversion's output path, which does not exist yet.
-      // That is fine: the dependency means the backend will not start it until the
-      // conversion has completed successfully, and if the conversion fails the compression
-      // is marked SKIPPED rather than run against a missing file.
-      const stem = common.inputPath.split(/[\\/]/).pop()?.replace(/\.[^.]*$/, "") ?? "output";
-      const separator = common.outputDirectory.includes("\\") ? "\\" : "/";
-      const convertedPath = `${common.outputDirectory}${separator}${stem}.${targetFormat.toLowerCase()}`;
-
+      // The compression names the conversion rather than a path. Nothing here guesses what
+      // the conversion will produce, and nothing polls for it to finish: the backend
+      // resolves the real path once that job has completed, and the declared link means the
+      // compression cannot start before then -- or at all, if the conversion fails, in which
+      // case it is marked SKIPPED rather than run against a missing file.
+      const stem = (common.inputPath.split(/[\\/]/).pop() ?? "output").replace(/\.[^.]*$/, "");
       const compression = await coreClient.createCompressionJob(
         {
-          inputPath: convertedPath,
+          inputFromJobId: conversion.jobId,
           outputDirectory: common.outputDirectory,
           preset,
           outputFilenameBase: `${stem}-compressed`,
+          outputExtension: "mp4",
         },
-        { priority, dependsOn: [conversion.jobId], parentJobId: conversion.jobId },
+        { priority, parentJobId: conversion.jobId },
       );
       setNotice(
         `Queued 2 linked jobs: convert (${conversion.jobId}), then compress (${compression.jobId}).`,

@@ -266,6 +266,9 @@ private:
     // absolute time the scheduler should next wake, or nullopt to wait indefinitely.
     std::optional<std::int64_t> SchedulerPass();
     void RunJob(std::shared_ptr<Job> job, JobId id);
+    // Feeds a pipeline stage the path its producer actually wrote. See
+    // Job::ApplyResolvedInput; no-op for a job that did not declare `inputFromJobId`.
+    void ResolveDependencyInput(const std::shared_ptr<Job>& job, const JobId& id);
     void HandleJobStateChanged(const JobId& id, JobState state);
     void HandleJobProgress(const JobId& id, const Progress& progress);
     // Decides whether a just-failed job earns an automatic retry, and schedules it.

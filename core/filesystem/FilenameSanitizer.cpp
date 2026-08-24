@@ -84,7 +84,16 @@ std::string SanitizeWindowsFilename(const std::string& rawTitle) {
 }
 
 std::string DeduplicateFilename(const std::string& desiredPath, const IFileSystem& fs) {
-    if (!fs.Exists(desiredPath)) {
+    return DeduplicateFilename(desiredPath, fs, {});
+}
+
+std::string DeduplicateFilename(const std::string& desiredPath, const IFileSystem& fs,
+                                const NameTakenPredicate& alsoTaken) {
+    const auto taken = [&fs, &alsoTaken](const std::string& candidate) {
+        return fs.Exists(candidate) || (alsoTaken && alsoTaken(candidate));
+    };
+
+    if (!taken(desiredPath)) {
         return desiredPath;
     }
 
@@ -96,7 +105,7 @@ std::string DeduplicateFilename(const std::string& desiredPath, const IFileSyste
     for (int i = 1; i <= kMaxDeduplicationAttempts; ++i) {
         const stdfs::path candidate = parent / (stem + " (" + std::to_string(i) + ")" + ext);
         std::string candidateStr = candidate.string();
-        if (!fs.Exists(candidateStr)) {
+        if (!taken(candidateStr)) {
             return candidateStr;
         }
     }
@@ -120,14 +129,23 @@ bool AnyFileHasBaseName(const std::vector<std::string>& names, const std::string
 
 std::string DeduplicateBaseName(const std::string& directory, const std::string& desiredBaseName,
                                  const IFileSystem& fs) {
+    return DeduplicateBaseName(directory, desiredBaseName, fs, {});
+}
+
+std::string DeduplicateBaseName(const std::string& directory, const std::string& desiredBaseName,
+                                 const IFileSystem& fs, const NameTakenPredicate& alsoTaken) {
     const std::vector<std::string> existing = fs.ListDirectory(directory);
-    if (!AnyFileHasBaseName(existing, desiredBaseName)) {
+    const auto taken = [&existing, &alsoTaken](const std::string& candidate) {
+        return AnyFileHasBaseName(existing, candidate) || (alsoTaken && alsoTaken(candidate));
+    };
+
+    if (!taken(desiredBaseName)) {
         return desiredBaseName;
     }
 
     for (int i = 1; i <= kMaxDeduplicationAttempts; ++i) {
         const std::string candidate = desiredBaseName + " (" + std::to_string(i) + ")";
-        if (!AnyFileHasBaseName(existing, candidate)) {
+        if (!taken(candidate)) {
             return candidate;
         }
     }

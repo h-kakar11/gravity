@@ -62,8 +62,19 @@ export type TargetFormat =
 
 export type CompressionPreset = "LOW" | "MEDIUM" | "HIGH";
 
-export interface ConversionJobParams {
-  inputPath: string;
+// Exactly one of `inputPath` and `inputFromJobId` must be given.
+//
+// `inputFromJobId` is what makes a real pipeline possible: the path a producing job writes
+// is not knowable in advance -- a download's filename comes from the media's title and
+// whichever container the extractor chose -- so a following stage names the job it reads
+// from and the backend resolves the actual path once that job has run. Declaring it also
+// creates the dependency, so the stage cannot start early (spec section 19).
+interface ProcessingInput {
+  inputPath?: string;
+  inputFromJobId?: string;
+}
+
+export interface ConversionJobParams extends ProcessingInput {
   outputDirectory: string;
   targetFormat: TargetFormat;
   outputFilenameBase?: string;
@@ -72,11 +83,13 @@ export interface ConversionJobParams {
   maxHeight?: number;
 }
 
-export interface CompressionJobParams {
-  inputPath: string;
+export interface CompressionJobParams extends ProcessingInput {
   outputDirectory: string;
   preset?: CompressionPreset;
   outputFilenameBase?: string;
+  // Compression keeps the source container by default. When the input comes from another
+  // job the source extension is not known yet, so this is the only way to say anything
+  // other than mp4.
   outputExtension?: string;
   maxHeight?: number;
   audioBitrateKbps?: number;

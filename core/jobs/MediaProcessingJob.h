@@ -24,6 +24,8 @@ namespace mediatool::jobs {
 class MediaProcessingJob : public Job {
 public:
     struct Options {
+        // May be empty at construction when the input is another job's output; JobManager
+        // fills it in via ApplyResolvedInput() before the job runs.
         std::string inputPath;
         std::string outputDirectory;
         // Leave empty to derive "<input stem>.<target extension>" from the input, made
@@ -35,6 +37,11 @@ public:
     // Final: the surrounding lifecycle is fixed. Subclasses customize it through
     // TargetExtension()/Invoke()/DescribeMetadata(), not by re-running the sequence.
     void Execute() final;
+
+    // Adopts an input path resolved from a dependency's output (see Job::ApplyResolvedInput).
+    // Applied before Execute() validates the input, so a pipeline stage is checked exactly
+    // like one whose path was given up front.
+    void ApplyResolvedInput(const std::string& inputPath) final;
 
 protected:
     MediaProcessingJob(JobType type, Options options, media::IMediaEngine& engine,

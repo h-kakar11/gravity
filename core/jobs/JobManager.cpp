@@ -431,6 +431,9 @@ void JobManager::RunJob(std::shared_ptr<Job> job, JobId id) {
     logging::Log::Info(kLogSubsystem, "job running: " + id);
 
     try {
+        // Inside the try: if the producer's output cannot be resolved, that is this job's
+        // failure and belongs in its error, not an exception escaping the worker thread.
+        ResolveDependencyInput(job, id);
         job->Execute();
         // Completion and cancellation can land together. Whichever transition the state
         // machine accepts first wins and the other is a no-op, so exactly one terminal
@@ -459,6 +462,42 @@ void JobManager::RunJob(std::shared_ptr<Job> job, JobId id) {
                                                      "non-standard exception"));
         }
     }
+}
+
+void JobManager::ResolveDependencyInput(const std::shared_ptr<Job>& job, const JobId& id) {
+    JobId sourceId;
+    std::shared_ptr<Job> source;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const queue::JobRecord* record = scheduler_.Find(id);
+        if (record == nullptr) return;
+        if (!record->spec.params.contains("inputFromJobId")) return;
+        const auto& value = record->spec.params.at("inputFromJobId");
+        if (!value.is_string()) return;
+        sourceId = value.get<std::string>();
+        if (sourceId.empty()) return;
+        source = LookupLocked(sourceId);
+    }
+
+    // The scheduler only dispatches a job once every dependency has COMPLETED, so a
+    // producer that is missing or has no result here means something is genuinely wrong --
+    // report it rather than running against an empty input path and blaming the file.
+    const auto fail = [&sourceId](const std::string& detail) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_DEPENDENCY_OUTPUT_MISSING", errors::ErrorCategory::FileNotFound,
+            "The job this one takes its input from did not produce a file.",
+            "source job " + sourceId + ": " + detail));
+    };
+
+    if (source == nullptr) fail("no longer in the queue");
+    const auto result = source->GetResult();
+    if (!result || !result->contains("outputPath") || !(*result)["outputPath"].is_string())
+        fail("completed without recording an output path");
+
+    const std::string resolved = (*result)["outputPath"].get<std::string>();
+    logging::Log::Debug(kLogSubsystem, "job " + id + " takes its input from " + sourceId +
+                                           " -> " + resolved);
+    job->ApplyResolvedInput(resolved);
 }
 
 // --- callbacks from Job --------------------------------------------------------------------

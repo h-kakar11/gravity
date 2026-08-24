@@ -4,6 +4,7 @@
 
 #include "core/errors/MediaToolException.h"
 #include "core/filesystem/FilenameSanitizer.h"
+#include "core/filesystem/OutputNameRegistry.h"
 #include "core/filesystem/PathUtils.h"
 
 namespace mediatool::jobs {
@@ -35,6 +36,10 @@ media::ProgressCallback MediaProcessingJob::EngineProgressSink() {
 
 media::CancelledCallback MediaProcessingJob::CancellationProbe() {
     return [this] { return IsCancellationRequested(); };
+}
+
+void MediaProcessingJob::ApplyResolvedInput(const std::string& inputPath) {
+    options_.inputPath = inputPath;
 }
 
 void MediaProcessingJob::SweepPreviousAttempt() {
@@ -103,7 +108,12 @@ void MediaProcessingJob::Execute() {
     // reclaims its own name; then deduplicate, so anything still standing -- which is by
     // definition not ours -- is left alone and worked around.
     SweepPreviousAttempt();
-    const std::string outputPath = filesystem::DeduplicateFilename(desiredPath, fileSystem_);
+    // Reserved rather than merely deduplicated, so a job running concurrently cannot pick
+    // the same name in the window before this one writes anything (see
+    // OutputNameRegistry.h). Held for the rest of Execute(), which spans the encode.
+    auto reservation = filesystem::OutputNameRegistry::Instance().ReserveFilename(
+        desiredPath, fileSystem_);
+    const std::string outputPath = reservation.Value();
     // Recorded before the engine runs: if this attempt is cancelled or killed partway, the
     // next one still knows which path to clean up.
     previousOutputPath_ = outputPath;

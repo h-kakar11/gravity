@@ -87,6 +87,17 @@ public:
 
     virtual bool SupportsPause() const { return false; }
 
+    // Supplies the input path this job should read, when that path was not knowable at
+    // creation time because it is another job's output. Called by JobManager immediately
+    // before Execute(), once the producing job has completed and its result is final.
+    //
+    // This exists so a pipeline can be declared up front rather than assembled by the
+    // frontend polling for one job to finish and then guessing what it produced -- a guess
+    // that cannot be right for a download, whose filename comes from the media's title and
+    // whichever container the extractor chose (spec section 19). Default: no-op, for job
+    // types whose input is fixed.
+    virtual void ApplyResolvedInput(const std::string& /*inputPath*/) {}
+
     // Hooks subclasses may override to react to a request (e.g. to signal an underlying
     // ffmpeg process). Called from whichever thread issues the request; default no-ops.
     virtual void OnCancel() {}

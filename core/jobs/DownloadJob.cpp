@@ -4,6 +4,7 @@
 
 #include "core/errors/MediaToolException.h"
 #include "core/filesystem/FilenameSanitizer.h"
+#include "core/filesystem/OutputNameRegistry.h"
 #include "core/filesystem/PathUtils.h"
 
 namespace mediatool::jobs {
@@ -69,8 +70,14 @@ void DownloadJob::Execute() {
 
     const std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
     fileSystem_.CreateDirectory(options_.outputDirectory);
-    const std::string filenameBase =
-        filesystem::DeduplicateBaseName(options_.outputDirectory, safeTitle, fileSystem_);
+    // Reserved, not merely deduplicated. Two downloads of the same title running at once
+    // would otherwise both find the name free and both write to it, and the second would
+    // silently destroy the first (see OutputNameRegistry.h). The reservation is held until
+    // this function returns, which covers the whole window between choosing the name and
+    // yt-dlp having written the file.
+    auto reservation = filesystem::OutputNameRegistry::Instance().ReserveBaseName(
+        options_.outputDirectory, safeTitle, fileSystem_);
+    const std::string filenameBase = reservation.Value();
 
     Progress starting;
     starting.statusMessage = "Starting download";

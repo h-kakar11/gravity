@@ -10,6 +10,7 @@
 // against shared interfaces) are wired together for the first time -- see docs/architecture.md.
 
 #include <chrono>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -205,9 +206,25 @@ std::unique_ptr<jobs::Job> BuildDownloadJob(JobDependencies deps, const json& pa
                                                &deps.mediaEngine);
 }
 
+// A processing job's input is either a path the caller gave us, or -- for a pipeline stage --
+// another job's output, which is not knowable until that job has run. In the second case the
+// path is left empty here and JobManager fills it in immediately before the job executes
+// (see Job::ApplyResolvedInput).
+std::string ReadProcessingInputPath(const json& params) {
+    if (params.contains("inputFromJobId")) {
+        if (params.contains("inputPath")) {
+            ThrowInvalidParams(
+                "Give either inputPath or inputFromJobId, not both.",
+                "a pipeline stage takes its input from the job it follows");
+        }
+        return std::string();
+    }
+    return RequirePath(params, "inputPath");
+}
+
 std::unique_ptr<jobs::Job> BuildConversionJob(JobDependencies deps, const json& params) {
     jobs::ConversionJob::Options options;
-    options.common.inputPath = RequirePath(params, "inputPath");
+    options.common.inputPath = ReadProcessingInputPath(params);
     options.common.outputDirectory = RequirePath(params, "outputDirectory");
     if (params.contains("outputFilenameBase"))
         options.common.outputFilenameBase = RequireString(params, "outputFilenameBase");
@@ -219,13 +236,15 @@ std::unique_ptr<jobs::Job> BuildConversionJob(JobDependencies deps, const json& 
 
 std::unique_ptr<jobs::Job> BuildCompressionJob(JobDependencies deps, const json& params) {
     jobs::CompressionJob::Options options;
-    options.common.inputPath = RequirePath(params, "inputPath");
+    options.common.inputPath = ReadProcessingInputPath(params);
     options.common.outputDirectory = RequirePath(params, "outputDirectory");
     if (params.contains("outputFilenameBase"))
         options.common.outputFilenameBase = RequireString(params, "outputFilenameBase");
     options.request = media::CompressionRequest::FromJson(params);
     // Compression keeps the source container by default; the output still needs a concrete
-    // extension before the encode starts.
+    // extension before the encode starts. When the input is a pipeline stage's output the
+    // source extension is not known yet, so an explicit outputExtension is the only way to
+    // say anything but mp4.
     const std::string sourceExtension = filesystem::paths::GetExtension(options.common.inputPath);
     options.outputExtension = params.contains("outputExtension")
                                   ? RequireString(params, "outputExtension")
@@ -551,6 +570,18 @@ jobs::JobManager::SubmitRequest ParseSubmitRequest(AppContext& app, jobs::JobTyp
             ThrowInvalidParams("allowDuplicate must be a boolean.");
         request.allowDuplicate = params.at("allowDuplicate").get<bool>();
     }
+    // Taking input from another job necessarily means depending on it. Adding the edge here
+    // rather than making the caller remember both is what stops a pipeline stage from being
+    // dispatched before the job it reads from has produced anything.
+    if (jobParams.contains("inputFromJobId")) {
+        const std::string sourceId = RequireJobId(jobParams, "inputFromJobId");
+        app.jobManager.GetJob(sourceId);  // throws E_JOB_NOT_FOUND with a clear message
+        if (std::find(request.dependencies.begin(), request.dependencies.end(), sourceId) ==
+            request.dependencies.end()) {
+            request.dependencies.push_back(sourceId);
+        }
+    }
+
     request.duplicateKey = queue::MakeDuplicateKey(type, jobParams);
     return request;
 }
