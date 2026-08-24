@@ -33,9 +33,11 @@
 # --- Application runtime data (never commit user data) ---
 /resources/local/
 # Settings and queue state fall back to a RELATIVE path when LOCALAPPDATA is unset (see
-# JsonFileSettingsStore / QueuePersistence), so running the core from the repo root writes
-# here. Real user data, never committed.
+# JsonFileSettingsStore / QueuePersistence), so running the core writes one of these
+# relative to whatever the current working directory was (repo root during a core-only run,
+# app/desktop during a real `cargo run`/Tauri launch). Real user data, never committed.
 /MediaTool/
+**/MediaTool/
 *.log
 settings.local.json
 # Ad hoc manual downloader integration test output (docs/protocols/downloader.md) --
