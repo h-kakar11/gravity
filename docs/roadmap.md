@@ -18,6 +18,11 @@ and a substantially expanded test suite. This phase also built the conversion/co
 layer it depended on, which did not exist yet — see `docs/phase-5.md` and
 `docs/decisions.md`.
 
+**Phase 6 — COMPLETED.** The application shell and design system: a dark, cohesive
+five-screen product (Home, Download, Convert & Compress, Queue, Settings) replacing the
+Phase 1-5 developer-console look, plus toasts, motion, an accessibility pass, and 18 new
+frontend tests. See `docs/phase-6.md` for the full report.
+
 Everything below is planned, not built.
 
 ## Downloads (remaining)
@@ -73,11 +78,17 @@ user-facing part — a saved, reusable workflow definition, plus the "-> Move" s
 and `BatchJob`/`WorkflowJob` as job types in their own right.
 
 ## UI
-The final home screen: dark-mode only, modern, minimal, premium, smooth, with two large
-curved cards side by side — "Drag & drop a file to convert or compress" and "Paste a
-media URL to download" — subtle borders/shadows, one strong accent color, no gradient-heavy
-"AI SaaS" aesthetic, excellent typography, smooth micro-interactions. Phase 1 ships only a
-bare developer console proving the IPC pipeline; this design work has not started.
+Built in Phase 6 — see `docs/phase-6.md` for the design system, shell, and per-screen
+report. Remaining, deliberately deferred:
+- A settings.json-backed appearance toggle, if a light theme is ever a real product
+  requirement (Phase 6 ships dark-only by design, not as a placeholder for a toggle)
+- Wiring the currently-inert `Settings.h` fields (`defaultOutputDirectory`,
+  `defaultQuality`, `filenameTemplate`, `hardwareAccelerationEnabled`, and others — see
+  `docs/phase-6.md` "Settings scope") to real backend behavior, at which point they belong
+  in the Settings page
+- A native file/folder picker (still a plain text field; see `docs/decisions.md`)
+- Windows high-DPI/scaling verification (Phase 6 verified layout only on a Linux virtual
+  display — see `docs/phase-6.md` "Known limitations")
 
 ## Explicitly out of scope, always
 No accounts, no analytics/telemetry, no cloud processing or uploads, no artificial file

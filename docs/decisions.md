@@ -440,3 +440,93 @@ Fixed at both levels, deliberately:
 The class comment claiming that *only* the drain thread ever touches the handle was also
 corrected: it was true of wait/poll/read/terminate/kill and never true of stdin writes, and
 a comment the code contradicts is worse than no comment.
+
+## Phase 6
+
+### Dark by default, unconditionally — not `prefers-color-scheme`
+
+- **Context:** the spec asks for a modern, dark, premium product identity. The design
+  system's first draft defined the dark palette on bare `:root` and a light palette under
+  `@media (prefers-color-scheme: light)`, on the assumption that dark was the default and
+  light was a considerate fallback for a user who had set their OS to light mode.
+- **What actually happened:** verified by launching the real Tauri app under a virtual
+  display (Xvfb, no desktop environment configured), which reports no dark preference by
+  default — the same as most out-of-the-box desktop installs. The app rendered in light
+  mode. Most desktops default to a light system theme, so `prefers-color-scheme` would have
+  made light the *common* case in practice, the opposite of the product's identity.
+- **Choice:** one palette, defined unconditionally, with no light variant. There is
+  currently no in-app appearance setting (see "Settings scope" below — a toggle needs a
+  real effect to exist), so there is nothing for a light palette to serve yet.
+- **Consequences:** a user who prefers a light desktop gets a dark app anyway. If an
+  appearance setting is ever added, it should drive an explicit choice (a settings field
+  read at startup, the way the rest of Settings works), not an implicit OS media query.
+
+### Evolved `JobManager` again, did not add a second frontend state layer
+
+- **Context:** Phase 5 already made the mistake of a second orchestrator once, by nearly
+  layering a queue controller over `JobManager` instead of evolving it. Phase 6 had the
+  analogous frontend choice: `DownloaderPage` and `DevConsole` each held their own
+  `useJobs()` polling hook, separate from the queue store `QueuePage` used
+  (`state/useQueue.ts` / `queueReducer.ts`).
+- **Choice:** deleted `hooks/useJobs.ts`. `App.tsx` now owns exactly one `useQueue()`
+  instance and passes it to every screen that needs job data.
+- **Reason:** two hooks meant two independent reconciliation paths that could show two
+  different ideas of the same job's state — exactly the "duplicated state" failure mode the
+  Phase 6 audit was asked to look for.
+- **Consequences:** `DevConsole`'s self-test job and `DownloaderPage`'s active-download
+  panel now update from the same event stream the Queue page does, so a job started on one
+  screen is immediately visible, correctly, on another.
+
+### Settings scope: only fields with a demonstrated real effect are editable
+
+- **Context:** spec section 22 is explicit — "every setting must have a real backend
+  effect" and "do not add settings for functionality that does not exist." `Settings.h` (six
+  Phase-1-era categories, ~20 fields) already exists and round-trips through
+  `getSettings`/`updateSettings`, so a plausible-looking Settings page was easy to build
+  from the type alone.
+- **What was actually checked:** grepped `app/core/main.cpp` and `core/` for every field's
+  name to see whether anything besides `Settings.cpp`'s own serialization reads it.
+  `processing.concurrentJobs` and `advanced.ffmpegPath` are read once, at `AppContext`
+  construction, to size the job manager and build the FFmpeg engine. Nothing else —
+  `defaultOutputDirectory`, `defaultQuality`, `downloadDirectory`, `filenameTemplate`,
+  `hardwareAccelerationEnabled`, `defaultCompressionQuality`, `defaultOutputFormat`,
+  `ytDlpPath`, `logLevel`, `launchOnStartup`, `crashReportingEnabled` — is read by anything
+  other than the settings store itself.
+- **Choice:** the Settings page exposes exactly three controls: "show notifications"
+  (a real, immediate frontend effect — it gates `useQueueNotifications`), the FFmpeg path
+  (real, applies next launch — labeled as such rather than implying it's immediate), and
+  queue concurrency shown read-only with a link to the Queue screen's live control, rather
+  than as a second control for the same value that `updateSettings` does not itself apply
+  live (only `setConcurrency` does, and it writes back through the same setting). Everything
+  else in `Settings.h` is not shown.
+- **Consequences:** the Settings page looks sparse relative to what the type system
+  suggests it could show. That is the honest state of the backend, not a frontend
+  limitation — see `docs/roadmap.md` "UI" for wiring the rest up as real functionality
+  lands behind each field.
+
+### Developer console moved off primary navigation
+
+- **Context:** `DevConsole.tsx` (Phase 1's IPC proving ground) was one of four top-level
+  tabs in the old `App.tsx`. Spec section 4: "do not create navigation entries merely to
+  fill space," and section 5 names Home/Download/Process/Queue/Settings as the product's
+  actual concepts — a raw-JSON diagnostics screen is not one of them.
+- **Choice:** kept the screen (it is still useful for exactly what it was built for — raw
+  IPC inspection, drag-and-drop testing, settings/hardware round-trips) but moved it behind
+  Settings → Developer, one click deeper, rather than deleting it or leaving it in the
+  five-item primary shell.
+
+### RTL added for the frontend suite, narrowly
+
+- **Context:** Phase 5's `docs/decisions.md` entry for `vitest` deliberately chose "pure
+  logic only, no rendering harness," reasoning that rendering was verified by running the
+  real app. Phase 6 adds five real screens, a navigation shell, and a notification system
+  whose entire job is reacting correctly to state transitions — logic that lives in how
+  components render and respond to events, not in a standalone reducer.
+- **Choice:** added `@testing-library/react`, `@testing-library/user-event`, and `jsdom` as
+  dev dependencies, scoped to the specific components where rendering behavior is the thing
+  being tested (`AppShell`, `QueuePage`, `useQueueNotifications`) — not a blanket policy to
+  snapshot-test every component.
+- **Consequences:** rendering is still also verified by running the real app (Phase 6 did
+  this via a virtual display and screenshots — see `docs/phase-6.md`); the RTL tests catch
+  a narrower, faster-running class of regression (a control's disabled state, a toast firing
+  on the wrong transition) that a full app launch would not conveniently assert against.

@@ -9,9 +9,13 @@ Repository: [github.com/h-kakar11/gravity](https://github.com/h-kakar11/gravity)
 discovery, Python downloader scaffold). **Phase 2** turned the download side into a real,
 working vertical slice: URL → metadata inspection → quality selection → real download →
 live progress → cancellation → verified output → completed job, end-to-end through the
-real architecture (no simulated progress, no bypassed layers). It is still not the final,
-polished application — see "Status" below for exactly what's real vs. scaffolded,
-`docs/phase-2.md` for the full Phase 2 report, and `docs/roadmap.md` for what's planned.
+real architecture (no simulated progress, no bypassed layers). **Phase 5** built the
+unified job queue: concurrency, priorities, retries, dependencies, crash recovery, and a
+functional queue UI. **Phase 6** turned that functional UI into Gravity's actual product
+design — a dark, cohesive application shell with a real design system, replacing the
+developer-console look Phases 1-5 shipped with. See "Status" below for exactly what's real
+vs. scaffolded, `docs/phase-2.md`/`docs/phase-5.md`/`docs/phase-6.md` for the full reports,
+and `docs/roadmap.md` for what's planned next.
 
 ## Architecture at a glance
 
@@ -54,7 +58,7 @@ wrong for how your Tauri CLI version invokes `cargo run` (see `docs/development.
 
 ```
 app/
-  frontend/     React + TypeScript developer console (not the final UI yet)
+  frontend/     React + TypeScript app: shell, design system, Home/Download/Process/Queue/Settings
   desktop/      Tauri (Rust) shell -- bridges frontend <-> mediatool-core
   core/         The mediatool-core sidecar executable's entry point (main.cpp)
 core/           C++ abstractions: jobs, events, filesystem, process, hardware, settings, logging, errors
@@ -106,20 +110,25 @@ verification matrix at the end of it).
 | Filesystem abstraction, incl. `ListDirectory` and `MockFileSystem` | **Working.** `MockFileSystem` added in Phase 2 to round out spec section 39's three named mocks (process runner, filesystem, downloader provider). |
 | `MockDownloadProvider` | **Working.** Added in Phase 2; used by `DownloadJobTest` so no test needs real yt-dlp or network access. |
 | IPC boundary (`mediatool-core` NDJSON loop, Tauri Rust bridge, `coreClient.ts`) | **Working.** 23 commands from `docs/ipc-contract.md` implemented and reachable. Verified two ways: a real Tauri window + sidecar launch, and direct NDJSON sessions driving real downloads, encodes and every queue command through the same binary the Tauri shell spawns. All input is validated at the boundary — 15 malformed-input rejections are asserted end-to-end. |
-| Frontend: Download page (`DownloaderPage.tsx`) | **Working** as a build (`tsc --noEmit && vite build` pass) and wired to real backend events end-to-end — no simulated progress. The live click-through in a running Tauri window wasn't captured by this session's screen-automation tooling (an environment/tooling limitation, not a code issue — see `docs/phase-2.md` known issues); the same backend calls it makes were separately verified for real via a direct NDJSON session. |
-| Frontend: Queue page + `queueReducer` | **Working.** Filters, sorting, per-job and queue-level controls, a job detail panel, and statistics, over a store that reconciles a snapshot with incremental events using both a channel sequence number and a per-job revision. 57 `vitest` tests cover the reducer and the display/control-availability helpers. |
-| Frontend: Convert & Compress page | **Working** as a build, wired to the real backend. Builds the two-stage pipeline by declaring the link, not by polling. |
-| Frontend: Dev console | **Working** as a build. Deliberately minimal — proves IPC, is not the final UI (spec section 34). |
-| Final polished UI (dark mode, two-card home screen) | **Not started**, by design. Requirements recorded in `docs/roadmap.md` for when that phase begins. |
+| Frontend: application shell (`AppShell.tsx`) + design system (`theme.css`, `components.css`) | **Working.** Dark by default (not conditional on OS theme — see `docs/decisions.md`), one token set for color/type/space/radius/motion, five real nav destinations. Verified by launching the actual `mediatool-desktop` Tauri binary against the actual `mediatool-core` binary under a virtual display and screenshotting every screen (`docs/phase-6.md` "Real verification"). |
+| Frontend: Home page (`HomePage.tsx`) | **Working.** Launch cards plus a compact live queue overview, reading the same store as the Queue page. |
+| Frontend: Download page (`DownloaderPage.tsx`) | **Working**, wired to real backend events end-to-end — no simulated progress. Explicit states for idle/inspecting/ready/invalid-URL/playlist/no-formats, not just a happy path. |
+| Frontend: Queue page + `queueReducer` | **Working.** Filters, sorting, per-job and queue-level controls, a job detail panel, and statistics, over a store that reconciles a snapshot with incremental events using both a channel sequence number and a per-job revision. A single `useQueue()` instance in `App.tsx` is now the one queue store the whole app reads (Phase 6 removed a second, duplicate polling hook). |
+| Frontend: Convert & Compress page | **Working**, wired to the real backend. Builds the two-stage pipeline by declaring the link, not by polling. Compression presets shown in plain language ("Smaller file"/"Balanced"/"High quality"), not raw FFmpeg terms. |
+| Frontend: Settings page (`SettingsPage.tsx`) | **Working**, deliberately small. Only exposes the settings fields verified to change real behavior (`docs/phase-6.md` "Settings scope") — most fields in `Settings.h` currently round-trip to disk without the backend acting on them yet, so they are not shown as editable controls. |
+| Frontend: toast notifications | **Working.** Fires for job completed/failed/cancelled/retry-scheduled and a one-time "queue restored" signal after a restart; never for progress. Gated by the one Settings toggle with a real effect. |
+| Frontend: Dev console | **Working**, moved off primary navigation into Settings → Developer (spec section 4: no nav entries "merely to fill space"). |
+| Final polished UI (dark mode, application shell, design system) | **Working**, delivered in Phase 6. See `docs/phase-6.md` for the full audit, design system, and verification. |
 
 ## Tests
 
 | Suite | Count | Status |
 |---|---|---|
-| C++ (GoogleTest) | 345 | 330 pass, 15 skipped (Windows-only assertions, on a Linux run), 0 fail |
+| C++ (GoogleTest) | 346 | 331 pass, 15 skipped (Windows-only assertions, on a Linux run), 0 fail |
 | Python (`unittest`) | 24 | pass |
-| Frontend (`vitest`) | 57 | pass |
+| Frontend (`vitest`) | 75 | pass |
 | End-to-end, real binary + real FFmpeg | 109 checks | pass |
+| Real Tauri app launch (Phase 6) | 8 screens | rendered and screenshotted under a virtual display, driving the real `mediatool-core` binary |
 
 See `docs/development.md` for exact commands, `tests/e2e/README.md` for what the end-to-end
 suites do and deliberately do not cover, and `docs/protocols/downloader.md` for the manual
@@ -136,4 +145,6 @@ real-network integration test.
 - `docs/phase-2.md` — the Phase 2 engineering report
 - `docs/phase-5.md` — the Phase 5 engineering report (the queue: architecture, retry policy,
   recovery, the bugs found along the way, and the verification matrix)
+- `docs/phase-6.md` — the Phase 6 engineering report (UI audit, design system, frontend
+  architecture, accessibility, and real-app verification)
 - `tests/e2e/README.md` — the end-to-end queue harnesses

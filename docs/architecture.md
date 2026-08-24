@@ -262,6 +262,21 @@ settle on the same candidate, and the reservation releases on scope exit so a ca
 failed job cannot leak a claim. It is process-wide because the resource it guards — the set
 of names this application is about to write — is itself process-wide.
 
+## Frontend architecture (Phase 6)
+
+`app/frontend/src/App.tsx` owns exactly one `useQueue()` instance and passes it down —
+every screen that needs job data reads that same store rather than opening its own
+subscription (Phase 6 removed a second, duplicate polling hook that `DownloaderPage` and
+`DevConsole` each had). `AppShell.tsx` renders the five real navigation destinations around
+whichever page is active; `state/queueReducer.ts` (unchanged from Phase 5) stays the single
+source of truth for what a job's state is. `state/useQueueNotifications.ts` watches that
+same store for transitions worth a toast, entirely outside the reducer, so "what the store
+contains" and "what the user is told about it" stay two separate, independently testable
+concerns. `styles/theme.css` and `styles/components.css` are the design system: CSS custom
+properties for every color/spacing/radius/motion value, consumed by class name rather than
+scattered inline styles. See `docs/phase-6.md` for the full design system, per-screen
+report, and accessibility/verification notes.
+
 ## What's scaffolded vs. working
 
 See the root `README.md`'s status table for the authoritative, per-component breakdown — do
