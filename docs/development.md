@@ -101,9 +101,33 @@ order, each time you pull changes that touch more than the frontend.
 |---|---|
 | C++ (GoogleTest) | `ctest --preset windows-mingw-debug --output-on-failure` |
 | Python (`unittest`) | `python -m unittest discover -s tests/python` (deliberately run under the **ambient** interpreter, not the venv — see the module docstring in `tests/python/test_downloader_protocol.py`) |
+| Frontend (`vitest`) | `cd app/frontend && npm test` |
+| End-to-end queue, FFmpeg | `python tests/e2e/queue_ffmpeg_e2e.py` (needs `ffmpeg`/`ffprobe`, no network) |
+| End-to-end queue, downloads + retry | `python tests/e2e/queue_download_e2e.py` (no network) |
+
+The two end-to-end suites drive the **real** `mediatool-core` binary over its real NDJSON
+protocol with real FFmpeg and real files. They exist because unit tests cannot demonstrate
+the things the queue is actually about: a mocked process runner will happily agree that
+concurrency is capped at two, but only counting real `ffmpeg` children proves it. Both of
+the bugs that mattered most in Phase 5 — concurrent jobs overwriting each other's output,
+and event sequence numbers reaching the wire out of order — were found there and were
+invisible to the unit suite. See `tests/e2e/README.md`.
 
 Manual (non-automated, real network) downloader integration test:
-`docs/protocols/downloader.md`'s "Manual integration test" section.
+`docs/protocols/downloader.md`'s "Manual integration test" section. This is still the only
+thing that exercises yt-dlp's own format selection and merge behaviour — the end-to-end
+suite deliberately stands yt-dlp in so retry testing can be reproducible and offline.
+
+### Running the C++ suite off Windows
+
+The core builds and its tests run on Linux as well as on the Windows target. Fifteen tests
+assert genuinely Windows-specific behaviour (backslash separators, drive-letter roots,
+`cmd.exe`) and report as **SKIPPED** rather than failed there, via
+`tests/support/PlatformTest.h`. A clean Linux run is therefore "N passed, 15 skipped, 0
+failed" — anything else is a real regression.
+
+Do not reach for `SKIP_UNLESS_WINDOWS()` to quiet a test that fails for a
+platform-independent reason.
 
 ## Why some choices were made
 

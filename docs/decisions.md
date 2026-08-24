@@ -198,3 +198,245 @@ section 47. Newest entries at the bottom of each phase's section.
 - **Consequences:** documented here per spec section 47 as a deliberate deviation from
   the letter of section 40, in keeping with its spirit (thorough, isolated, no-network
   protocol testing).
+
+## Phase 5
+
+### Building the missing conversion/compression layer, rather than a queue over one job type
+
+Phase 5's specification describes Phases 1–4 as complete. The repository was at Phase 2:
+`FFmpegEngine::Convert`/`Compress` threw `E_NOT_IMPLEMENTED`, `createJob` rejected
+`CONVERSION` and `COMPRESSION`, and no `ConversionJob`, `CompressionJob`,
+`FFmpegArgumentBuilder` or equivalent existed. `README.md` said so explicitly.
+
+The phase's central requirement is a *unified* queue spanning downloads, conversions and
+compressions, with a real download → convert → compress pipeline. A queue over one job type
+cannot demonstrate any of that: no dependency chain, no mixed-type scheduling, no way to
+show that concurrency caps real encoder processes.
+
+So this phase built the minimum real version of that layer: a closed set of target formats
+and compression presets, a pure `FFmpegArgumentBuilder`, real `Convert`/`Compress` with
+progress, cancellation and atomic output, and `ConversionJob`/`CompressionJob` over a shared
+`MediaProcessingJob` lifecycle.
+
+Deliberately **not** built, because they are not needed for the queue to be real and belong
+to the phase that owns compression properly: target-size compression (needs two-pass),
+image conversion/compression, document conversion, `ExtractAudio`/`ExtractFrames`, and
+per-codec tuning beyond the built-in recipes. Those remain declared-and-honest.
+
+### `JobManager` evolved into the queue, rather than a queue layered over it
+
+The specification suggests "one coherent orchestration layer over the existing
+`JobManager`". Taken literally, that means a second structure holding jobs back and handing
+them to `JobManager` only when eligible — which is two queues. `JobManager`'s own FIFO and
+worker pool would become vestigial, jobs would be pending in one structure while another
+also believed it owned them, and `GetJob`/`ListJobs` would have to merge two sources of
+truth.
+
+That is exactly the competing-queues problem the phase exists to prevent, so `JobManager`
+was evolved in place instead. Its entire Phase 1 public surface still exists and behaves the
+same way — every existing caller and test kept working — and the internals were replaced:
+the FIFO deque became a priority/dependency-aware pending set in `SchedulerCore`, and the
+fixed worker pool became one scheduler thread plus a worker per running job.
+
+This is a deviation from the letter of the specification and satisfies its intent better.
+
+### `SchedulerCore` is pure: no threads, no locks, no clock
+
+Scheduling policy and thread management are separated absolutely. `SchedulerCore` decides
+what runs next; `JobManager` runs it. Every `SchedulerCore` method that needs the current
+time takes it as a parameter rather than reading a clock.
+
+The payoff is that the entirety of this phase's scheduling behaviour — FIFO, priority,
+concurrency admission, reordering, pause, dependency gating, retry eligibility, fairness
+aging, history eviction — is testable as ordinary deterministic function calls. Its 48 tests
+run in 2ms with no sleeps and nothing that can flake. The alternative, testing scheduling
+through a live threaded manager, would have meant timing-dependent tests, and the
+specification is explicit that arbitrary sleeps are not an acceptable way to make a test
+pass.
+
+### Concurrency enforced by admission, not by thread-pool size
+
+Phase 1 capped concurrency by running exactly N worker threads that each pulled one job.
+Simple, but the limit is then fixed at construction and is a cap on *job objects picked up*
+rather than on work actually running.
+
+Phase 5 caps it at the admission decision in `SelectDispatchable` and spawns a worker per
+dispatched job. That makes the limit changeable at runtime, and makes it a cap on real
+running processes — which is what the user means by "run 2 at once", and what the end-to-end
+suite verifies by counting real `ffmpeg` children rather than trusting the job count.
+
+### No `PAUSING` state
+
+The specification's suggested state list includes `PAUSING`. It was not added, because there
+is no asynchronous pause handshake in this architecture for a job to sit in: pause is either
+cooperative and immediate (a job that checkpoints through `WaitWhilePaused`) or unsupported
+for that job type. A state nothing can ever be observed in is worse than no state.
+
+### Per-job pause is unsupported for media jobs, and says so
+
+There is no reliable cross-platform way to suspend a running `yt-dlp` or `ffmpeg` process,
+and the alternative — killing it and restarting later — is not pausing: it discards work and
+would require resumable-output support neither tool is being asked for.
+
+Rather than implement a "pause" that leaves a process consuming CPU and bandwidth while the
+UI claims otherwise, `pauseJob` returns `E_JOB_INVALID_OPERATION` for these job types with a
+message that says to cancel instead, and the UI disables the control. The specification is
+explicit that a fake pause is worse than no pause.
+
+Queue-level pause is real and means precisely "do not start additional work".
+
+### Retry classification defaults to *not* retrying
+
+Classification is allow-list shaped: an error is transient only when there is a specific
+reason to believe a second attempt might differ. Everything unrecognized is permanent.
+
+A retry that cannot succeed costs the user time, burns the budget, and buries the real error
+under identical copies of itself. `DOWNLOAD_FAILURE` illustrates why the default matters —
+it covers both "the connection dropped" and "this video is private", so without a specific
+code distinguishing them, retrying is a coin flip that mostly loses.
+
+Classification reads the structured `ErrorInfo` — category, then machine code — and never
+free-text stderr, which would break the first time yt-dlp or FFmpeg reworded a message.
+
+### `E_JOB_INTERRUPTED` is classified permanent
+
+A job that was mid-flight when the process died is genuinely *unknown*, not permanent. But
+the classifier has two buckets and the rule is that uncertainty means no automatic retry.
+
+Auto-restarting these would re-download gigabytes without the user asking, or re-run an
+encode over a partial file. The error is marked `recoverable`, so the UI offers Retry and the
+decision stays with the user. This directly contradicted an earlier draft where the code was
+listed as transient; a test caught the contradiction with the documented recovery policy.
+
+### Restart recovery fails interrupted jobs rather than re-queueing them
+
+`RUNNING` at crash → `FAILED(E_JOB_INTERRUPTED)`, not `QUEUED`.
+
+We cannot tell what state the output is in: a half-written download or a killed encode leaves
+bytes that may or may not be usable, and neither tool is being asked to resume. Re-queueing
+silently risks enormous unrequested downloads, and — worse — could feed a truncated file to
+the next stage of a pipeline as though it were valid. Failing loudly with a retryable error
+is the honest option, and a manual retry sweeps artifacts first so it starts clean.
+
+### No jitter in the retry backoff
+
+Jitter exists to desynchronise many clients hammering one server. This is a single local
+desktop app retrying its own handful of jobs; there is nothing to desynchronise from. It
+would buy nothing and cost the exact determinism the retry tests depend on.
+
+### Duplicate policy: reject and name the collision
+
+Two pending requests are duplicates iff their identity keys are byte-identical (job type plus
+canonical param serialization). On collision, `createJob` fails with `E_DUPLICATE_JOB` and
+the existing job's id in `details`, so the UI can focus that job rather than quietly starting
+a second identical download. `allowDuplicate: true` overrides it explicitly.
+
+Anything less exact is treated as a different request. Merging merely-similar jobs silently
+loses user intent — converting a file to MP3 and to WAV are two requests, not one.
+
+### Event sequence numbers are stamped at the write point, not at construction
+
+Originally the sequence was assigned where the event was created. Several threads publish
+concurrently, so increasing numbers reached the wire out of order — which defeats the entire
+purpose of having them. The end-to-end suite caught it.
+
+The counter now lives in the stdout writer and is incremented under the same lock that
+serializes lines, so sequence order and byte order on the wire are the same thing. As a
+consequence sequence is *not* a field on `Event`: ordering is a property of the channel, not
+of the event, and modelling it on `Event` was what allowed the bug.
+
+### A pipeline stage names the job it reads from, not a path
+
+`download → convert → compress` needs the second stage's input to be the first stage's
+output, and that path is not knowable when the pipeline is declared: yt-dlp names the file
+from the media's title and whichever container the extractor chose, and deduplication may
+then have moved it to `Title (2).mp4`.
+
+An earlier version had the frontend construct the expected path. It was wrong for exactly the
+download case the feature exists for. A stage now sets `inputFromJobId`, the backend resolves
+the real path immediately before the follower runs, and declaring it implies the dependency —
+so a stage can neither start early nor run against a file that was never produced.
+
+### Output names are reserved, not just deduplicated
+
+Deduplication asks the disk whether a name is free. Two jobs that ask before either has
+written both get "yes". Unreachable at Phase 1's concurrency of one; routine at Phase 5's,
+and reproduced six times out of six: three downloads of the same title, all reporting
+`COMPLETED`, one file on disk. Two of the user's downloads were silently destroyed.
+
+`filesystem::OutputNameRegistry` reserves a name under a lock that spans choosing *and*
+recording it, so two callers cannot settle on the same candidate. Reservations release on
+scope exit, so a cancelled or failed job cannot leak a claim.
+
+It is a process-wide singleton, which is not usually the right shape — but the resource it
+guards, the set of names this application is about to write, is itself process-wide, and the
+alternative was threading a new dependency through every job type, every constructor, and
+every test for no behavioural gain.
+
+### Artifact cleanup is keyed on what the job produced, not on the name it wants
+
+`MediaProcessingJob` initially swept whatever sat at its desired output name before each
+attempt, to stop retries accumulating `clip (1).mp3`, `clip (2).mp3`. That deletes a user's
+unrelated `clip.mp3` on the very first attempt — real data loss, caught by a test.
+
+The sweep now targets the exact path *this job* chose on its previous attempt, recorded
+before the engine runs. A first attempt therefore deletes nothing and deduplicates around a
+taken name; a retry still reclaims its own name.
+
+### `vitest` for the frontend, and only for pure logic
+
+`vite` is already the build tool, so `vitest` adds a dev dependency and no new concepts — no
+jsdom, no component-rendering harness, no new config. The 57 tests cover the queue reducer
+and the display/control-availability helpers, which is where the logic that can silently
+break lives. Rendering is verified by running the real app.
+
+The specification warns against introducing an enormous frontend testing framework for this
+phase; this is the smallest thing that tests the parts worth testing.
+
+### Portability fixes taken in this phase
+
+Three Windows-only assumptions blocked building and testing the core on the Linux machines
+used for development and CI. They are not Phase 5 features, but a phase cannot verify itself
+against a suite that will not link:
+
+- `WindowsHardwareDetector` had no definition off Windows, so the executable failed to link.
+  It now has a POSIX fallback that reads `/proc/cpuinfo` and reports GPUs as none rather than
+  inventing plausible-looking hardware.
+- FFmpeg discovery shelled out to `where`. It now picks the host's lookup command — still one
+  discovery path, it just knows which tool the host ships — and memoizes a successful answer,
+  since the queue resolves paths far more often than Phase 2 did. A *failed* lookup is not
+  cached, so installing ffmpeg mid-session works without restarting.
+- `QueuePersistence::DefaultStateFilePath` concatenated a literal `\`, producing one
+  absurdly-named file instead of a directory. It now builds the path through
+  `std::filesystem`, which yields the same backslash path on Windows.
+
+Fifteen tests that assert genuinely Windows-specific behaviour (backslash separators,
+drive-letter roots, `cmd.exe`) now `SKIP` off-Windows instead of `FAIL`, via
+`tests/support/PlatformTest.h`, so a Linux run gives a clean signal to detect real
+regressions against.
+
+### A failed handoff to a child process is transient
+
+`WriteLine` on `RealProcessRunner` writes to the child's stdin from the caller's thread,
+while the drain thread may be reaping that child in `wait()`. Reproc closes its handles
+there, so a write landing in that window fails with `EINVAL`, not the `EPIPE` the code
+tolerated — and `E_PROCESS_WRITE_FAILED` is not a category the classifier retries, so the
+job failed permanently on a race. It hit roughly one download job in eight once Phase 5
+started launching processes for retries and concurrent work.
+
+Fixed at both levels, deliberately:
+
+- `WriteLine` now tolerates the whole "the child is already gone" error class, not just
+  broken pipe. Swallowing is correct rather than convenient here: a child that has exited
+  cannot be diagnosed from the write, and the useful diagnosis — its exit code and whatever
+  it printed — is exactly what `Wait()` is about to report. A command line that never
+  arrived simply becomes the child's own "produced no result" error, which names the real
+  problem. Anything that is not "the child is gone" still throws.
+- A failed *handoff* (`E_PROCESS_WRITE_FAILED`, `E_PROCESS_START_FAILED`,
+  `E_FFMPEG_LAUNCH_FAILED`, `E_FFPROBE_LAUNCH_FAILED`) is classified transient. The child
+  never received its instructions, so nothing about the request has been shown to be wrong —
+  and the attempt cost nothing, which makes one more try cheap.
+
+The class comment claiming that *only* the drain thread ever touches the handle was also
+corrected: it was true of wait/poll/read/terminate/kill and never true of stdin writes, and
+a comment the code contradicts is worse than no comment.

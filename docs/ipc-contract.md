@@ -87,13 +87,23 @@ verified without hitting a real URL.
 
 | command | params | result |
 |---|---|---|
-| `createJob` | `{type: JobType, params: object}` | `{jobId: string}` |
+| `createJob` | `{type, params, priority?, dependsOn?, parentJobId?, retryPolicy?, allowDuplicate?}` | `{jobId: string, duplicateKey: string}` |
 | `getJob` | `{jobId: string}` | `{job: JobSnapshot}` |
 | `listJobs` | `{}` | `{jobs: JobSnapshot[]}` |
+| `getQueueSnapshot` | `{}` | `{queue: QueueSnapshot}` |
 | `cancelJob` | `{jobId: string}` | `{}` |
 | `pauseJob` | `{jobId: string}` | `{}` |
 | `resumeJob` | `{jobId: string}` | `{}` |
 | `retryJob` | `{jobId: string}` | `{}` |
+| `removeJob` | `{jobId: string}` | `{}` |
+| `setJobPriority` | `{jobId: string, priority: JobPriority}` | `{}` |
+| `moveJob` | `{jobId: string, direction: MoveDirection}` | `{}` |
+| `pauseQueue` | `{}` | `{runState: "PAUSED"}` |
+| `resumeQueue` | `{}` | `{runState: "RUNNING"}` |
+| `setConcurrency` | `{maxConcurrency: number}` (1–16) | `{maxConcurrency: number}` |
+| `clearHistory` | `{scope?: HistoryScope}` (default `"ALL"`) | `{removedJobIds: string[], removedCount: number}` |
+| `retryFailedJobs` | `{}` | `{retriedJobIds: string[], retriedCount: number}` |
+| `getProcessingCapabilities` | `{}` | `{targetFormats, compressionPresets, priorities, ffmpegAvailable}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[]}` |
@@ -103,19 +113,65 @@ verified without hitting a real URL.
 
 Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
+**Every parameter is validated, not trusted.** Job ids are length- and
+control-character-checked; paths reject embedded nulls and `..` segments; numeric options
+are range-checked and **rejected rather than clamped** (clamping would produce output the
+user did not ask for); enum values throw on anything unrecognized rather than falling back
+to a default. There is no path from IPC to an arbitrary command line: `argv` is always a
+structured vector and every codec/container choice comes from a closed enum.
+
 ### `createJob` params by `type`
 
 | `type` | `params` |
 |---|---|
 | `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset}` (`quality` defaults to `"BEST"`) |
+| `"CONVERSION"` | `{outputDirectory: string, targetFormat: TargetFormat, inputPath? \| inputFromJobId?, outputFilenameBase?: string, maxHeight?: 16–8192, audioBitrateKbps?: 8–2048, gifFps?: 1–60}` |
+| `"COMPRESSION"` | `{outputDirectory: string, inputPath? \| inputFromJobId?, preset?: CompressionPreset, outputFilenameBase?: string, outputExtension?: string, maxHeight?: 16–8192, audioBitrateKbps?: 8–2048}` |
 | `"TEST"` | `{}` |
-| anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
+| `"BATCH"`, `"WORKFLOW"` | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
+
+Exactly one of `inputPath` and `inputFromJobId` must be given for a processing job; sending
+both is rejected.
+
+`inputFromJobId` names the job whose output this one consumes. The backend resolves the
+actual path once that job has completed, and declaring it **implies the dependency**. This is
+how a pipeline is built: the producing job's filename is not knowable in advance — a
+download's comes from the media's title and whichever container the extractor chose — so
+naming a path there would be a guess. See `docs/phase-5.md` → "The pipeline problem".
+
+### Scheduling options (any `createJob`)
+
+| field | meaning |
+|---|---|
+| `priority` | `JobPriority`, default `"NORMAL"`. Affects pending order only; never preempts a running job. |
+| `dependsOn` | `string[]`, max 32. Unknown ids, self-references, duplicates and cycles are rejected. |
+| `parentJobId` | Groups a job under another for display. Carries no scheduling meaning. |
+| `retryPolicy` | `{maxRetries?: 0–20, initialDelayMs?, maxDelayMs?, multiplier?: 1.0–10.0}` |
+| `allowDuplicate` | `boolean`. When false (default), an identical pending request is rejected with `E_DUPLICATE_JOB` and the existing job's id in `details`. |
 
 ## Events (core -> ... -> React)
 
+Every event line carries a monotonic **`seq`**, stamped as the line is written under the
+same lock that serializes stdout — so sequence order and arrival order are the same thing.
+A client may safely discard any event whose `seq` is not greater than the highest it has
+applied.
+
 `jobCreated`, `jobQueued`, `jobStarted`, `jobProgress`, `jobPaused`, `jobResumed`,
-`jobCompleted`, `jobFailed`, `jobCancelled` — all carry `jobId` and a `data` object
-that is at minimum `{state: JobState}` and, for `jobProgress`, the full `Progress` object.
+`jobCompleted`, `jobFailed`, `jobCancelled`, `jobSkipped`, `jobRetryScheduled` — all carry
+`jobId` and a `data` object that is at minimum `{state: JobState}`, plus the job's
+`revision` where known. `jobProgress` additionally carries the full `Progress` object.
+
+- `jobQueued` also reports the `WAITING` transition; its `data.state` distinguishes them.
+- `jobSkipped` — `data: {state: "SKIPPED", error?: ErrorInfo}` (`E_DEPENDENCY_FAILED`)
+- `jobRetryScheduled` — `data: {state: "RETRY_WAIT", attempt, delayMs, reason, maxRetries?, nextRetryAtMs?, error?}`
+- `queueChanged` — `data: {runState, maxConcurrency, statistics, pendingOrder}`. No `jobId`.
+
+`revision` increments on every durable change to a job. Use it alongside `seq`: `seq`
+catches a late event outright, `revision` catches the case where two jobs' events interleave
+and a newer `seq` does not mean newer information about *this* job.
+
+**Progress events are throttled** to at most one per job per ~200ms and coalesced, so a
+client will not receive one per FFmpeg tick.
 
 `fileDetected` — `data: {fileInfo: FileInfo}`
 `hardwareDetected` — `data: {hardwareInfo: HardwareInfo}`
@@ -131,17 +187,70 @@ that is at minimum `{state: JobState}` and, for `jobProgress`, the full `Progres
 real user-facing feature.
 
 ### `JobState` (UPPER_SNAKE_CASE)
-`"QUEUED" | "STARTING" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED" | "CANCELLED" | "RETRYING"`
+`"QUEUED" | "WAITING" | "STARTING" | "RUNNING" | "PAUSED" | "RETRY_WAIT" | "COMPLETED" | "FAILED" | "CANCELLED" | "SKIPPED" | "RETRYING"`
+
+- `WAITING` — blocked: a dependency has not completed successfully yet.
+- `RETRY_WAIT` — an automatic retry is scheduled; waiting out its backoff.
+- `SKIPPED` — will never run: a dependency failed or was cancelled. Distinct from `FAILED`
+  because nothing about this job itself went wrong.
 
 Valid transitions (enforced by `JobStateMachine`, all others rejected):
 ```
-QUEUED    -> STARTING, CANCELLED
-STARTING  -> RUNNING, FAILED, CANCELLED
-RUNNING   -> PAUSED, COMPLETED, FAILED, CANCELLED
-PAUSED    -> RUNNING, CANCELLED
-FAILED    -> RETRYING
-RETRYING  -> RUNNING, FAILED
+QUEUED     -> STARTING, CANCELLED, WAITING, SKIPPED
+WAITING    -> QUEUED, CANCELLED, SKIPPED
+STARTING   -> RUNNING, FAILED, CANCELLED
+RUNNING    -> PAUSED, COMPLETED, FAILED, CANCELLED
+PAUSED     -> RUNNING, CANCELLED
+RETRY_WAIT -> RETRYING, CANCELLED
+FAILED     -> RETRYING, RETRY_WAIT
+SKIPPED    -> WAITING
+RETRYING   -> RUNNING, FAILED, CANCELLED
+COMPLETED  -> (none)
+CANCELLED  -> (none)
 ```
+
+`FAILED -> RETRY_WAIT` is the automatic path; `FAILED -> RETRYING` is the manual Retry
+button, which skips the backoff. `SKIPPED -> WAITING` is a manual retry of a skipped job: it
+re-enters dependency evaluation rather than jumping straight to runnable.
+
+### `JobPriority`, `MoveDirection`, `HistoryScope`, `QueueRunState`
+```
+JobPriority   "LOW" | "NORMAL" | "HIGH"
+MoveDirection "TOP" | "UP" | "DOWN" | "BOTTOM"
+HistoryScope  "COMPLETED" | "FAILED" | "CANCELLED" | "SKIPPED" | "ALL"
+QueueRunState "RUNNING" | "PAUSED"
+```
+
+### `TargetFormat`, `CompressionPreset`
+```
+TargetFormat      "MP4" | "MKV" | "WEBM" | "MOV" | "GIF" | "MP3" | "WAV" | "M4A" | "FLAC" | "OPUS"
+CompressionPreset "LOW" | "MEDIUM" | "HIGH"
+```
+Closed sets: every entry has a verified `argv` recipe in `FFmpegArgumentBuilder`. Call
+`getProcessingCapabilities` to read them from the backend rather than hardcoding a copy.
+
+### `QueueSnapshot`
+```ts
+{
+  runState: QueueRunState;
+  maxConcurrency: number;
+  statistics: {
+    running, queued, waiting, retryWait, paused,
+    completed, failed, cancelled, skipped, total: number;
+  };
+  jobs: JobSnapshot[];
+  pendingOrder: string[];   // authoritative scheduling order for pending jobs
+  sequence: number;         // this snapshot already reflects every event up to here
+}
+```
+
+`statistics` carries **no overall percentage**, deliberately: a download measured in bytes
+and an encode measured in seconds share no denominator, so any single number would be
+invented.
+
+`sequence` is read *before* the snapshot is built, so applying only events with
+`seq > sequence` can at worst re-apply something already included (harmless, since events
+assign state) rather than skip something needed.
 
 ### `Progress`
 ```ts
@@ -247,7 +356,11 @@ Grouped exactly as in the product spec: `general`, `downloads`, `processing`, `p
 `advanced`. See `core/settings/Settings.h` for the authoritative field list — mirror it in
 `app/frontend/src/types/settings.ts`.
 
-## Job snapshot (`getJob` / `listJobs` / embedded in job events)
+## Job snapshot (`getJob` / `listJobs` / `getQueueSnapshot`)
+
+One shape for **every** job type. A download, a conversion and a compression all arrive
+looking like this, so no client has to branch on job type just to read state, progress or
+scheduling fields.
 
 ```ts
 {
@@ -259,10 +372,34 @@ Grouped exactly as in the product spec: `general`, `downloads`, `processing`, `p
   completedAt?: string;
   progress: Progress;
   error?: ErrorInfo;
-  result?: object;
-  metadata?: object;
+  result?: object;            // e.g. {outputPath, fileInfo}
+  metadata?: object;          // descriptive; see below
+
+  // Scheduling
+  priority: JobPriority;
+  attempt: number;            // attempts beyond the first
+  retryCount: number;         // same number, under the spec's name for it
+  maxRetries: number;
+  nextRetryAtMs?: number;     // present in RETRY_WAIT
+  retryReason?: string;       // why the retry decision went the way it did
+  dependencies: string[];
+  parentJobId?: string;
+  queuePosition?: number;     // index in pendingOrder; absent when not pending
+  revision: number;           // increments on every durable change
 }
 ```
+
+### `metadata` by job type
+
+Describes **what the job does**, in the job type's own terms. It never contains an FFmpeg
+command line, a yt-dlp invocation, or raw stderr — those are implementation details, and a
+client that displayed them would be showing the user something meaningless.
+
+| type | fields |
+|---|---|
+| `DOWNLOAD` | `title`, `uploader?`, `durationSeconds?`, `webpageUrl?`, `thumbnailUrl?` |
+| `CONVERSION` | `operation: "CONVERSION"`, `inputPath`, `inputFilename`, `sourceFormat`, `outputPath`, `outputFilename`, `targetFormat`, `targetFormatName`, `audioOnly`, `maxHeight?`, `audioBitrateKbps?`, `gifFps?` |
+| `COMPRESSION` | `operation: "COMPRESSION"`, `inputPath`, `inputFilename`, `sourceFormat`, `outputPath`, `outputFilename`, `targetFormat`, `preset`, `maxHeight?`, `audioBitrateKbps?` |
 
 ## Versioning
 
@@ -271,3 +408,20 @@ optional fields without a version bump. A breaking change (renaming/removing a f
 changing an enum's wire representation) requires bumping a `protocolVersion` field to be
 added to the handshake in a later phase — not needed yet, but do not design against that
 possibility (e.g. don't positionally-index arrays where a keyed object would do).
+
+## Durable queue state
+
+Separate from this wire contract, and versioned separately: the queue's own state file at
+`%LOCALAPPDATA%\MediaTool\queue.json` carries `schemaVersion` (currently `1`). Bump it for
+an incompatible on-disk change and add a migration.
+
+The reader is deliberately forgiving in one direction and strict in the other. Missing
+fields take defaults, unknown enum values fall back to something safe (an unrecognized state
+becomes `FAILED`, never something schedulable), and one unreadable entry among good ones is
+skipped rather than costing the whole queue. But a file whose `schemaVersion` is **newer**
+than this build understands is refused outright and left intact — reading it would mean
+guessing at fields we do not understand, and then writing a downgraded version over the
+user's real state.
+
+Anything unusable is moved to `queue.json.corrupt-<timestamp>` rather than deleted, and the
+app starts with an empty queue. See `docs/phase-5.md` → "Persistence and recovery".

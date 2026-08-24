@@ -49,21 +49,58 @@ Everything the application does is eventually a `Job` (spec section 4):
 
 ```
 Job (core/jobs/Job.h)
- +-- DownloadJob        Phase 2 — real, see "The download pipeline" below
- +-- ConversionJob      (Phase 3+)
- +-- CompressionJob     (Phase 3+)
- +-- BatchJob           (Phase 3+)
- +-- WorkflowJob        (Phase 3+)
- \-- TestJob             Phase 1 — synthetic, proves the pipeline end-to-end
+ +-- DownloadJob         Phase 2 — real, see "The download pipeline" below
+ +-- MediaProcessingJob  Phase 5 — shared lifecycle for the two local-file operations
+ |    +-- ConversionJob   Phase 5 — real
+ |    \-- CompressionJob  Phase 5 — real
+ +-- BatchJob            scaffolded (named in JobType, not implemented)
+ +-- WorkflowJob         scaffolded (named in JobType, not implemented)
+ \-- TestJob              Phase 1 — synthetic, proves the pipeline end-to-end
 ```
 
 `JobStateMachine` (`core/jobs/JobStateMachine.h`) is the only thing allowed to decide
-whether a state transition is valid — see `docs/ipc-contract.md` for the transition
-table. `JobManager` (`core/jobs/JobManager.h`) owns job lifecycle (create, queue, start,
-track, pause/resume where supported, cancel, retry, remove) against a configurable
-`maxConcurrentJobs`, deliberately not hardcoded to 1 even though Phase 1 runs with a
-concurrency of 1 — batch processing and concurrent downloads in later phases raise this
-without any structural change (spec section 6).
+whether a state transition is valid — the authoritative table lives in that header, and
+`docs/ipc-contract.md` mirrors it for the wire.
+
+## The queue (Phase 5)
+
+There is exactly **one** queue. Downloads, conversions and compressions are all ordinary
+jobs in it; there is no download queue, conversion queue or compression queue, and no job
+type has a scheduling path of its own.
+
+`JobManager` is that queue — the Phase 1 class evolved, not a second orchestrator layered
+beside it. Its Phase 1 public surface is unchanged; what changed is the machinery
+underneath, plus the queue operations added alongside. Responsibilities split cleanly:
+
+```
+core/queue/SchedulerCore   DECIDES    ordering, priority, concurrency admission,
+                                      dependency gating, retry timing.
+                                      Pure: no threads, no locks, no clock, no Job objects.
+
+core/jobs/JobManager       EXECUTES   owns Job objects, runs them on worker threads,
+                                      keeps records in step, emits events, persists.
+```
+
+That split is why the scheduling rules are testable as ordinary deterministic function
+calls with no sleeps: `SchedulerCore` takes the current time as a parameter rather than
+reading a clock.
+
+One scheduler thread dispatches; one worker thread runs each job. **Concurrency is enforced
+by the scheduler's admission decision rather than by a thread pool's size**, which is what
+lets the limit change at runtime and what makes it a cap on real running processes rather
+than on job objects. Two locking rules keep it deadlock-free and are stated at the top of
+`core/jobs/JobManager.h`: the manager's mutex is never held while calling into a `Job`
+(whose methods fire callbacks that re-enter the manager), and never while joining a worker
+(which may be blocked entering the manager).
+
+Supporting pieces, all under `core/queue/`: `RetryClassifier` (transient vs. permanent),
+`BackoffPolicy` (bounded exponential, no jitter), `QueuePersistence` (versioned JSON via
+`AtomicWriter`, corruption recovery, restart recovery), `JobRecord` (the scheduling
+metadata that is *not* on a `Job`, and the unit that gets persisted), `QueueTypes`
+(priority, run state, statistics, duplicate keys).
+
+See `docs/phase-5.md` for the full design, including the retry classification table, the
+recovery policy, and why per-job pause is unsupported for media jobs.
 
 ## The event system
 
@@ -72,6 +109,19 @@ logger publish structured `Event`s (`core/events/Event.h`); the `mediatool-core`
 executable's IPC loop subscribes and turns them into NDJSON lines on stdout. The frontend
 never parses human-readable log text to infer state (spec section 8) — every state change
 and progress update is a typed event with a fixed JSON shape.
+
+Two ordering guarantees were added in Phase 5. Every event line carries a monotonic `seq`,
+**stamped as the line is written**, under the same lock that serializes stdout — so
+sequence order and wire order are the same thing. (Stamping it where the event is
+constructed does not work: several threads publish concurrently, so increasing numbers
+reach the wire out of order. That was a real bug, caught end-to-end.) Sequence therefore
+lives in the IPC layer rather than on `Event`: ordering is a property of the channel, not
+of the event. Separately, each job carries a `revision` that increments on every durable
+change, which catches the case where two jobs' events interleave and a newer `seq` does not
+mean newer information about *that* job.
+
+Progress events are throttled per job and coalesced, so a chatty encode produces tens of
+events rather than thousands.
 
 ## The universal progress model
 
@@ -161,9 +211,11 @@ network-failure detection).
   future phase could move `inspectDownloadUrl` onto a worker thread with a correlated
   response if blocking the IPC loop for a few seconds ever becomes a real problem.
 - Pause/resume is not implemented for `DownloadJob` (`SupportsPause()` is `false`) — only
-  cancel. yt-dlp has no clean "pause a download" primitive; a Phase 3+ implementation
-  would need to stop and later resume via HTTP range requests, which is real design work,
-  not a Phase 2 vertical-slice concern.
+  cancel. yt-dlp has no clean "pause a download" primitive; an implementation would need to
+  stop and later resume via HTTP range requests, which is real design work. Phase 5 reached
+  the same conclusion for conversion and compression, and made the refusal explicit rather
+  than showing a "Paused" state over a still-running process — see `docs/phase-5.md`
+  → "Pause semantics".
 - Playlist URLs are explicitly rejected (`E_PLAYLIST_NOT_SUPPORTED`) rather than silently
   downloading only the first video — see spec section 30 ("prepare, don't fully
   implement").
@@ -197,9 +249,22 @@ dedicated `Mock*` class, which was enough for what currently depends on them. No
 test needs a real ffmpeg, a real network connection, or the real `%LOCALAPPDATA%` to pass
 — see `docs/development.md`'s testing section for how to run the suites.
 
+## Filename collisions under concurrency
+
+Deduplication answers "is this name free?" by looking at the disk. Two jobs that ask before
+either has written both get "yes" — unreachable when only one job ran at a time, routine
+once Phase 5 runs several. The observed result was three downloads of the same title all
+reporting success with one file on disk.
+
+So jobs **reserve** an output name through `filesystem::OutputNameRegistry` rather than
+merely deduplicating one. The lock spans choosing and recording, so two callers cannot
+settle on the same candidate, and the reservation releases on scope exit so a cancelled or
+failed job cannot leak a claim. It is process-wide because the resource it guards — the set
+of names this application is about to write — is itself process-wide.
+
 ## What's scaffolded vs. working
 
-See the root `README.md`'s "Phase 1 status" table for the authoritative, per-component
-breakdown — do not assume a class exists just because its header does; several interfaces
-in this document (`IImageEngine`, `IDocumentConverter`, `Convert`/`Compress` on
-`IMediaEngine`) are declared but intentionally not implemented yet.
+See the root `README.md`'s status table for the authoritative, per-component breakdown — do
+not assume a class exists just because its header does; several interfaces in this document
+(`IImageEngine`, `IDocumentConverter`, `ExtractAudio`/`ExtractFrames` on `IMediaEngine`) are
+declared but intentionally not implemented yet, and say so when called.
