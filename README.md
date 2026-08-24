@@ -13,9 +13,13 @@ real architecture (no simulated progress, no bypassed layers). **Phase 5** built
 unified job queue: concurrency, priorities, retries, dependencies, crash recovery, and a
 functional queue UI. **Phase 6** turned that functional UI into Gravity's actual product
 design — a dark, cohesive application shell with a real design system, replacing the
-developer-console look Phases 1-5 shipped with. See "Status" below for exactly what's real
-vs. scaffolded, `docs/phase-2.md`/`docs/phase-5.md`/`docs/phase-6.md` for the full reports,
-and `docs/roadmap.md` for what's planned next.
+developer-console look Phases 1-5 shipped with. **Phase 7** made it distributable
+(packaging, resource resolution, branding), **Phase 8** hardened it against real
+adversarial and process-level failures, and **Phase 9** closed the last genuine v1 gaps and
+**froze the feature set** — see `docs/v1-feature-freeze.md` for exactly what's in v1 and
+what's deliberately deferred. See "Status" below for what's real vs. scaffolded, the
+`docs/phase-*.md` reports for the full per-phase history, and `docs/roadmap.md` for
+post-v1 candidates.
 
 ## Architecture at a glance
 
@@ -124,11 +128,11 @@ verification matrix at the end of it).
 
 | Suite | Count | Status |
 |---|---|---|
-| C++ (GoogleTest) | 346 | 331 pass, 15 skipped (Windows-only assertions, on a Linux run), 0 fail |
-| Python (`unittest`) | 24 | pass |
+| C++ (GoogleTest) | 362 | 347 pass, 15 skipped (Windows-only assertions, on a Linux run), 0 fail |
+| Python (`unittest`) | 26 | pass |
 | Frontend (`vitest`) | 75 | pass |
-| End-to-end, real binary + real FFmpeg | 109 checks | pass |
-| Real Tauri app launch (Phase 6) | 8 screens | rendered and screenshotted under a virtual display, driving the real `mediatool-core` binary |
+| End-to-end, real binary + real FFmpeg/downloads | 186 checks | pass (75 ffmpeg + 34 download + 77 adversarial IPC fuzzing) |
+| Real Tauri app launch (Phase 6/9) | 9 screens | rendered and screenshotted under a virtual display, driving the real `mediatool-core` binary |
 
 See `docs/development.md` for exact commands, `tests/e2e/README.md` for what the end-to-end
 suites do and deliberately do not cover, and `docs/protocols/downloader.md` for the manual
@@ -154,4 +158,7 @@ real-network integration test.
   found and fixed, a real functional bug in stderr capture and process cancellation found
   and fixed, concurrency stress testing, and an investigated-not-dismissed environmental
   finding)
+- `docs/phase-9.md` — the Phase 9 v1-completion report (the product audit, the About panel)
+- `docs/v1-feature-freeze.md` — **the frozen v1 scope**: what's included, what's
+  deliberately excluded and why, known limitations, and future candidates
 - `tests/e2e/README.md` — the end-to-end queue harnesses

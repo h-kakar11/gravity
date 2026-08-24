@@ -283,3 +283,15 @@ See the root `README.md`'s status table for the authoritative, per-component bre
 not assume a class exists just because its header does; several interfaces in this document
 (`IImageEngine`, `IDocumentConverter`, `ExtractAudio`/`ExtractFrames` on `IMediaEngine`) are
 declared but intentionally not implemented yet, and say so when called.
+
+## Product scope (Phase 9)
+
+As of Phase 9, Gravity's feature set is frozen for v1 — see
+`docs/v1-feature-freeze.md` for exactly what's included, what's deliberately deferred (and
+why), and what a future version might add. The architecture above was deliberately kept
+open to several of those deferrals without a redesign: `IDownloadProvider`'s per-item
+`createJob` path could support playlist fan-out without new plumbing; `IImageEngine`/
+`IDocumentConverter` already exist as interfaces for exactly the day image/document
+conversion becomes real; the queue's dependency model already supports an arbitrary
+pipeline shape, not just the three-stage download→convert→compress case it's used for
+today.

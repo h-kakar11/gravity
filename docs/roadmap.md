@@ -31,7 +31,21 @@ throughout (including the on-disk `%LOCALAPPDATA%\Gravity\` data directory, rena
 `MediaTool`), and a single version source of truth. See `docs/phase-7.md` for exactly what
 was and wasn't verified.
 
-Everything below is planned, not built.
+**Phase 8 — COMPLETED.** Adversarial hardening: real IPC fuzzing against the live binary
+(found and fixed a crash from a single malformed byte), a real audit of process spawning
+(found and fixed silently-broken stderr capture and a cancellation hang, both dating to
+Phase 1), scheduler stress testing at volume, and an investigated (not dismissed)
+environmental finding. See `docs/phase-8.md`.
+
+**Phase 9 — COMPLETED. V1 feature freeze.** A product audit against every prior phase,
+one genuine v1 gap closed (an About panel with real Gravity/FFmpeg/yt-dlp version info),
+and every deferred capability (playlists, native pickers, GIF, hardware encoding,
+target-size compression) explicitly documented with its reason rather than left ambiguous.
+See `docs/phase-9.md` for the audit and `docs/v1-feature-freeze.md` for the frozen scope.
+**No new major features from this point forward** — only bug fixes, security fixes,
+performance fixes, and release blockers.
+
+Everything below is planned for a future major version, not v1.
 
 ## Downloads (remaining)
 - Playlists: sequential download, preserved order, per-item numbering (Phase 2
