@@ -384,7 +384,7 @@ def main():
     time.sleep(1.0)  # let the throttled persist tick land
     c.close()
 
-    state_file = os.path.join(STATE_DIR, "MediaTool", "queue.json")
+    state_file = os.path.join(STATE_DIR, "Gravity", "queue.json")
     check("queue state file was written", os.path.exists(state_file), state_file)
     with open(state_file) as f:
         persisted = json.load(f)

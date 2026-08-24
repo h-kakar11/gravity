@@ -1,4 +1,4 @@
-"""Bridges yt-dlp to MediaTool's NDJSON download protocol over stdio.
+"""Bridges yt-dlp to Gravity's NDJSON download protocol over stdio.
 
 Protocol: docs/protocols/downloader.md (summarized in docs/ipc-contract.md). Only the
 standard library plus yt_dlp may be imported here (see requirements.txt) -- the venv this
@@ -167,7 +167,7 @@ def build_metadata_payload(info: dict, url: str) -> dict:
     if info.get("_type") == "playlist":
         raise DownloaderError(
             "E_PLAYLIST_NOT_SUPPORTED", "UNSUPPORTED_FORMAT",
-            "This URL is a playlist. MediaTool currently supports single-video URLs only.")
+            "This URL is a playlist. Gravity currently supports single-video URLs only.")
 
     formats = []
     for f in info.get("formats") or []:
@@ -190,7 +190,7 @@ def build_metadata_payload(info: dict, url: str) -> dict:
 
 def run_selftest() -> int:
     emit("metadata", {
-        "title": "MediaTool Self-Test Video",
+        "title": "Gravity Self-Test Video",
         "duration": 12,
         "playlistIndex": None,
         "playlistCount": None,
@@ -365,7 +365,7 @@ def run_command_stdin() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="MediaTool yt-dlp downloader bridge")
+    parser = argparse.ArgumentParser(description="Gravity yt-dlp downloader bridge")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--selftest", action="store_true",
                        help="Emit a canned NDJSON sequence, no network access")
