@@ -1,8 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Gravity",
-  "version": "0.1.0",
-  "identifier": "com.mediatool.desktop",
+  "identifier": "com.gravity.app",
   "build": {
     "devUrl": "http://localhost:1420",
     "frontendDist": "../../frontend/dist",
@@ -32,6 +31,15 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/**/*": "resources"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
   }
 }

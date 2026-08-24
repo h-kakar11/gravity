@@ -5,14 +5,14 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
 
 /// Requests time out after this long with no matching response line from core.
@@ -33,21 +33,39 @@ impl CoreState {
     /// Spawns mediatool-core and starts the background stdout/stderr reader threads.
     /// Must be called once during Tauri's `.setup()` hook, before any command handler runs.
     pub fn spawn(app_handle: AppHandle) -> Result<Self, String> {
-        let path = resolve_core_path();
+        // Tauri is the one piece of this application that actually knows where a packaged
+        // install placed its bundled resources (it wrote tauri.conf.json's `bundle.resources`
+        // there in the first place) -- so it resolves that location once, here, and hands it
+        // to the child explicitly via MEDIATOOL_RESOURCE_DIR rather than letting mediatool-core
+        // re-derive or guess it (Phase 7, "no CWD dependency"). See docs/phase-7.md
+        // "Resource discovery" for the full strategy and core/filesystem/ExecutablePath.h for
+        // the C++ side's fallback when this isn't set (e.g. running the core binary directly).
+        let resource_dir = app_handle.path().resource_dir().ok();
+        if let Some(dir) = &resource_dir {
+            log::info!("resolved app resource directory: {}", dir.display());
+        } else {
+            log::warn!(
+                "could not resolve the app resource directory (expected in `tauri dev`); \
+                 mediatool-core will fall back to its own executable-relative defaults"
+            );
+        }
+
+        let path = resolve_core_path(resource_dir.as_deref());
         log::info!("spawning mediatool-core sidecar: {}", path.display());
 
-        let mut child = Command::new(&path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                format!(
-                    "failed to spawn mediatool-core at {}: {e} (set MEDIATOOL_CORE_PATH if the \
-                     Phase 1 dev-mode path guess is wrong)",
-                    path.display()
-                )
-            })?;
+        let mut command = Command::new(&path);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = &resource_dir {
+            command.env("MEDIATOOL_RESOURCE_DIR", dir);
+        }
+
+        let mut child = command.spawn().map_err(|e| {
+            format!(
+                "failed to spawn mediatool-core at {}: {e} (set MEDIATOOL_CORE_PATH to override \
+                 the resolved path, e.g. for local development)",
+                path.display()
+            )
+        })?;
 
         let stdin = child.stdin.take().expect("child stdin was requested as piped");
         let stdout = child.stdout.take().expect("child stdout was requested as piped");
@@ -168,19 +186,36 @@ fn spawn_stderr_logger(stderr: std::process::ChildStderr) {
     });
 }
 
-/// Resolves the sidecar binary path. `MEDIATOOL_CORE_PATH` always wins if set.
-///
-/// Phase 1 dev-convenience shim only: absent that env var, this guesses the CMake build
-/// output relative to the process's current working directory (which is app/desktop when
-/// launched via `npm run tauri dev` per docs/development.md). This guess breaks the moment
-/// CWD or the CMake preset differs -- real Tauri sidecar bundling (with a
-/// target-triple-suffixed binary name, resolved relative to the app resource dir instead of
-/// CWD) is a later packaging phase, not this one.
-fn resolve_core_path() -> PathBuf {
+/// Resolves the sidecar binary path, in order:
+///   1. `MEDIATOOL_CORE_PATH` -- always wins if set (development override).
+///   2. `<resource_dir>/mediatool-core.exe` -- a packaged install's own bundled copy,
+///      never anything the user's environment happens to provide.
+///   3. A CMake-build-relative guess, kept only as a last resort for local development
+///      when neither of the above apply (e.g. `cargo run` with no resource dir resolved
+///      and no override set) -- this is CWD-dependent by nature and is not what a
+///      packaged install uses.
+fn resolve_core_path(resource_dir: Option<&Path>) -> PathBuf {
     if let Ok(p) = std::env::var("MEDIATOOL_CORE_PATH") {
         return PathBuf::from(p);
     }
 
+    if let Some(dir) = resource_dir {
+        let bundled = dir.join(core_binary_name());
+        if bundled.is_file() {
+            return bundled;
+        }
+    }
+
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cwd.join("../../build/windows-mingw-debug/app/core/mediatool-core.exe")
+    cwd.join("../../build/windows-mingw-debug/app/core").join(core_binary_name())
+}
+
+#[cfg(target_os = "windows")]
+fn core_binary_name() -> &'static str {
+    "mediatool-core.exe"
+}
+
+#[cfg(not(target_os = "windows"))]
+fn core_binary_name() -> &'static str {
+    "mediatool-core"
 }
