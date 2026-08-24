@@ -410,7 +410,14 @@ void FFmpegEngine::RunEncode(
         }
         throw MediaToolException(ErrorInfo::Make(
             "E_FFMPEG_FAILED", ErrorCategory::EngineFailure,
-            "ffmpeg could not " + ToLower(operation) + " this file.",
+            // `operation` is a gerund everywhere else it's used in this file ("Converting",
+            // progress->statusMessage/"... complete"/"... was cancelled." above) -- phrased
+            // around that instead of forcing it into "could not <gerund> this file", which
+            // reads as broken English ("could not converting"). Found now that a real
+            // ffmpeg failure's message is actually reachable/visible: this `details` field
+            // was empty in every prior build (see the RealProcessRunner stderr-capture fix
+            // this same phase), so nothing had looked closely at this string before.
+            "ffmpeg failed while " + ToLower(operation) + " this file.",
             "exit code " + std::to_string(exitCode) + "\n" + details));
     }
 

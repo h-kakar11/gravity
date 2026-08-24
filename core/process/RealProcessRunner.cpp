@@ -100,14 +100,26 @@ public:
 
                 auto [events, pollEc] =
                     process_.poll(reproc::event::out | reproc::event::err, reproc::milliseconds(200));
-                if (pollEc == std::errc::timed_out) {
-                    continue;  // no output ready -- loop back around to re-check pendingAction_
-                }
                 if (pollEc == reproc::error::broken_pipe) {
                     break;  // both streams closed: the process exited (possibly just killed above)
                 }
                 if (pollEc) {
                     break;  // unexpected error -- stop draining, fall through to wait()
+                }
+                // reproc signals "nothing became ready before the timeout" by returning
+                // events == 0 with a SUCCESS error code, not a distinct timeout error --
+                // `pollEc == std::errc::timed_out` above this comment (removed) could
+                // never actually be true, so this branch was dead code. Found by Phase 8:
+                // a Kill()/Terminate() on a child producing no output at all (nothing
+                // resembling `ping`'s once-a-second chatter, which is what let the one
+                // prior real-process test happen to still pass) never got the periodic
+                // recheck this loop exists to provide -- events == 0 fell through to the
+                // read() below, which guessed a stream with nothing on it and BLOCKED
+                // there for the rest of the child's natural lifetime, however long that
+                // was. A hung ffmpeg/yt-dlp/python child that stops producing output is
+                // exactly the case cancellation has to work for.
+                if (events == 0) {
+                    continue;  // no output ready -- loop back around to re-check pendingAction_
                 }
 
                 const reproc::stream which = (events & reproc::event::out) ? reproc::stream::out : reproc::stream::err;
@@ -246,6 +258,22 @@ std::unique_ptr<IProcess> RealProcessRunner::Start(const std::string& executable
     argv.insert(argv.end(), args.begin(), args.end());
 
     reproc::options reprocOptions;
+
+    // reproc's own DEFAULT redirect resolves stdout to a pipe but stderr to PARENT --
+    // i.e. inherited straight through to *this process's own* stderr, silently, unless
+    // told otherwise (reproc/src/options.c's parse_redirect: "stream == REPROC_STREAM_ERR
+    // ? PARENT : PIPE"). Found by Phase 8 process-safety testing: every child this
+    // launches (ffmpeg, ffprobe, the Python downloader) had its stderr leaking straight to
+    // mediatool-core's own stderr instead of reaching the onStderr callback at all --
+    // meaning FFmpegEngine's captured "ffmpeg's stderr at -loglevel error" diagnostic
+    // (engines/ffmpeg/FFmpegEngine.cpp) was ALWAYS an empty string in every real build,
+    // in production and in the one existing (Windows-only, stdout-only-asserting) real-
+    // process test alike -- every real-process test used a mock for stderr-observing
+    // logic, so nothing ever exercised this path with a real child process. Both streams
+    // are pinned to pipe explicitly here so this can never again depend on which of two
+    // different defaults a library happens to pick per-stream.
+    reprocOptions.redirect.out.type = reproc::redirect::pipe;
+    reprocOptions.redirect.err.type = reproc::redirect::pipe;
 
     // Must outlive the call to start() -- reproc copies the pointer, not the string.
     std::string workingDirectory = options.workingDirectory;
