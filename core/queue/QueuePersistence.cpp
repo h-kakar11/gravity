@@ -61,7 +61,7 @@ std::string QueuePersistence::DefaultStateFilePath() {
                                  // may be called just to display a path.
                                  ? stdfs::path()
                                  : stdfs::path(localAppData);
-    return (base / "MediaTool" / "queue.json").make_preferred().string();
+    return (base / "Gravity" / "queue.json").make_preferred().string();
 }
 
 void QueuePersistence::Save(const PersistedQueue& queue) const {

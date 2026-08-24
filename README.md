@@ -1,4 +1,4 @@
-# MediaTool ("gravity")
+# Gravity
 
 A local-first media downloader, converter, and compressor for Windows. No accounts, no
 telemetry, no cloud processing — everything runs on your machine (spec sections 24, 34).
@@ -147,4 +147,7 @@ real-network integration test.
   recovery, the bugs found along the way, and the verification matrix)
 - `docs/phase-6.md` — the Phase 6 engineering report (UI audit, design system, frontend
   architecture, accessibility, and real-app verification)
+- `docs/phase-7.md` — the Phase 7 engineering report (packaging, resource resolution,
+  branding, versioning, and exactly what could and couldn't be verified without a Windows
+  machine)
 - `tests/e2e/README.md` — the end-to-end queue harnesses

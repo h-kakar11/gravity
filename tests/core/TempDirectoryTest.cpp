@@ -35,14 +35,14 @@ protected:
 TEST_F(TempDirectoryTest, CreatesDirectoryUnderOverrideBase) {
     TempDirectory dir("abc123", baseDir_);
     EXPECT_TRUE(stdfs::exists(dir.Path()));
-    const stdfs::path expected = stdfs::path(baseDir_) / "MediaTool" / "temp" / "job-abc123";
+    const stdfs::path expected = stdfs::path(baseDir_) / "Gravity" / "temp" / "job-abc123";
     EXPECT_EQ(stdfs::path(dir.Path()), expected);
 }
 
 TEST_F(TempDirectoryTest, DoesNotDoublePrefixAnAlreadyPrefixedJobId) {
     TempDirectory dir("job-already-prefixed", baseDir_);
     const stdfs::path expected =
-        stdfs::path(baseDir_) / "MediaTool" / "temp" / "job-already-prefixed";
+        stdfs::path(baseDir_) / "Gravity" / "temp" / "job-already-prefixed";
     EXPECT_EQ(stdfs::path(dir.Path()), expected);
 }
 

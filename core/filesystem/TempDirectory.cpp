@@ -37,7 +37,7 @@ std::string LeafDirName(const std::string& jobId) {
 TempDirectory::TempDirectory(const std::string& jobId,
                               std::optional<std::string> overrideBaseDir) {
     const stdfs::path dir =
-        stdfs::path(ResolveBaseDir(overrideBaseDir)) / "MediaTool" / "temp" / LeafDirName(jobId);
+        stdfs::path(ResolveBaseDir(overrideBaseDir)) / "Gravity" / "temp" / LeafDirName(jobId);
 
     std::error_code ec;
     stdfs::create_directories(dir, ec);

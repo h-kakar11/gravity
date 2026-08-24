@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(MediaTool
+# VERSION here, app/desktop/src-tauri/Cargo.toml's package.version, and
+# app/frontend/package.json's version are three independent ecosystems' manifests and
+# can't literally share one file -- they are kept numerically equal by convention and
+# checked by scripts/check-versions.* (see docs/phase-7.md "Versioning").
+project(Gravity
     VERSION 0.1.0
-    DESCRIPTION "Local-first media downloader, converter, and compressor - C++ core"
+    DESCRIPTION "Gravity -- a local-first media downloader, converter, and compressor (C++ core)"
     LANGUAGES CXX
 )
 

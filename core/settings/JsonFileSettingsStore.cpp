@@ -31,9 +31,9 @@ std::string DefaultSettingsFilePath() {
         // No sensible absolute fallback -- keep this relative rather than throwing, since
         // this function itself must never throw (callers may invoke it just to display a
         // path in a settings UI).
-        return "MediaTool\\settings.json";
+        return "Gravity\\settings.json";
     }
-    return localAppData + "\\MediaTool\\settings.json";
+    return localAppData + "\\Gravity\\settings.json";
 }
 
 JsonFileSettingsStore::JsonFileSettingsStore(std::string filePath) : filePath_(std::move(filePath)) {}

@@ -1,9 +1,9 @@
 {
-  "name": "mediatool-frontend",
+  "name": "gravity-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "MediaTool Phase-1 developer console proving the IPC pipeline end-to-end (spec sections 33, 42). Not the final UI (spec section 34).",
+  "description": "Gravity's React/TypeScript frontend: application shell, design system, and the Home/Download/Convert & Compress/Queue/Settings screens.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
