@@ -82,7 +82,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![send_core_command, open_containing_folder])
         .build(tauri::generate_context!())
-        .expect("error while building the MediaTool Tauri application")
+        .expect("error while building the Gravity Tauri application")
         .run(|app_handle, event| {
             // Best-effort cleanup: kill the sidecar so it doesn't linger as an orphan
             // process. Phase 1 gap: this only fires on a normal app exit event, not on a
