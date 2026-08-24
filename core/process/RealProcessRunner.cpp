@@ -73,11 +73,16 @@ public:
         // the caller's thread while a second thread is blocked inside reproc::drain()'s
         // poll() loop left the child running for the drain's full natural lifetime
         // instead of dying immediately (observed as Kill() + WaitFor(5000) taking ~30s
-        // instead of returning promptly). The fix: ONLY this drain thread ever calls into
-        // `process_`, for wait/poll/read AND terminate/kill. Terminate()/Kill() just set
+        // instead of returning promptly). The fix: this drain thread is the ONLY caller of
+        // wait/poll/read/terminate/kill on `process_`. Terminate()/Kill() just set
         // `pendingAction_`; this loop polls with a short, finite timeout specifically so
         // it can notice that flag promptly and act on it itself, rather than blocking
         // forever in a single infinite-timeout poll like reproc::drain() does.
+        //
+        // WriteLine() is the one exception: stdin is a separate stream and writes happen on
+        // the caller's thread. That does race with this thread reaping the child, which is
+        // why WriteLine tolerates the resulting "child is already gone" errors -- see
+        // IsChildAlreadyGone().
         drainThread_ = std::thread([this, onStdout = std::move(onStdout),
                                      onStderr = std::move(onStderr)]() mutable {
             LineSplitter outSink(std::move(onStdout));
@@ -149,12 +154,35 @@ public:
     RealProcess(const RealProcess&) = delete;
     RealProcess& operator=(const RealProcess&) = delete;
 
+private:
+    // True if a write failed because the child is no longer there to receive it.
+    //
+    // This is a genuine race, not a hypothetical. WriteLine() runs on the caller's thread
+    // while the drain thread may be reaping the child in wait(), after which reproc's
+    // handles are closed -- so a write that lands in that window fails with EINVAL or EBADF
+    // rather than the EPIPE this only used to tolerate. It surfaced as roughly one in eight
+    // download jobs failing with E_PROCESS_WRITE_FAILED, and because that code is not
+    // classified transient, failing *permanently*. Phase 5 made it visible by launching far
+    // more child processes (retries, concurrency); it was always reachable.
+    //
+    // Swallowing it is correct rather than merely convenient: a child that is already gone
+    // cannot be diagnosed from the write, and the useful diagnosis -- its exit code and
+    // whatever it printed before dying -- is exactly what Wait() is about to report. A
+    // truncated or missing command line simply becomes the child's own "no result" error,
+    // which names the real problem. Anything that is NOT "the child is gone" still throws.
+    static bool IsChildAlreadyGone(const std::error_code& ec) {
+        return ec == std::errc::broken_pipe || ec == std::errc::invalid_argument ||
+               ec == std::errc::bad_file_descriptor || ec == std::errc::not_connected;
+    }
+
+public:
+
     void WriteLine(const std::string& line) override {
         std::lock_guard<std::mutex> lock(writeMutex_);
         const std::string data = line + "\n";
         auto [written, ec] = process_.write(reinterpret_cast<const uint8_t*>(data.data()), data.size());
         (void)written;
-        if (ec && ec != std::errc::broken_pipe) {
+        if (ec && !IsChildAlreadyGone(ec)) {
             throw mediatool::errors::MediaToolException(mediatool::errors::ErrorInfo::Make(
                 "E_PROCESS_WRITE_FAILED", mediatool::errors::ErrorCategory::EngineFailure,
                 "Failed to write to child process stdin", ec.message()));

@@ -274,7 +274,6 @@ private:
     // Decides whether a just-failed job earns an automatic retry, and schedules it.
     void MaybeScheduleAutomaticRetry(const JobId& id);
     void ApplyDependencyTransitions(const std::vector<queue::PendingTransition>& transitions);
-    void MarkDirty();
     void PersistIfDue(std::int64_t nowMs, bool force);
     queue::PersistedQueue BuildPersistedQueueLocked() const;
     JobSnapshot SnapshotLocked(const JobId& id) const;

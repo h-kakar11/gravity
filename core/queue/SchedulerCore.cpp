@@ -488,17 +488,6 @@ QueueStatistics SchedulerCore::Stats() const {
     return stats;
 }
 
-std::vector<jobs::JobId> SchedulerCore::DependentsOf(const jobs::JobId& id) const {
-    std::vector<jobs::JobId> dependents;
-    for (const auto& [candidateId, record] : records_) {
-        if (std::find(record.dependencies.begin(), record.dependencies.end(), id) !=
-            record.dependencies.end()) {
-            dependents.push_back(candidateId);
-        }
-    }
-    return dependents;
-}
-
 std::vector<std::string> SchedulerCore::ValidateInvariants() const {
     std::vector<std::string> violations;
 

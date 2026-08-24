@@ -471,8 +471,9 @@ void FFmpegEngine::Compress(const std::string& inputPath, const std::string& out
 void FFmpegEngine::ThrowNotImplemented(const std::string& operation) const {
     throw MediaToolException(ErrorInfo::Make(
         "E_NOT_IMPLEMENTED", ErrorCategory::UnsupportedFormat,
-        operation + " is not implemented in Phase 1",
-        "FFmpegEngine::" + operation + " is intentionally out of scope for Phase 1 (spec section 16)",
+        operation + " is not implemented yet.",
+        "FFmpegEngine::" + operation + " is declared for interface completeness and reported "
+        "honestly rather than faked; see docs/roadmap.md",
         /*recoverable=*/false));
 }
 

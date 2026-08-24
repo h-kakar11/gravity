@@ -14,8 +14,9 @@
 // cancelled before/while it never entered Execute() at all (still Queued, or parked in
 // WaitWhilePaused before OnCancel woke it) -- see JobManager for how that's finalized.
 //
-// JobManager observes this Job via SetCallbacks(); it is the only intended subscriber in
-// Phase 1, and a later integration pass bridges those callbacks into the EventBus.
+// JobManager observes this Job via SetCallbacks() and is its only intended subscriber; it
+// is what bridges these callbacks onto the EventBus and keeps the queue's own record of the
+// job in step with it.
 
 #include <atomic>
 #include <condition_variable>

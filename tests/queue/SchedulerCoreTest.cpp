@@ -591,21 +591,6 @@ TEST_F(SchedulerCoreTest, RejectsDependencyCycles) {
     ExpectConsistent(scheduler);
 }
 
-TEST_F(SchedulerCoreTest, DependentsOfListsReverseEdges) {
-    auto scheduler = MakeScheduler(1);
-    scheduler.Insert(MakeRecord("root"), 0);
-    JobRecord one = MakeRecord("one");
-    one.dependencies = {"root"};
-    scheduler.Insert(std::move(one), 0);
-    JobRecord two = MakeRecord("two");
-    two.dependencies = {"root"};
-    scheduler.Insert(std::move(two), 0);
-
-    auto dependents = scheduler.DependentsOf("root");
-    std::sort(dependents.begin(), dependents.end());
-    EXPECT_EQ(dependents, (std::vector<std::string>{"one", "two"}));
-}
-
 // --- duplicates --------------------------------------------------------------------------
 
 TEST_F(SchedulerCoreTest, RejectsADuplicateOfAnActiveJob) {

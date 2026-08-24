@@ -18,6 +18,13 @@ const std::unordered_set<std::string>& TransientCodes() {
         "E_DOWNLOAD_RATE_LIMITED",      // HTTP 429; backing off is exactly the right move
         "E_DOWNLOAD_INCOMPLETE",        // stream truncated before the expected byte count
         "E_FFMPEG_STALLED",             // child wedged and was killed; may not repeat
+        // A child process that could not be handed its instructions never got to do the
+        // work, so nothing about the request has been shown to be wrong. Worth one more
+        // try -- and cheap, because the attempt cost nothing.
+        "E_PROCESS_WRITE_FAILED",
+        "E_PROCESS_START_FAILED",
+        "E_FFMPEG_LAUNCH_FAILED",
+        "E_FFPROBE_LAUNCH_FAILED",
     };
     return kCodes;
 }

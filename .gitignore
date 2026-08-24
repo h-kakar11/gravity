@@ -32,6 +32,10 @@
 
 # --- Application runtime data (never commit user data) ---
 /resources/local/
+# Settings and queue state fall back to a RELATIVE path when LOCALAPPDATA is unset (see
+# JsonFileSettingsStore / QueuePersistence), so running the core from the repo root writes
+# here. Real user data, never committed.
+/MediaTool/
 *.log
 settings.local.json
 # Ad hoc manual downloader integration test output (docs/protocols/downloader.md) --

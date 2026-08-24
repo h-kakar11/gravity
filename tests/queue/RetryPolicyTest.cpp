@@ -83,6 +83,17 @@ TEST(RetryClassifier, AmbiguousDownloadFailureDefaultsToPermanent) {
     EXPECT_FALSE(ClassifyRetry(Error("E_DOWNLOAD_WHATEVER", ErrorCategory::DownloadFailure)).IsTransient());
 }
 
+TEST(RetryClassifier, AFailedHandoffToAChildProcessIsTransient) {
+    // The child never got its instructions, so nothing about the request has been shown to
+    // be wrong. Reached for real: writing to a child's stdin can race the drain thread
+    // reaping it, and without this the job failed permanently on a race it could have just
+    // retried past.
+    for (const char* code : {"E_PROCESS_WRITE_FAILED", "E_PROCESS_START_FAILED",
+                             "E_FFMPEG_LAUNCH_FAILED", "E_FFPROBE_LAUNCH_FAILED"}) {
+        EXPECT_TRUE(ClassifyRetry(Error(code, ErrorCategory::EngineFailure)).IsTransient()) << code;
+    }
+}
+
 TEST(RetryClassifier, AStalledEngineIsWorthOneMoreTryButAWrongArgumentIsNot) {
     EXPECT_TRUE(ClassifyRetry(Error("E_FFMPEG_STALLED", ErrorCategory::EngineFailure)).IsTransient());
     EXPECT_FALSE(ClassifyRetry(Error("E_FFMPEG_FAILED", ErrorCategory::EngineFailure)).IsTransient());

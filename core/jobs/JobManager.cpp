@@ -942,11 +942,6 @@ void JobManager::NotifyQueueChanged() {
 
 // --- persistence -------------------------------------------------------------------------------
 
-void JobManager::MarkDirty() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    dirty_ = true;
-}
-
 queue::PersistedQueue JobManager::BuildPersistedQueueLocked() const {
     queue::PersistedQueue persisted;
     persisted.schemaVersion = queue::kQueueSchemaVersion;

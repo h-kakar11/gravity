@@ -157,9 +157,6 @@ public:
     const std::vector<jobs::JobId>& PendingOrder() const { return pendingOrder_; }
     std::size_t RunningCount() const;
     QueueStatistics Stats() const;
-    std::int64_t NextSequence() { return ++sequenceCounter_; }
-    // Ids that list `id` among their dependencies.
-    std::vector<jobs::JobId> DependentsOf(const jobs::JobId& id) const;
 
     // --- invariants -------------------------------------------------------------------
     // Human-readable descriptions of any broken invariant (spec section 45). Empty means
@@ -168,6 +165,7 @@ public:
     std::vector<std::string> ValidateInvariants() const;
 
 private:
+    std::int64_t NextSequence() { return ++sequenceCounter_; }
     bool IsPendingState(jobs::JobState state) const;
     void AddToPending(const jobs::JobId& id);
     void RemoveFromPending(const jobs::JobId& id);
