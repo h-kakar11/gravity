@@ -29,4 +29,10 @@ std::optional<std::string> DiscoverFfprobePath(
     process::IProcessRunner& runner,
     const std::optional<std::string>& overridePath = std::nullopt);
 
+// A successful discovery is memoized process-wide, since resolving a path costs a child
+// process launch and the queue asks often. That cache outlives any single IProcessRunner,
+// so a test that scripts one runner would otherwise leak its answer into the next test.
+// Call this between tests that exercise discovery. Not part of the production call path.
+void ResetDiscoveryCacheForTesting();
+
 }  // namespace mediatool::media

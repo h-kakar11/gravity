@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include "tests/support/PlatformTest.h"
+
 #include <chrono>
 #include <mutex>
 #include <string>
@@ -36,6 +38,7 @@ private:
 }  // namespace
 
 TEST(RealProcessRunnerTest, EchoProducesExpectedStdoutLine) {
+    SKIP_UNLESS_WINDOWS();
     RealProcessRunner runner;
     LineCollector stdoutLines;
     LineCollector stderrLines;
@@ -56,6 +59,7 @@ TEST(RealProcessRunnerTest, EchoProducesExpectedStdoutLine) {
 }
 
 TEST(RealProcessRunnerTest, KillStopsLongRunningProcessQuickly) {
+    SKIP_UNLESS_WINDOWS();
     RealProcessRunner runner;
 
     // Deliberately "ping.exe" directly rather than "cmd.exe /c ping ...": cmd.exe would

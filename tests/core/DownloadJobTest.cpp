@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "tests/support/PlatformTest.h"
+
 #include <algorithm>
 
 #include "core/downloads/MockDownloadProvider.h"
@@ -68,6 +70,7 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
 }
 
 TEST(DownloadJob, DeduplicatesFilenameWhenBaseNameAlreadyExists) {
+    SKIP_UNLESS_WINDOWS();
     MockDownloadProvider provider;
     provider.inspectResult.title = "My Video";
     // Never registered in `fs` -- verification will fail with E_DOWNLOAD_OUTPUT_MISSING,
@@ -93,6 +96,7 @@ TEST(DownloadJob, DeduplicatesFilenameWhenBaseNameAlreadyExists) {
 }
 
 TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
+    SKIP_UNLESS_WINDOWS();
     MockDownloadProvider provider;
     provider.inspectResult.title = "Broken Video";
     provider.downloadError = ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "boom");

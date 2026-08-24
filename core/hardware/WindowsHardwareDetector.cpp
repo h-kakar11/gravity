@@ -130,4 +130,55 @@ HardwareInfo WindowsHardwareDetector::Detect() {
 
 }  // namespace mediatool::hardware
 
+#else  // !_WIN32
+
+// Non-Windows fallback. Windows is the product's target platform, but the C++ core is
+// built and its test suite is run on Linux CI/dev machines too, and main.cpp instantiates
+// this detector unconditionally -- without a definition here the whole executable fails to
+// link off-Windows. Reads what POSIX can offer cheaply and honestly reports the rest as
+// unknown rather than inventing plausible-looking hardware. See docs/decisions.md.
+
+#include <fstream>
+#include <thread>
+
+namespace mediatool::hardware {
+
+namespace {
+
+std::string ReadCpuNameFromProcCpuinfo() {
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    if (!cpuinfo) return "Unknown CPU";
+    std::string line;
+    while (std::getline(cpuinfo, line)) {
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        const std::string key = line.substr(0, line.find_last_not_of(" \t", colon - 1) + 1);
+        if (key != "model name" && key != "Model" && key != "Processor") continue;
+        const auto valueStart = line.find_first_not_of(" \t", colon + 1);
+        if (valueStart == std::string::npos) continue;
+        return line.substr(valueStart);
+    }
+    return "Unknown CPU";
+}
+
+}  // namespace
+
+HardwareInfo WindowsHardwareDetector::Detect() {
+    HardwareInfo info;
+    try {
+        info.cpu.logicalCores = std::thread::hardware_concurrency();
+        info.cpu.name = ReadCpuNameFromProcCpuinfo();
+        // No DXGI off Windows. Enumerating GPUs would mean a second, unrelated
+        // vendor-detection implementation for a platform the product does not ship on --
+        // report none rather than guess.
+        info.gpus = {};
+        info.availableEncoders = {};
+    } catch (...) {
+        // Detect() must never throw -- an empty/partial result is a valid outcome.
+    }
+    return info;
+}
+
+}  // namespace mediatool::hardware
+
 #endif  // _WIN32
