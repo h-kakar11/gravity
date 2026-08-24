@@ -45,6 +45,17 @@ See `docs/phase-9.md` for the audit and `docs/v1-feature-freeze.md` for the froz
 **No new major features from this point forward** — only bug fixes, security fixes,
 performance fixes, and release blockers.
 
+**Phase 10 — COMPLETED. Release.** A clean from-scratch build, exact (not narrated) test
+counts across every suite, and a real crash-recovery re-verification that found and fixed
+two genuine bugs: a stale scratch file a real crash could leave on disk forever (now swept
+on the very next startup, before any retry), and a real-subprocess test-coverage gap in
+download cancellation (the FFmpeg path had it, downloads didn't). Also: a security and
+third-party license review, a brand-audit fix (a half-renamed dev-only temp path missed in
+Phase 7), one consistent `1.0.0` version across every manifest, and a `v1.0.0-rc1` tag. See
+`docs/phase-10.md` for the full report and `docs/release.md` for the release record —
+including exactly what a release engineer with a Windows machine still needs to do before
+this becomes a final GA. **Per the spec: there is no Phase 11. Gravity v1 is finished.**
+
 Everything below is planned for a future major version, not v1.
 
 ## Downloads (remaining)

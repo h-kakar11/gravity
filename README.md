@@ -15,11 +15,14 @@ functional queue UI. **Phase 6** turned that functional UI into Gravity's actual
 design — a dark, cohesive application shell with a real design system, replacing the
 developer-console look Phases 1-5 shipped with. **Phase 7** made it distributable
 (packaging, resource resolution, branding), **Phase 8** hardened it against real
-adversarial and process-level failures, and **Phase 9** closed the last genuine v1 gaps and
-**froze the feature set** — see `docs/v1-feature-freeze.md` for exactly what's in v1 and
-what's deliberately deferred. See "Status" below for what's real vs. scaffolded, the
-`docs/phase-*.md` reports for the full per-phase history, and `docs/roadmap.md` for
-post-v1 candidates.
+adversarial and process-level failures, **Phase 9** closed the last genuine v1 gaps and
+**froze the feature set**, and **Phase 10** shipped it: a clean release build, two real
+crash-recovery bugs found and fixed, a security and license review, one consistent
+`1.0.0` version, and a release-candidate tag — see `docs/release.md` for the release
+record and exactly what remains before it becomes a final GA, and
+`docs/v1-feature-freeze.md` for what's in v1 and what's deliberately deferred. See
+"Status" below for what's real vs. scaffolded, the `docs/phase-*.md` reports for the
+full per-phase history, and `docs/roadmap.md` for post-v1 candidates.
 
 ## Architecture at a glance
 
@@ -128,11 +131,11 @@ verification matrix at the end of it).
 
 | Suite | Count | Status |
 |---|---|---|
-| C++ (GoogleTest) | 362 | 347 pass, 15 skipped (Windows-only assertions, on a Linux run), 0 fail |
+| C++ (GoogleTest) | 363 | 348 pass, 15 skipped (Windows-only assertions, on a Linux run), 0 fail |
 | Python (`unittest`) | 26 | pass |
 | Frontend (`vitest`) | 75 | pass |
-| End-to-end, real binary + real FFmpeg/downloads | 186 checks | pass (75 ffmpeg + 34 download + 77 adversarial IPC fuzzing) |
-| Real Tauri app launch (Phase 6/9) | 9 screens | rendered and screenshotted under a virtual display, driving the real `mediatool-core` binary |
+| End-to-end, real binary + real FFmpeg/downloads | 197 checks | pass (83 ffmpeg + 37 download + 77 adversarial IPC fuzzing) |
+| Real Tauri app launch (Phase 6/9/10) | 9+ screens | rendered and screenshotted under a virtual display, driving the real `mediatool-core` binary; includes a real running/completed self-test job |
 
 See `docs/development.md` for exact commands, `tests/e2e/README.md` for what the end-to-end
 suites do and deliberately do not cover, and `docs/protocols/downloader.md` for the manual
@@ -161,4 +164,9 @@ real-network integration test.
 - `docs/phase-9.md` — the Phase 9 v1-completion report (the product audit, the About panel)
 - `docs/v1-feature-freeze.md` — **the frozen v1 scope**: what's included, what's
   deliberately excluded and why, known limitations, and future candidates
+- `docs/phase-10.md` — the Phase 10 release report (clean build, two real crash-recovery
+  bugs found and fixed, security and license review, brand audit, exact test counts)
+- `docs/release.md` — **the release record**: version, build instructions, test results,
+  artifact, and exactly what remains before this release candidate becomes a final GA
+- `docs/third-party-licenses.md` — the dependency license inventory
 - `tests/e2e/README.md` — the end-to-end queue harnesses
