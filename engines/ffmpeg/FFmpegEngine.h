@@ -8,7 +8,6 @@
 // Phase 1 (spec section 16: "do NOT implement every operation now").
 
 #include <optional>
-#include <set>
 #include <string>
 
 #include "core/media/IMediaEngine.h"
@@ -45,27 +44,13 @@ public:
                        const nlohmann::json& options, ProgressCallback onProgress,
                        CancelledCallback isCancelled) override;
 
-    // The set of encoder names the resolved ffmpeg binary reports (see
-    // FFmpegDiscovery::DiscoverAvailableEncoders). Computed once, on first use, and
-    // cached -- not part of IMediaEngine (Convert/Compress-specific), but public so the
-    // Settings/Hardware-Acceleration UI (Phase 4) can surface exactly which encoder will
-    // actually be used rather than a bare on/off toggle.
-    const std::set<std::string>& AvailableEncoders() const;
-
 private:
     process::IProcessRunner& runner_;
     std::optional<std::string> overrideFfmpegPath_;
     std::optional<std::string> overrideFfprobePath_;
-    mutable std::optional<std::set<std::string>> availableEncodersCache_;
 
     std::optional<std::string> ResolveFfmpegPath() const;
     std::optional<std::string> ResolveFfprobePath() const;
-
-    // Shared by Convert() and Compress() -- see FFmpegArgBuilder.h for why these are not
-    // structurally different operations.
-    void RunFfmpegJob(const std::string& inputPath, const std::string& outputPath,
-                      const nlohmann::json& options, ProgressCallback onProgress,
-                      CancelledCallback isCancelled);
 
     [[noreturn]] void ThrowNotImplemented(const std::string& operation) const;
 };

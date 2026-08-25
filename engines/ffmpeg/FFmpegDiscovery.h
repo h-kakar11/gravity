@@ -15,7 +15,6 @@
 // Never throws: any launch failure or "not found" result becomes std::nullopt.
 
 #include <optional>
-#include <set>
 #include <string>
 
 #include "core/process/IProcessRunner.h"
@@ -29,14 +28,5 @@ std::optional<std::string> DiscoverFfmpegPath(
 std::optional<std::string> DiscoverFfprobePath(
     process::IProcessRunner& runner,
     const std::optional<std::string>& overridePath = std::nullopt);
-
-// Runs `<ffmpegPath> -hide_banner -encoders` and returns the set of encoder names it
-// reports (e.g. "libx264", "libopenh264", "h264_nvenc") -- used once at FFmpegEngine
-// construction, cached, and never re-probed per job (spec/audit #20's "one discovery
-// path, one lifetime" principle applied to encoder capability the same way it already
-// applies to the binary path itself). Returns an empty set (never throws) if `ffmpegPath`
-// can't be launched or produces output this can't parse -- callers must treat an empty
-// set as "assume nothing but the bundled default is available", not as an error.
-std::set<std::string> DiscoverAvailableEncoders(process::IProcessRunner& runner, const std::string& ffmpegPath);
 
 }  // namespace mediatool::media

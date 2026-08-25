@@ -28,18 +28,7 @@ public:
     virtual void Copy(const std::string& from, const std::string& to) = 0;
     virtual void Move(const std::string& from, const std::string& to) = 0;
     virtual void Rename(const std::string& path, const std::string& newName) = 0;
-
-    // Recursive: removes `path` and, if it is a directory, everything inside it.
-    // Callers that must never risk taking a whole directory tree with them (e.g.
-    // cleanup-after-failure logic acting on individually-named artifacts) should use
-    // DeleteFile() instead.
     virtual void Delete(const std::string& path) = 0;
-
-    // Removes a single file. Throws errors::MediaToolException{ErrorCategory::InvalidFile,
-    // ...} if `path` refers to a directory rather than a file -- this method never
-    // recurses, unlike Delete().
-    virtual void DeleteFile(const std::string& path) = 0;
-
     virtual void CreateDirectory(const std::string& path) = 0;
 
     virtual std::uint64_t CalculateSize(const std::string& path) const = 0;  // recursive for directories

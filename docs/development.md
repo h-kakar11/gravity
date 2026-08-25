@@ -95,34 +95,6 @@ There is no single command that does all of the above yet (Phase 2 candidate: a
 `scripts/dev.ps1`) — run the C++ build, then the frontend, then the desktop shell, in that
 order, each time you pull changes that touch more than the frontend.
 
-## Packaging (Phase 5.2)
-
-A packaged build needs `app/desktop/src-tauri/resources/` populated before building -- it's
-gitignored (never committed; see `docs/licensing.md` for what's vendored and from where):
-
-```powershell
-cmake --build --preset windows-mingw-release
-.\scripts\prepare_bundle_resources.ps1
-cd app\desktop
-npm run tauri build -- --config ..\..\app\desktop\src-tauri\tauri.release.conf.json
-```
-
-`prepare_bundle_resources.ps1` copies the freshly-built `mediatool-core.exe` and calls
-`scripts/vendor_ffmpeg.ps1` (LGPL FFmpeg, see `docs/licensing.md`) and
-`scripts/vendor_python_runtime.ps1` (a redistributable Python + `pip install`ed yt-dlp) --
-each also runs standalone if only one needs refreshing.
-
-**Why `--config tauri.release.conf.json` instead of putting `bundle.resources` straight
-into `tauri.conf.json`:** Tauri's build script validates every configured resource path
-exists at *compile* time, not just at packaging time -- unconditionally, on every `cargo
-check`/`cargo build`/`npm run tauri dev`, whether or not you're actually bundling anything.
-Baking `bundle.resources` into the base config would mean nobody could even open this
-project and run `npm run tauri dev` without first vendoring 200+ MB of FFmpeg/Python
-binaries. `tauri.release.conf.json` holds only the `bundle.resources` addition and is
-merged in (Tauri CLI's `--config`, a JSON Merge Patch over the base config) exclusively for
-the one command that actually needs it -- dev mode and plain `cargo` commands never see it,
-so `resources/` not existing yet is a non-issue for everyday development.
-
 ## Testing
 
 | Suite | Command |

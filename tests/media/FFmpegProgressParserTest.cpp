@@ -40,30 +40,6 @@ TEST(FFmpegProgressParserTest, ParsesContinueBlockWithDuration) {
     EXPECT_FALSE(parser.TakeProgressIfReady().has_value());
 }
 
-TEST(FFmpegProgressParserTest, EstimatesSpeedBytesPerSecondFromInputBitrateWhenProvided) {
-    // 128 kbit/s input, encoding at 2x realtime -> 128000/8 * 2 = 32000 bytes/sec.
-    FFmpegProgressParser parser(100.0, /*inputBitrateBps=*/128000.0);
-    parser.FeedLine("out_time_us=10000000");
-    parser.FeedLine("speed=2.0x");
-    parser.FeedLine("progress=continue");
-
-    auto progress = parser.TakeProgressIfReady();
-    ASSERT_TRUE(progress.has_value());
-    ASSERT_TRUE(progress->speedBytesPerSecond.has_value());
-    EXPECT_NEAR(*progress->speedBytesPerSecond, 32000.0, 0.001);
-}
-
-TEST(FFmpegProgressParserTest, SpeedBytesPerSecondUnsetWithoutInputBitrate) {
-    FFmpegProgressParser parser(100.0);  // no inputBitrateBps supplied
-    parser.FeedLine("out_time_us=10000000");
-    parser.FeedLine("speed=2.0x");
-    parser.FeedLine("progress=continue");
-
-    auto progress = parser.TakeProgressIfReady();
-    ASSERT_TRUE(progress.has_value());
-    EXPECT_FALSE(progress->speedBytesPerSecond.has_value());
-}
-
 TEST(FFmpegProgressParserTest, OutTimeMsIsInterpretedAsMicroseconds) {
     // ffmpeg's out_time_ms field is a long-standing misnomer -- its value is actually
     // microseconds. 4500000 -> 4.5 seconds, not 4500 seconds.

@@ -7,7 +7,6 @@
 #include "core/downloads/MockDownloadProvider.h"
 #include "core/errors/MediaToolException.h"
 #include "core/filesystem/MockFileSystem.h"
-#include "core/filesystem/PathUtils.h"
 #include "core/jobs/JobTypes.h"
 
 using mediatool::downloads::MockDownloadProvider;
@@ -51,8 +50,7 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
         fs.AddFile(outputInfo);
     };
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, /*mediaEngine=*/nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, /*mediaEngine=*/nullptr);
     job.MarkStarting();
     job.MarkRunning();
     job.Execute();
@@ -84,8 +82,7 @@ TEST(DownloadJob, DeduplicatesFilenameWhenBaseNameAlreadyExists) {
     existing.filename = "My Video.mp4";
     fs.AddFile(existing);  // pre-existing, unrelated file with the same base name
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, nullptr);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -107,8 +104,7 @@ TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
     partial.filename = "Broken Video.mp4.part";
     fs.AddFile(partial);
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, nullptr);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -125,66 +121,6 @@ TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
     EXPECT_NE(std::find(deleted.begin(), deleted.end(), "C:\\out\\Broken Video.mp4.part"), deleted.end());
 }
 
-TEST(DownloadJob, DownloadFailureDoesNotDeleteUnrelatedPreExistingFilesOrDirectories) {
-    // Regression test for the confirmed data-loss defect: a failed/cancelled download
-    // must never delete pre-existing user files or directories that merely share a name
-    // prefix with the sanitized job title. Paths are built via paths::Join (as the
-    // production code itself does) rather than hardcoded backslash literals, so the test
-    // isn't tripped up by std::filesystem's platform-dependent preferred separator.
-    MockDownloadProvider provider;
-    provider.inspectResult.title = "Clip";
-    provider.downloadError = ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "boom");
-
-    const std::string outDir = MakeOptions().outputDirectory;
-    const std::string backupDir = mediatool::filesystem::paths::Join(outDir, "Clip Backup");
-    const std::string nestedPath = mediatool::filesystem::paths::Join(backupDir, "important.txt");
-    const std::string unrelatedPath = mediatool::filesystem::paths::Join(outDir, "Clip Notes.txt");
-    const std::string partialPath = mediatool::filesystem::paths::Join(outDir, "Clip.mp4.part");
-
-    MockFileSystem fs;
-    fs.AddDirectory(outDir);
-
-    // Pre-existing, completely unrelated directory whose name is a prefix-superset of
-    // the job's sanitized title ("Clip"), with a nested file inside -- exactly the
-    // reproduction scenario from the audit (title "Vacation" alongside a pre-existing
-    // "Vacation Photos.zip"/directory).
-    fs.AddDirectory(backupDir);
-    FileInfo nested;
-    nested.path = nestedPath;
-    nested.filename = "important.txt";
-    nested.sizeBytes = 42;
-    fs.AddFile(nested);
-
-    // A second unrelated pre-existing file, also a bare prefix match but not a job
-    // artifact (no '.' boundary right after the base name).
-    FileInfo unrelatedFile;
-    unrelatedFile.path = unrelatedPath;
-    unrelatedFile.filename = "Clip Notes.txt";
-    unrelatedFile.sizeBytes = 7;
-    fs.AddFile(unrelatedFile);
-
-    // The job's own partial-download artifact, which cleanup *should* remove.
-    FileInfo partial;
-    partial.path = partialPath;
-    partial.filename = "Clip.mp4.part";
-    fs.AddFile(partial);
-
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
-    job.MarkStarting();
-    job.MarkRunning();
-
-    EXPECT_THROW(job.Execute(), MediaToolException);
-
-    // Pre-existing directory and its nested file must survive.
-    EXPECT_TRUE(fs.Exists(backupDir));
-    EXPECT_TRUE(fs.Exists(nestedPath));
-    // Pre-existing unrelated file must survive.
-    EXPECT_TRUE(fs.Exists(unrelatedPath));
-    // The job's own artifact must be gone.
-    EXPECT_FALSE(fs.Exists(partialPath));
-}
-
 TEST(DownloadJob, MissingOutputAfterCompletionFails) {
     MockDownloadProvider provider;
     provider.inspectResult.title = "Ghost Video";
@@ -193,8 +129,7 @@ TEST(DownloadJob, MissingOutputAfterCompletionFails) {
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, nullptr);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -221,8 +156,7 @@ TEST(DownloadJob, EmptyOutputFileFails) {
     empty.sizeBytes = 0;
     fs.AddFile(empty);
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, nullptr);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -244,8 +178,7 @@ TEST(DownloadJob, InspectFailurePropagatesAsCancelled) {
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, nullptr);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -267,8 +200,7 @@ TEST(DownloadJob, PlaylistUrlSurfacesAsUnsupportedFormat) {
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
 
-    mediatool::filesystem::FilenameReservationRegistry registry;
-    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
+    DownloadJob job(MakeOptions(), provider, fs, nullptr);
     job.MarkStarting();
     job.MarkRunning();
 

@@ -148,22 +148,6 @@ void LocalFileSystem::Delete(const std::string& path) {
     }
 }
 
-void LocalFileSystem::DeleteFile(const std::string& path) {
-    std::error_code isDirEc;
-    if (stdfs::is_directory(path, isDirEc) && !isDirEc) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_DELETE_FILE_IS_DIRECTORY", errors::ErrorCategory::InvalidFile,
-            "Refusing to recursively delete a directory via DeleteFile().", "path=" + path));
-    }
-    std::error_code ec;
-    stdfs::remove(path, ec);
-    if (ec) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_DELETE_FAILED", errors::ErrorCategory::EngineFailure,
-            "Could not delete file.", "path=" + path + " error=" + ec.message()));
-    }
-}
-
 void LocalFileSystem::CreateDirectory(const std::string& path) {
     std::error_code ec;
     stdfs::create_directories(path, ec);

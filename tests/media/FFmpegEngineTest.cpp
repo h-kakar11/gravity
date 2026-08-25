@@ -148,72 +148,26 @@ TEST(FFmpegEngineTest, ProbeThrowsInvalidFileWhenFfprobeExitsNonZero) {
     }
 }
 
-TEST(FFmpegEngineTest, ExtractAudioAndExtractFramesAreStillNotImplemented) {
-    // Convert/Compress are real as of Phase 2 (see the tests below); ExtractAudio and
-    // ExtractFrames remain genuinely out of scope for now.
+TEST(FFmpegEngineTest, UnimplementedOperationsThrowUnsupportedFormat) {
     MockProcessRunner runner({}, {}, 0);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
     auto noopProgress = [](const mediatool::jobs::Progress&) {};
     auto neverCancelled = []() { return false; };
 
+    EXPECT_THROW(engine.Convert("in.mp4", "out.mp4", {}, noopProgress, neverCancelled),
+                 MediaToolException);
+    EXPECT_THROW(engine.Compress("in.mp4", "out.mp4", {}, noopProgress, neverCancelled),
+                 MediaToolException);
     EXPECT_THROW(engine.ExtractAudio("in.mp4", "out.mp3", noopProgress, neverCancelled),
                  MediaToolException);
     EXPECT_THROW(engine.ExtractFrames("in.mp4", "out_dir", {}, noopProgress, neverCancelled),
                  MediaToolException);
 
     try {
-        engine.ExtractAudio("in.mp4", "out.mp3", noopProgress, neverCancelled);
+        engine.Convert("in.mp4", "out.mp4", {}, noopProgress, neverCancelled);
         FAIL() << "expected MediaToolException";
     } catch (const MediaToolException& ex) {
         EXPECT_EQ(ex.Info().category, ErrorCategory::UnsupportedFormat);
-    }
-}
-
-TEST(FFmpegEngineTest, ConvertRejectsOptionsMissingOutputFormat) {
-    MockProcessRunner runner({}, {}, 0);
-    FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
-    auto noopProgress = [](const mediatool::jobs::Progress&) {};
-    auto neverCancelled = []() { return false; };
-
-    try {
-        engine.Convert("in.mp4", "out.mp4", nlohmann::json::object(), noopProgress, neverCancelled);
-        FAIL() << "expected MediaToolException";
-    } catch (const MediaToolException& ex) {
-        EXPECT_EQ(ex.Info().code, "E_INVALID_MEDIA_OPTIONS");
-    }
-}
-
-TEST(FFmpegEngineTest, ConvertLaunchesFfmpegWithRealArgsAndSucceeds) {
-    ScratchFile input(".mov");
-    // Canned stdout is valid ffprobe JSON (harmlessly ignored by the progress parser fed
-    // during Convert() itself, since none of its lines contain "key=value") -- used both
-    // for the internal best-effort Probe() call and, once execution reaches ffmpeg
-    // itself, for the mocked process's own "output".
-    MockProcessRunner runner({kCannedProbeJson}, {}, /*exitCode=*/0);
-    FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
-
-    bool sawProgress = false;
-    auto onProgress = [&sawProgress](const mediatool::jobs::Progress&) { sawProgress = true; };
-    auto neverCancelled = []() { return false; };
-
-    EXPECT_NO_THROW(engine.Convert(input.string(), "out.mp4", {{"outputFormat", "mp4"}}, onProgress,
-                                   neverCancelled));
-    // The canned output has no ffmpeg -progress "key=value" lines, so no progress callback
-    // fires -- this just documents that Convert() completed without needing one.
-    EXPECT_FALSE(sawProgress);
-}
-
-TEST(FFmpegEngineTest, ConvertPropagatesNonZeroFfmpegExitCodeAsFailure) {
-    ScratchFile input(".mov");
-    MockProcessRunner runner({}, {"some ffmpeg error"}, /*exitCode=*/1);
-    FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
-    auto noopProgress = [](const mediatool::jobs::Progress&) {};
-    auto neverCancelled = []() { return false; };
-
-    try {
-        engine.Convert(input.string(), "out.mp4", {{"outputFormat", "mp4"}}, noopProgress, neverCancelled);
-        FAIL() << "expected MediaToolException";
-    } catch (const MediaToolException& ex) {
-        EXPECT_EQ(ex.Info().code, "E_FFMPEG_FAILED");
+        EXPECT_NE(ex.Info().message.find("not implemented in Phase 1"), std::string::npos);
     }
 }

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Gravity",
+  "productName": "MediaTool",
   "version": "0.1.0",
-  "identifier": "com.gravity.app",
+  "identifier": "com.mediatool.desktop",
   "build": {
     "devUrl": "http://localhost:1420",
     "frontendDist": "../../frontend/dist",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Gravity",
+        "title": "MediaTool",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -32,12 +32,6 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser",
-        "installerHooks": "installer/hooks.nsh"
-      }
-    }
+    ]
   }
 }

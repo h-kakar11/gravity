@@ -40,41 +40,9 @@ void MockFileSystem::Rename(const std::string& path, const std::string& newName)
     Move(path, target);
 }
 
-namespace {
-bool IsWithin(const std::string& candidate, const std::string& directory) {
-    return candidate.rfind(directory + "\\", 0) == 0 || candidate.rfind(directory + "/", 0) == 0;
-}
-}  // namespace
-
 void MockFileSystem::Delete(const std::string& path) {
-    // Mirrors LocalFileSystem::Delete's std::filesystem::remove_all semantics: removes
-    // `path` itself and, if it is a directory, everything nested under it -- so tests
-    // exercising cleanup-after-failure logic can actually observe the real-world
-    // "deleted a whole directory tree" hazard rather than a mock that can't represent it.
-    std::vector<std::string> nestedFiles;
-    for (const auto& [filePath, info] : files_) {
-        if (IsWithin(filePath, path)) nestedFiles.push_back(filePath);
-    }
-    for (const auto& filePath : nestedFiles) files_.erase(filePath);
-
-    std::vector<std::string> nestedDirs;
-    for (const auto& dirPath : directories_) {
-        if (IsWithin(dirPath, path)) nestedDirs.push_back(dirPath);
-    }
-    for (const auto& dirPath : nestedDirs) directories_.erase(dirPath);
-
     files_.erase(path);
     directories_.erase(path);
-    deletedPaths_.push_back(path);
-}
-
-void MockFileSystem::DeleteFile(const std::string& path) {
-    if (directories_.count(path) > 0) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_DELETE_FILE_IS_DIRECTORY", errors::ErrorCategory::InvalidFile,
-            "Refusing to recursively delete a directory via DeleteFile().", "path=" + path));
-    }
-    files_.erase(path);
     deletedPaths_.push_back(path);
 }
 

@@ -1,7 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import PresetBar from "../components/PresetBar";
+import { useCallback, useMemo, useState, type CSSProperties } from "react";
 import { useJobs } from "../hooks/useJobs";
-import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
 import { asErrorInfo } from "../utils/errors";
 import type { DownloadMetadata, QualityPreset } from "../types/download";
@@ -56,19 +54,8 @@ function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
 
 export default function DownloaderPage() {
   const { jobs, cancelJob } = useJobs();
-  const { screen } = useNavigation();
-  // Prefilled by HomePage's URL-less nav (nothing today) and by the paste-and-download
-  // global hotkey (App.tsx), which navigates here with the clipboard's URL already in hand.
-  const prefillUrl = screen.kind === "download" ? screen.prefillUrl : undefined;
 
-  const [url, setUrl] = useState(prefillUrl ?? "");
-
-  // The page may already be mounted (user already on the Download screen) when a new
-  // paste-and-download hotkey event lands -- the initial useState above only covers a
-  // fresh mount, so re-sync whenever a new prefillUrl arrives.
-  useEffect(() => {
-    if (prefillUrl) setUrl(prefillUrl);
-  }, [prefillUrl]);
+  const [url, setUrl] = useState("");
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState<ErrorInfo | null>(null);
   const [metadata, setMetadata] = useState<DownloadMetadata | null>(null);
@@ -198,14 +185,6 @@ export default function DownloaderPage() {
       {metadata ? (
         <section style={styles.section}>
           <h2 style={styles.h2}>Download options</h2>
-          <PresetBar
-            kind="DOWNLOAD"
-            currentOptions={() => ({ quality, outputDirectory: outputDirectory.trim() })}
-            onApply={(options) => {
-              if (typeof options.quality === "string") setQuality(options.quality as QualityPreset);
-              if (typeof options.outputDirectory === "string") setOutputDirectory(options.outputDirectory);
-            }}
-          />
           <div style={styles.row}>
             <label style={styles.label}>
               Quality:{" "}
