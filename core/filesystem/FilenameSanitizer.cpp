@@ -138,6 +138,13 @@ std::string DeduplicateBaseName(const std::string& directory, const std::string&
         "Exceeded " + std::to_string(kMaxDeduplicationAttempts) + " numbered variants in " + directory));
 }
 
+bool IsJobArtifactOf(const std::string& filenameBase, const std::string& candidateName) {
+    if (candidateName == filenameBase) return true;
+    if (candidateName.size() <= filenameBase.size()) return false;
+    if (candidateName.compare(0, filenameBase.size(), filenameBase) != 0) return false;
+    return candidateName[filenameBase.size()] == '.';
+}
+
 std::string WithPlaylistIndex(const std::string& filename, int index, int totalCount) {
     const std::string totalDigits = std::to_string(totalCount > 0 ? totalCount : 1);
     std::ostringstream oss;

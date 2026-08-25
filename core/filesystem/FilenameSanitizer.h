@@ -33,4 +33,15 @@ std::string DeduplicateBaseName(const std::string& directory, const std::string&
 // index 3 of 42 -> "03 - <filename>".
 std::string WithPlaylistIndex(const std::string& filename, int index, int totalCount);
 
+// Used by cleanup-after-failure logic to decide whether `candidateName` (a bare
+// filename, no directory component) was created by the job that owns `filenameBase`,
+// as opposed to an unrelated pre-existing file that merely starts with the same text
+// (e.g. filenameBase "Vacation" must never match a pre-existing "Vacation Photos.zip").
+// True only for an exact match, or a match immediately followed by '.' (covering the
+// job's own final output, yt-dlp intermediate artifacts like ".mp4.part"/".f137.mp4",
+// and sidecar files like ".info.json") -- never a bare prefix match. DeduplicateBaseName
+// already guarantees no file predated the job with this exact base, so anything that
+// passes this check was created by this run.
+bool IsJobArtifactOf(const std::string& filenameBase, const std::string& candidateName);
+
 }  // namespace mediatool::filesystem

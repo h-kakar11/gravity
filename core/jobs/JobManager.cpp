@@ -1,6 +1,7 @@
 #include "core/jobs/JobManager.h"
 
 #include "core/errors/MediaToolException.h"
+#include "core/logging/Logger.h"
 
 namespace mediatool::jobs {
 
@@ -175,6 +176,11 @@ void JobManager::OnJobProgress(JobProgressCallback callback) {
     progressCallback_ = std::move(callback);
 }
 
+void JobManager::SetPreMarkStartingHookForTesting(std::function<void(const JobId&)> hook) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    preMarkStartingHookForTesting_ = std::move(hook);
+}
+
 void JobManager::HandleJobStateChanged(const JobId& id, JobState state) {
     JobStateChangedCallback callback;
     {
@@ -203,7 +209,20 @@ void JobManager::WorkerLoop() {
             id = queue_.front();
             queue_.pop_front();
         }
-        RunJob(id);
+        // Belt-and-suspenders: RunJob() is expected to convert every exception it can
+        // anticipate into a job state transition (Failed/Cancelled) rather than letting
+        // it escape. This catch-all exists so that if it ever doesn't -- a bug in RunJob
+        // itself, or a genuinely unanticipated exception type -- this worker thread logs
+        // and keeps pulling jobs instead of calling std::terminate and taking the whole
+        // process down (the exact failure mode of the fixed cancel/start race, #4).
+        try {
+            RunJob(id);
+        } catch (const std::exception& e) {
+            logging::Log::Error("JobManager",
+                                 "Unhandled exception escaped RunJob for job " + id + ": " + e.what());
+        } catch (...) {
+            logging::Log::Error("JobManager", "Unhandled non-exception value escaped RunJob for job " + id);
+        }
     }
 }
 
@@ -215,22 +234,37 @@ void JobManager::RunJob(const JobId& id) {
     }
     if (!job) return;  // removed before a worker got to it
 
-    const JobState pickedUpState = job->State();
-    if (pickedUpState == JobState::Queued) {
-        job->MarkStarting();
-        job->MarkRunning();
-    } else if (pickedUpState == JobState::Retrying) {
-        job->MarkRunning();
-    } else {
-        // Cancelled (or otherwise moved on) while it was sitting in the queue.
-        return;
-    }
-
     try {
+        const JobState pickedUpState = job->State();
+        if (pickedUpState == JobState::Queued) {
+            std::function<void(const JobId&)> hook;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                hook = preMarkStartingHookForTesting_;
+            }
+            if (hook) hook(id);
+            job->MarkStarting();
+            job->MarkRunning();
+        } else if (pickedUpState == JobState::Retrying) {
+            job->MarkRunning();
+        } else {
+            // Cancelled (or otherwise moved on) while it was sitting in the queue.
+            return;
+        }
+
         job->Execute();
         if (job->State() != JobState::Cancelled) job->MarkCompleted();
     } catch (const errors::MediaToolException& e) {
         if (job->State() == JobState::Cancelled) return;
+        if (e.Info().code == "E_INVALID_JOB_TRANSITION") {
+            // Benign race (#4): RequestCancel() moved the job to a terminal state (e.g.
+            // straight from Queued to Cancelled) between the State() read above and the
+            // MarkStarting()/MarkRunning() call that observed it, so that call threw.
+            // This is losing a race, not a bug -- treat it the same as any other
+            // already-terminal outcome instead of letting it escape and kill the worker.
+            if (IsTerminalState(job->State())) return;
+            throw;  // not the expected race shape: a genuine state-machine bug, surface it
+        }
         if (e.Info().category == errors::ErrorCategory::Cancelled) {
             job->MarkCancelled();
         } else {

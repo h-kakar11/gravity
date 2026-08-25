@@ -39,12 +39,14 @@ public:
     void Execute() override;
 
 private:
-    // Best-effort: deletes every file in outputDirectory whose name starts with
-    // `filenameBase` (yt-dlp's own ".part"/intermediate-format artifacts, or a fully
-    // written but since-rejected output). Safe because DeduplicateBaseName chose
-    // `filenameBase` specifically to not collide with anything that predates this job,
-    // so anything matching it now was created by this run. Never lets a cleanup failure
-    // mask the real job error.
+    // Best-effort: deletes every file in outputDirectory that filesystem::IsJobArtifactOf
+    // recognizes as belonging to `filenameBase` (yt-dlp's own ".part"/intermediate-format
+    // artifacts, sidecar metadata, or a fully written but since-rejected output) -- never
+    // a bare prefix match, and never a recursive directory delete (uses
+    // IFileSystem::DeleteFile, not Delete). Safe because DeduplicateBaseName chose
+    // `filenameBase` specifically to not collide with anything that predates this job, so
+    // anything IsJobArtifactOf accepts was created by this run. Never lets a cleanup
+    // failure mask the real job error.
     void CleanupArtifacts(const std::string& filenameBase);
 
     Options options_;

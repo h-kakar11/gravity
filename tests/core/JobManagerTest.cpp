@@ -7,14 +7,35 @@
 #include <memory>
 #include <thread>
 
+#include "core/errors/ErrorInfo.h"
+#include "core/errors/MediaToolException.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/TestJob.h"
 
+using mediatool::errors::ErrorCategory;
+using mediatool::errors::ErrorInfo;
+using mediatool::errors::MediaToolException;
 using mediatool::jobs::JobManager;
 using mediatool::jobs::JobState;
+using mediatool::jobs::JobType;
 using mediatool::jobs::TestJob;
 
 namespace {
+
+// A Job whose Execute() returns (almost) instantly, so a submit/cancel stress test can
+// run thousands of cycles per second -- unlike TestJob, whose ~1000ms run would make
+// that impractically slow.
+class InstantJob final : public mediatool::jobs::Job {
+public:
+    InstantJob() : Job(JobType::Test) {}
+
+    void Execute() override {
+        if (IsCancellationRequested()) {
+            throw MediaToolException(
+                ErrorInfo::Make("E_TEST_CANCELLED", ErrorCategory::Cancelled, "cancelled"));
+        }
+    }
+};
 
 // Polls GetJob(id).state until `predicate` is true or the deadline passes. Returns the
 // last observed state so assertions can report what it actually settled on.
@@ -71,6 +92,30 @@ TEST(JobManager, CancelStopsARunningJobPromptly) {
     // TestJob's full run is ~1000ms (10 steps x 100ms); a prompt cancellation must land
     // well short of that, not run to completion before noticing the flag.
     EXPECT_LT(elapsed, std::chrono::milliseconds(600));
+}
+
+// Regression test for #4: a Queued job racing with a concurrent RequestCancel() must
+// never crash the worker thread (previously: an uncaught E_INVALID_JOB_TRANSITION
+// escaping RunJob -> std::terminate -> process abort, reproduced by the audit at
+// ~1200-6800 submit/cancel cycles of unsynchronized timing). The race window itself is
+// only a couple of instructions wide, so hitting it via raw timing is unreliable on any
+// given machine/scheduler -- this test uses JobManager's testing-only pre-MarkStarting
+// hook to force the exact interleaving deterministically on every iteration instead.
+// Success means the process is still alive and every job reached a terminal state -- if
+// the bug regressed, this whole test binary would abort partway through and CTest would
+// report it as crashed, not merely failed.
+TEST(JobManager, SubmitCancelRaceNeverCrashesTheWorker) {
+    constexpr int kIterations = 500;
+    JobManager manager(1);
+
+    manager.SetPreMarkStartingHookForTesting(
+        [&manager](const mediatool::jobs::JobId& id) { manager.CancelJob(id); });
+
+    for (int i = 0; i < kIterations; ++i) {
+        const auto id = manager.SubmitJob(std::make_unique<InstantJob>());
+        const JobState final = WaitForState(manager, id, std::chrono::seconds(2), IsTerminal);
+        ASSERT_TRUE(IsTerminal(final)) << "job " << id << " never reached a terminal state";
+    }
 }
 
 TEST(JobManager, SecondJobWaitsForFirstWhenMaxConcurrentJobsIsOne) {

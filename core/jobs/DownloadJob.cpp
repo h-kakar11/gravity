@@ -45,14 +45,17 @@ DownloadJob::DownloadJob(Options options, downloads::IDownloadProvider& provider
       mediaEngine_(mediaEngine) {}
 
 void DownloadJob::CleanupArtifacts(const std::string& filenameBase) {
-    try {
-        for (const auto& name : fileSystem_.ListDirectory(options_.outputDirectory)) {
-            if (name.rfind(filenameBase, 0) == 0) {
-                fileSystem_.Delete(filesystem::paths::Join(options_.outputDirectory, name));
-            }
+    for (const auto& name : fileSystem_.ListDirectory(options_.outputDirectory)) {
+        if (!filesystem::IsJobArtifactOf(filenameBase, name)) {
+            continue;  // not this job's -- e.g. an unrelated file that merely shares a prefix
         }
-    } catch (...) {
-        // Best-effort cleanup; a cleanup failure must never mask the real job error.
+        try {
+            // DeleteFile(), never Delete(): even a correctly-scoped match must never be
+            // allowed to recursively remove a directory tree.
+            fileSystem_.DeleteFile(filesystem::paths::Join(options_.outputDirectory, name));
+        } catch (...) {
+            // Best-effort cleanup; a cleanup failure must never mask the real job error.
+        }
     }
 }
 

@@ -11,6 +11,7 @@
 namespace stdfs = std::filesystem;
 using mediatool::filesystem::DeduplicateBaseName;
 using mediatool::filesystem::DeduplicateFilename;
+using mediatool::filesystem::IsJobArtifactOf;
 using mediatool::filesystem::LocalFileSystem;
 using mediatool::filesystem::SanitizeWindowsFilename;
 using mediatool::filesystem::WithPlaylistIndex;
@@ -143,6 +144,33 @@ TEST_F(FilenameDedupTest, DeduplicateBaseNameNumbersSequentiallyRegardlessOfExte
 TEST_F(FilenameDedupTest, DeduplicateBaseNameIgnoresUnrelatedFilesSharingAPrefix) {
     Touch("video (backup).mp4");  // stem is "video (backup)", not "video" -- must not collide
     EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video");
+}
+
+TEST(IsJobArtifactOfTest, MatchesExactBaseName) {
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip"));
+}
+
+TEST(IsJobArtifactOfTest, MatchesOwnOutputAndIntermediateArtifacts) {
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.mp4"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.mp4.part"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.mp4.ytdl"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.f137.mp4"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.temp.mp4"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.info.json"));
+}
+
+TEST(IsJobArtifactOfTest, RejectsUnrelatedFilesSharingOnlyATextPrefix) {
+    // The exact reproduction scenario from the audit: a pre-existing file/directory
+    // whose name merely starts with the job's title text must never match.
+    EXPECT_FALSE(IsJobArtifactOf("Vacation", "Vacation Photos.zip"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Clip Backup"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Clip Notes.txt"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "ClipX.mp4"));
+}
+
+TEST(IsJobArtifactOfTest, RejectsShorterOrUnrelatedNames) {
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Cli"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Other.mp4"));
 }
 
 TEST(WithPlaylistIndexTest, ZeroPadsToTotalCountDigitWidth) {

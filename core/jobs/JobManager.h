@@ -93,6 +93,14 @@ public:
     void OnJobStateChanged(JobStateChangedCallback callback);
     void OnJobProgress(JobProgressCallback callback);
 
+    // Testing seam only -- never set outside tests. If set, RunJob() calls this
+    // synchronously on the worker thread immediately after observing a Queued job and
+    // before calling MarkStarting() on it. This is exactly the window in which a
+    // concurrent RequestCancel() can transition the job straight to Cancelled and make
+    // MarkStarting() throw (the #4 race) -- a hook lets a test force that interleaving
+    // deterministically instead of depending on unreliable timing.
+    void SetPreMarkStartingHookForTesting(std::function<void(const JobId&)> hook);
+
 private:
     void WorkerLoop();
     void RunJob(const JobId& id);
@@ -113,6 +121,7 @@ private:
 
     JobStateChangedCallback stateChangedCallback_;
     JobProgressCallback progressCallback_;
+    std::function<void(const JobId&)> preMarkStartingHookForTesting_;
 
     std::vector<std::thread> workers_;
 };
