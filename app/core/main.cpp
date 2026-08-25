@@ -97,6 +97,9 @@ struct AppContext {
     settings::JsonFileSettingsStore settingsStore{settings::DefaultSettingsFilePath()};
     hardware::WindowsHardwareDetector hardwareDetector;
     filesystem::LocalFileSystem fileSystem;
+    // Shared by every job type that allocates an output filename (#12) -- one instance
+    // per process, not per job.
+    filesystem::FilenameReservationRegistry reservationRegistry;
     media::FFmpegEngine ffmpegEngine;
     downloader::YtDlpProvider ytDlpProvider;
     jobs::JobManager jobManager;
@@ -312,7 +315,8 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     options.outputDirectory = outputDirectory;
     options.quality = quality;
 
-    auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem, &app.ffmpegEngine);
+    auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
+                                                    &app.ffmpegEngine, app.reservationRegistry);
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));

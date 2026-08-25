@@ -51,7 +51,8 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
         fs.AddFile(outputInfo);
     };
 
-    DownloadJob job(MakeOptions(), provider, fs, /*mediaEngine=*/nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, /*mediaEngine=*/nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
     job.Execute();
@@ -83,7 +84,8 @@ TEST(DownloadJob, DeduplicatesFilenameWhenBaseNameAlreadyExists) {
     existing.filename = "My Video.mp4";
     fs.AddFile(existing);  // pre-existing, unrelated file with the same base name
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -105,7 +107,8 @@ TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
     partial.filename = "Broken Video.mp4.part";
     fs.AddFile(partial);
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -166,7 +169,8 @@ TEST(DownloadJob, DownloadFailureDoesNotDeleteUnrelatedPreExistingFilesOrDirecto
     partial.filename = "Clip.mp4.part";
     fs.AddFile(partial);
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -189,7 +193,8 @@ TEST(DownloadJob, MissingOutputAfterCompletionFails) {
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -216,7 +221,8 @@ TEST(DownloadJob, EmptyOutputFileFails) {
     empty.sizeBytes = 0;
     fs.AddFile(empty);
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -238,7 +244,8 @@ TEST(DownloadJob, InspectFailurePropagatesAsCancelled) {
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 
@@ -260,7 +267,8 @@ TEST(DownloadJob, PlaylistUrlSurfacesAsUnsupportedFormat) {
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
 
-    DownloadJob job(MakeOptions(), provider, fs, nullptr);
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, nullptr, registry);
     job.MarkStarting();
     job.MarkRunning();
 

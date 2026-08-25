@@ -28,21 +28,25 @@ nlohmann::json MetadataToJson(const downloads::DownloadMetadata& metadata) {
 }  // namespace
 
 DownloadJob::DownloadJob(Options options, downloads::IDownloadProvider& provider,
-                          filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine)
+                          filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine,
+                          filesystem::FilenameReservationRegistry& reservationRegistry)
     : Job(JobType::Download),
       options_(std::move(options)),
       provider_(provider),
       fileSystem_(fileSystem),
-      mediaEngine_(mediaEngine) {}
+      mediaEngine_(mediaEngine),
+      reservationRegistry_(reservationRegistry) {}
 
 DownloadJob::DownloadJob(Options options, downloads::IDownloadProvider& provider,
                           filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine,
+                          filesystem::FilenameReservationRegistry& reservationRegistry,
                           common::IClock& clock)
     : Job(JobType::Download, clock),
       options_(std::move(options)),
       provider_(provider),
       fileSystem_(fileSystem),
-      mediaEngine_(mediaEngine) {}
+      mediaEngine_(mediaEngine),
+      reservationRegistry_(reservationRegistry) {}
 
 void DownloadJob::CleanupArtifacts(const std::string& filenameBase) {
     for (const auto& name : fileSystem_.ListDirectory(options_.outputDirectory)) {
@@ -72,8 +76,15 @@ void DownloadJob::Execute() {
 
     const std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
     fileSystem_.CreateDirectory(options_.outputDirectory);
-    const std::string filenameBase =
-        filesystem::DeduplicateBaseName(options_.outputDirectory, safeTitle, fileSystem_);
+    // Reserve (not just probe) the output base name: DeduplicateBaseName alone only
+    // checks the disk, which is a TOCTOU race once concurrency > 1 -- two jobs racing to
+    // download videos with the same title could both compute the same "next free" name
+    // (#12). The reservation is released automatically when it goes out of scope at the
+    // end of this function (success or exception alike), freeing the name for reuse once
+    // this job is no longer using it.
+    auto reservation =
+        reservationRegistry_.Reserve(options_.outputDirectory, safeTitle, fileSystem_);
+    const std::string& filenameBase = reservation.BaseName();
 
     Progress starting;
     starting.statusMessage = "Starting download";
