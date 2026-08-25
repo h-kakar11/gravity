@@ -23,9 +23,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install MinGW-w64 GCC
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
+        # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
+        # unconditionally tries to delete libpthread.dll.a/libwinpthread.dll.a as a "static
+        # workaround" after installing, and throws (aborting the whole step) if the current
+        # `mingw` Chocolatey package version doesn't ship those files under that name --
+        # confirmed happening with mingw 16.1.0. This does the same install without that
+        # unnecessary, version-fragile cleanup.
+        run: |
+          choco install mingw --no-progress -y
+          $mingwBin = "C:\ProgramData\mingw64\mingw64\bin"
+          if (-not (Test-Path $mingwBin)) {
+            throw "Expected MinGW bin directory not found at $mingwBin -- the mingw Chocolatey package's layout may have changed."
+          }
+          echo $mingwBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Bootstrap vcpkg
         run: |
@@ -66,9 +76,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install MinGW-w64 GCC
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
+        # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
+        # unconditionally tries to delete libpthread.dll.a/libwinpthread.dll.a as a "static
+        # workaround" after installing, and throws (aborting the whole step) if the current
+        # `mingw` Chocolatey package version doesn't ship those files under that name --
+        # confirmed happening with mingw 16.1.0. This does the same install without that
+        # unnecessary, version-fragile cleanup.
+        run: |
+          choco install mingw --no-progress -y
+          $mingwBin = "C:\ProgramData\mingw64\mingw64\bin"
+          if (-not (Test-Path $mingwBin)) {
+            throw "Expected MinGW bin directory not found at $mingwBin -- the mingw Chocolatey package's layout may have changed."
+          }
+          echo $mingwBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install GNU Rust toolchain
         run: |
@@ -110,9 +130,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install MinGW-w64 GCC
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
+        # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
+        # unconditionally tries to delete libpthread.dll.a/libwinpthread.dll.a as a "static
+        # workaround" after installing, and throws (aborting the whole step) if the current
+        # `mingw` Chocolatey package version doesn't ship those files under that name --
+        # confirmed happening with mingw 16.1.0. This does the same install without that
+        # unnecessary, version-fragile cleanup.
+        run: |
+          choco install mingw --no-progress -y
+          $mingwBin = "C:\ProgramData\mingw64\mingw64\bin"
+          if (-not (Test-Path $mingwBin)) {
+            throw "Expected MinGW bin directory not found at $mingwBin -- the mingw Chocolatey package's layout may have changed."
+          }
+          echo $mingwBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Bootstrap vcpkg
         run: |
