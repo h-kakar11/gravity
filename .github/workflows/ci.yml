@@ -94,6 +94,7 @@ jobs:
         run: |
           rustup toolchain install stable-x86_64-pc-windows-gnu
           rustup default stable-x86_64-pc-windows-gnu
+          rustup component add clippy
 
       - name: cargo test
         run: cargo test
@@ -167,6 +168,7 @@ jobs:
         run: |
           rustup toolchain install stable-x86_64-pc-windows-gnu
           rustup default stable-x86_64-pc-windows-gnu
+          rustup component add clippy
 
       - name: npm install (frontend + desktop)
         run: |
