@@ -14,6 +14,7 @@ export type CoreCommand =
   | "createJob"
   | "getJob"
   | "listJobs"
+  | "listJobHistory"
   | "cancelJob"
   | "pauseJob"
   | "resumeJob"
@@ -39,6 +40,7 @@ export interface CommandParams {
   createJob: { type: JobType; params: Record<string, unknown> };
   getJob: { jobId: string };
   listJobs: Record<string, never>;
+  listJobHistory: { limit?: number };
   cancelJob: { jobId: string };
   pauseJob: { jobId: string };
   resumeJob: { jobId: string };
@@ -56,6 +58,7 @@ export interface CommandResult {
   createJob: { jobId: string };
   getJob: { job: JobSnapshot };
   listJobs: { jobs: JobSnapshot[] };
+  listJobHistory: { jobs: JobSnapshot[] };
   cancelJob: Record<string, never>;
   pauseJob: Record<string, never>;
   resumeJob: Record<string, never>;

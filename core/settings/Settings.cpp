@@ -63,6 +63,7 @@ nlohmann::json Settings::ToJson() const {
              {"defaultOutputDirectory", general.defaultOutputDirectory},
              {"launchOnStartup", general.launchOnStartup},
              {"showNotifications", general.showNotifications},
+             {"minimizeToTrayOnClose", general.minimizeToTrayOnClose},
          }},
         {"downloads",
          {
@@ -102,6 +103,7 @@ Settings Settings::FromJson(const nlohmann::json& json) {
     settings.general.defaultOutputDirectory = general.at("defaultOutputDirectory").get<std::string>();
     settings.general.launchOnStartup = general.at("launchOnStartup").get<bool>();
     settings.general.showNotifications = general.at("showNotifications").get<bool>();
+    settings.general.minimizeToTrayOnClose = general.value("minimizeToTrayOnClose", true);
 
     const auto& downloads = json.at("downloads");
     settings.downloads.defaultQuality = downloads.at("defaultQuality").get<std::string>();
@@ -157,6 +159,7 @@ Settings Settings::Defaults() {
     settings.general.defaultOutputDirectory = defaultDir;
     settings.general.launchOnStartup = false;
     settings.general.showNotifications = true;
+    settings.general.minimizeToTrayOnClose = true;
 
     settings.downloads.defaultQuality = "best";
     settings.downloads.downloadDirectory = defaultDir;

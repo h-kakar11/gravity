@@ -18,6 +18,7 @@ Settings MakeDistinctSettings() {
     settings.general.defaultOutputDirectory = "C:\\Users\\test\\Videos";
     settings.general.launchOnStartup = true;
     settings.general.showNotifications = false;
+    settings.general.minimizeToTrayOnClose = false;
 
     settings.downloads.defaultQuality = "1080p";
     settings.downloads.downloadDirectory = "D:\\Downloads\\MediaTool";
@@ -59,6 +60,7 @@ TEST(SettingsTest, RoundTripPreservesEveryGeneralField) {
     EXPECT_EQ(roundTripped.general.defaultOutputDirectory, original.general.defaultOutputDirectory);
     EXPECT_EQ(roundTripped.general.launchOnStartup, original.general.launchOnStartup);
     EXPECT_EQ(roundTripped.general.showNotifications, original.general.showNotifications);
+    EXPECT_EQ(roundTripped.general.minimizeToTrayOnClose, original.general.minimizeToTrayOnClose);
 }
 
 TEST(SettingsTest, RoundTripPreservesEveryDownloadField) {
@@ -114,6 +116,7 @@ TEST(SettingsTest, DefaultsHaveExpectedSentinelValues) {
 
     EXPECT_FALSE(defaults.general.launchOnStartup);
     EXPECT_TRUE(defaults.general.showNotifications);
+    EXPECT_TRUE(defaults.general.minimizeToTrayOnClose);
     EXPECT_EQ(defaults.downloads.defaultQuality, "best");
     EXPECT_EQ(defaults.downloads.filenameTemplate, "%(title)s.%(ext)s");
     EXPECT_EQ(defaults.downloads.concurrentDownloads, 1);

@@ -16,6 +16,11 @@ struct GeneralSettings {
     std::string defaultOutputDirectory;
     bool launchOnStartup = false;
     bool showNotifications = true;
+    // Added ahead of the Phase 4 system-tray implementation that actually reads it, to
+    // avoid a second settings-schema migration -- when true, closing the main window
+    // hides it to the tray instead of quitting; the Settings toggle lets a user opt back
+    // into a normal full quit.
+    bool minimizeToTrayOnClose = true;
 };
 
 struct DownloadSettings {
@@ -44,7 +49,7 @@ struct PrivacySettings {
 struct AdvancedSettings {
     std::string ffmpegPath;    // empty = auto-discover, see engines/ffmpeg
     std::string ytDlpPath;     // empty = use bundled python/downloader venv
-    std::string temporaryDirectory;  // empty = %LOCALAPPDATA%\MediaTool\temp
+    std::string temporaryDirectory;  // empty = %LOCALAPPDATA%\Gravity\temp
     std::string logLevel = "INFO";   // "DEBUG" | "INFO" | "WARNING" | "ERROR"
     // Off by default: HandleCreateDownloadJob/HandleInspectFile reject UNC output
     // directories unless this is explicitly turned on (spec/audit #11).

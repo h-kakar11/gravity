@@ -101,6 +101,7 @@ export function subscribeToJobEvents(callback: (event: CoreEvent) => void): () =
 export const createJob = (params: CommandParams["createJob"]) => sendCommand("createJob", params);
 export const getJob = (jobId: string) => sendCommand("getJob", { jobId });
 export const listJobs = () => sendCommand("listJobs", {});
+export const listJobHistory = (limit?: number) => sendCommand("listJobHistory", { limit });
 export const cancelJob = (jobId: string) => sendCommand("cancelJob", { jobId });
 export const pauseJob = (jobId: string) => sendCommand("pauseJob", { jobId });
 export const resumeJob = (jobId: string) => sendCommand("resumeJob", { jobId });
@@ -115,6 +116,8 @@ export const createCompressionJob = (params: MediaProcessingJobParams) =>
   sendCommand("createJob", { type: "COMPRESSION", params: params as unknown as Record<string, unknown> });
 export const getCapabilities = (path: string) => sendCommand("getCapabilities", { path });
 export const getSettings = () => sendCommand("getSettings", {});
+export const updateSettings = (settings: CommandParams["updateSettings"]["settings"]) =>
+  sendCommand("updateSettings", { settings });
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
 
 // Reveals a completed download's output file in Windows Explorer via the Rust

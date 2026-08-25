@@ -9,6 +9,7 @@
 // This file is the integration point where the nine Phase-1 modules (built independently
 // against shared interfaces) are wired together for the first time -- see docs/architecture.md.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -35,6 +36,7 @@
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
 #include "core/jobs/DownloadJob.h"
+#include "core/jobs/JobHistoryStore.h"
 #include "core/jobs/JobManager.h"
 #include "core/jobs/MediaProcessingJob.h"
 #include "core/jobs/JobTypes.h"
@@ -106,6 +108,7 @@ struct AppContext {
     media::FFmpegEngine ffmpegEngine;
     downloader::YtDlpProvider ytDlpProvider;
     jobs::JobManager jobManager;
+    jobs::JobHistoryStore jobHistoryStore{jobs::DefaultJobHistoryFilePath()};
 
     // Tracks each job's previous state purely to classify the Running state as either
     // "resumed from pause" or "(re)started" when JobManager reports a transition -- see
@@ -175,6 +178,8 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             json data{{"state", "COMPLETED"}};
             if (snapshot.result) data["result"] = *snapshot.result;
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobCompleted, data, id));
+            app.jobHistoryStore.Append(snapshot.ToJson());  // #10/"Session History": every
+                                                             // terminal job is recorded
             return;
         }
         case JobState::Failed: {
@@ -182,12 +187,15 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             json data{{"state", "FAILED"}};
             if (snapshot.error) data["error"] = snapshot.error->ToJson();
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobFailed, data, id));
+            app.jobHistoryStore.Append(snapshot.ToJson());
             return;
         }
-        case JobState::Cancelled:
+        case JobState::Cancelled: {
             app.eventBus.Publish(
                 events::MakeEvent(events::EventType::JobCancelled, {{"state", "CANCELLED"}}, id));
+            app.jobHistoryStore.Append(app.jobManager.GetJob(id).ToJson());
             return;
+        }
         case JobState::Queued:
         case JobState::Retrying:
             // Queued is announced explicitly by the createJob handler (JobManager has no
@@ -435,6 +443,17 @@ json HandleListJobs(AppContext& app, const json&) {
     return {{"jobs", jobsArray}};
 }
 
+json HandleListJobHistory(AppContext& app, const json& params) {
+    std::vector<nlohmann::json> entries = app.jobHistoryStore.Load();
+    // Load() returns oldest-first; the UI wants most-recent-first ("Session History").
+    std::reverse(entries.begin(), entries.end());
+    if (params.contains("limit") && !params.at("limit").is_null()) {
+        const auto limit = params.at("limit").get<std::size_t>();
+        if (entries.size() > limit) entries.resize(limit);
+    }
+    return {{"jobs", json(entries)}};
+}
+
 json HandleCancelJob(AppContext& app, const json& params) {
     app.jobManager.CancelJob(params.at("jobId").get<std::string>());
     return json::object();
@@ -500,6 +519,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"createJob", HandleCreateJob},
         {"getJob", HandleGetJob},
         {"listJobs", HandleListJobs},
+        {"listJobHistory", HandleListJobHistory},
         {"cancelJob", HandleCancelJob},
         {"pauseJob", HandlePauseJob},
         {"resumeJob", HandleResumeJob},

@@ -260,12 +260,15 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
 
     const MediaProcessingOptions parsedOptions = MediaProcessingOptions::FromJson(options);
 
-    // Probing the input gives FFmpegProgressParser a total duration to compute a
-    // percentage/ETA from -- best-effort: a probe failure just means progress reports
-    // without a percentage, not a fatal error for the job itself.
+    // Probing the input gives FFmpegProgressParser a total duration (for percentage/ETA)
+    // and bitrate (for a speedBytesPerSecond estimate) -- best-effort: a probe failure
+    // just means progress reports without those fields, not a fatal error for the job.
     std::optional<double> totalDurationSeconds;
+    std::optional<double> inputBitrateBps;
     try {
-        totalDurationSeconds = Probe(inputPath).durationSeconds;
+        const filesystem::FileInfo inputInfo = Probe(inputPath);
+        totalDurationSeconds = inputInfo.durationSeconds;
+        if (inputInfo.bitrate.has_value()) inputBitrateBps = static_cast<double>(*inputInfo.bitrate);
     } catch (const MediaToolException&) {
     }
     if (totalDurationSeconds.has_value()) {
@@ -277,7 +280,7 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     const std::vector<std::string> args =
         BuildFfmpegArgs(inputPath, outputPath, parsedOptions, AvailableEncoders());
 
-    FFmpegProgressParser parser(totalDurationSeconds);
+    FFmpegProgressParser parser(totalDurationSeconds, inputBitrateBps);
     std::mutex progressMutex;  // IProcessRunner may deliver stdout from a background thread
 
     auto handleStdout = [&](const std::string& line) {

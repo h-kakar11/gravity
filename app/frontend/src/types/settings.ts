@@ -3,6 +3,9 @@ export interface GeneralSettings {
   defaultOutputDirectory: string;
   launchOnStartup: boolean;
   showNotifications: boolean;
+  // Added ahead of the Phase 4 system-tray feature that reads it -- when true, closing
+  // the window hides it to the tray instead of quitting.
+  minimizeToTrayOnClose: boolean;
 }
 
 export interface DownloadSettings {
@@ -32,6 +35,9 @@ export interface AdvancedSettings {
   ytDlpPath: string;
   temporaryDirectory: string;
   logLevel: "DEBUG" | "INFO" | "WARNING" | "ERROR";
+  // Off by default -- output/input paths reject UNC (\\server\share) locations unless
+  // this is explicitly turned on (spec/audit #11).
+  allowNetworkPaths: boolean;
 }
 
 export interface Settings {

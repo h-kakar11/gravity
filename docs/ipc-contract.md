@@ -88,6 +88,7 @@ verified without hitting a real URL.
 | command | params | result |
 |---|---|---|
 | `createJob` | `{type: JobType, params: object}` | `{jobId: string}` |
+| `listJobHistory` | `{limit?: number}` | `{jobs: JobSnapshot[]}` (most-recent-first; backed by `job_history.json`, a bounded ring buffer of terminal-state jobs -- see `core/jobs/JobHistoryStore.h`) |
 | `getJob` | `{jobId: string}` | `{job: JobSnapshot}` |
 | `listJobs` | `{}` | `{jobs: JobSnapshot[]}` |
 | `cancelJob` | `{jobId: string}` | `{}` |
