@@ -516,6 +516,35 @@ json HandleGetHardwareInfo(AppContext& app, const json&) {
     return {{"hardwareInfo", app.hardwareDetector.Detect().ToJson()}};
 }
 
+// --- Hardware Acceleration UI (#4.7) -----------------------------------------------------
+// The engine's encoder probe (2.6's FFmpegEngine::AvailableEncoders(), cached at
+// construction) already exists; this just surfaces it as its own command rather than
+// overloading the unrelated file-category getCapabilities.
+
+json HandleGetMediaEngineCapabilities(AppContext& app, const json&) {
+    const auto& encoders = app.ffmpegEngine.AvailableEncoders();
+
+    json encodersArray = json::array();
+    for (const auto& encoder : encoders) encodersArray.push_back(encoder);
+
+    auto hasEncoderSuffix = [&](const std::string& suffix) {
+        return std::any_of(encoders.begin(), encoders.end(), [&](const std::string& encoder) {
+            return encoder.size() >= suffix.size() &&
+                   encoder.compare(encoder.size() - suffix.size(), suffix.size(), suffix) == 0;
+        });
+    };
+
+    return {
+        {"availableEncoders", encodersArray},
+        {"hardwareEncodersAvailable",
+         {
+             {"nvenc", hasEncoderSuffix("_nvenc")},
+             {"amf", hasEncoderSuffix("_amf")},
+             {"qsv", hasEncoderSuffix("_qsv")},
+         }},
+    };
+}
+
 // --- Multi-Profile Presets (#4.6) --------------------------------------------------------
 // Schema/persistence (settings::PresetStore) landed in Phase 3.4; this is the IPC surface
 // on top of it.
@@ -606,6 +635,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
         {"getHardwareInfo", HandleGetHardwareInfo},
+        {"getMediaEngineCapabilities", HandleGetMediaEngineCapabilities},
         {"listPresets", HandleListPresets},
         {"savePreset", HandleSavePreset},
         {"deletePreset", HandleDeletePreset},

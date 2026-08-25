@@ -26,6 +26,7 @@ export type CoreCommand =
   | "getSettings"
   | "updateSettings"
   | "getHardwareInfo"
+  | "getMediaEngineCapabilities"
   | "listPresets"
   | "savePreset"
   | "deletePreset";
@@ -55,6 +56,7 @@ export interface CommandParams {
   getSettings: Record<string, never>;
   updateSettings: { settings: Partial<Settings> };
   getHardwareInfo: Record<string, never>;
+  getMediaEngineCapabilities: Record<string, never>;
   listPresets: Record<string, never>;
   // `id` present means "update this existing preset"; omitted means "create a new one".
   savePreset: { id?: string; name: string; kind: PresetKind; options: Record<string, unknown> };
@@ -77,6 +79,10 @@ export interface CommandResult {
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };
   getHardwareInfo: { hardwareInfo: HardwareInfo };
+  getMediaEngineCapabilities: {
+    availableEncoders: string[];
+    hardwareEncodersAvailable: { nvenc: boolean; amf: boolean; qsv: boolean };
+  };
   listPresets: { presets: Preset[] };
   savePreset: { preset: Preset };
   deletePreset: Record<string, never>;

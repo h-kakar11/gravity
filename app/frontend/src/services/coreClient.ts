@@ -119,6 +119,7 @@ export const getSettings = () => sendCommand("getSettings", {});
 export const updateSettings = (settings: CommandParams["updateSettings"]["settings"]) =>
   sendCommand("updateSettings", { settings });
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
+export const getMediaEngineCapabilities = () => sendCommand("getMediaEngineCapabilities", {});
 export const listPresets = () => sendCommand("listPresets", {});
 export const savePreset = (params: CommandParams["savePreset"]) => sendCommand("savePreset", params);
 export const deletePreset = (id: string) => sendCommand("deletePreset", { id });

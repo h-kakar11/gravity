@@ -1,11 +1,34 @@
 import { useEffect, useState } from "react";
 import GlassCard from "../components/GlassCard";
 import * as coreClient from "../services/coreClient";
+import type { CommandResult } from "../types/ipc";
 import type { Settings } from "../types/settings";
 import { asErrorInfo } from "../utils/errors";
 import styles from "./SettingsPage.module.css";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+type MediaEngineCapabilities = CommandResult["getMediaEngineCapabilities"];
+
+const HW_ENCODER_LABELS: Record<keyof MediaEngineCapabilities["hardwareEncodersAvailable"], string> = {
+  nvenc: "NVENC (NVIDIA)",
+  amf: "AMF (AMD)",
+  qsv: "Quick Sync (Intel)",
+};
+
+// Surfaces exactly which specific encoder will actually be used, not just an on/off toggle
+// -- the probe itself (FFmpegEngine::AvailableEncoders(), cached once at construction) was
+// already built in Phase 2.6; this is only the UI layer on top of it.
+function describeHardwareEncoders(capabilities: MediaEngineCapabilities | null): string | undefined {
+  if (!capabilities) return undefined;
+  const detected = (Object.keys(capabilities.hardwareEncodersAvailable) as Array<
+    keyof MediaEngineCapabilities["hardwareEncodersAvailable"]
+  >).filter((key) => capabilities.hardwareEncodersAvailable[key]);
+
+  if (detected.length === 0) {
+    return "No hardware encoder detected on this ffmpeg -- falls back to CPU encoding (libopenh264/libx264).";
+  }
+  return `Detected: ${detected.map((key) => HW_ENCODER_LABELS[key]).join(", ")}`;
+}
 
 function Field({
   label,
@@ -32,12 +55,19 @@ export default function SettingsPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<MediaEngineCapabilities | null>(null);
 
   useEffect(() => {
     coreClient
       .getSettings()
       .then(({ settings: loaded }) => setSettings(loaded))
       .catch((err) => setLoadError(asErrorInfo(err).message));
+    // Best-effort -- the encoder probe is a "nice to know" surfaced from 2.6's cached
+    // FFmpegEngine::AvailableEncoders(), never allowed to block the Settings page loading.
+    coreClient
+      .getMediaEngineCapabilities()
+      .then(setCapabilities)
+      .catch(() => {});
   }, []);
 
   if (loadError) {
@@ -173,7 +203,7 @@ export default function SettingsPage() {
 
       <GlassCard className={styles.section}>
         <h2 className={styles.sectionTitle}>Processing</h2>
-        <Field label="Hardware acceleration">
+        <Field label="Hardware acceleration" hint={describeHardwareEncoders(capabilities)}>
           <input
             className={styles.checkbox}
             type="checkbox"
