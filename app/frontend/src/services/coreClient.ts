@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { CoreCommand, CommandParams, CommandResult, CoreEvent, DownloadJobParams } from "../types/ipc";
 import type { ErrorInfo } from "../types/error";
+import type { MediaProcessingJobParams } from "../types/conversion";
 
 function isErrorInfo(value: unknown): value is ErrorInfo {
   if (typeof value !== "object" || value === null) return false;
@@ -108,6 +109,10 @@ export const inspectFile = (path: string) => sendCommand("inspectFile", { path }
 export const inspectDownloadUrl = (url: string) => sendCommand("inspectDownloadUrl", { url });
 export const createDownloadJob = (params: DownloadJobParams) =>
   sendCommand("createJob", { type: "DOWNLOAD", params: params as unknown as Record<string, unknown> });
+export const createConversionJob = (params: MediaProcessingJobParams) =>
+  sendCommand("createJob", { type: "CONVERSION", params: params as unknown as Record<string, unknown> });
+export const createCompressionJob = (params: MediaProcessingJobParams) =>
+  sendCommand("createJob", { type: "COMPRESSION", params: params as unknown as Record<string, unknown> });
 export const getCapabilities = (path: string) => sendCommand("getCapabilities", { path });
 export const getSettings = () => sendCommand("getSettings", {});
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});

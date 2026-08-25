@@ -5,6 +5,7 @@
 #include "core/errors/MediaToolException.h"
 #include "core/filesystem/FilenameSanitizer.h"
 #include "core/filesystem/PathUtils.h"
+#include "core/jobs/JobArtifactCleanup.h"
 
 namespace mediatool::jobs {
 
@@ -49,18 +50,7 @@ DownloadJob::DownloadJob(Options options, downloads::IDownloadProvider& provider
       reservationRegistry_(reservationRegistry) {}
 
 void DownloadJob::CleanupArtifacts(const std::string& filenameBase) {
-    for (const auto& name : fileSystem_.ListDirectory(options_.outputDirectory)) {
-        if (!filesystem::IsJobArtifactOf(filenameBase, name)) {
-            continue;  // not this job's -- e.g. an unrelated file that merely shares a prefix
-        }
-        try {
-            // DeleteFile(), never Delete(): even a correctly-scoped match must never be
-            // allowed to recursively remove a directory tree.
-            fileSystem_.DeleteFile(filesystem::paths::Join(options_.outputDirectory, name));
-        } catch (...) {
-            // Best-effort cleanup; a cleanup failure must never mask the real job error.
-        }
-    }
+    CleanupJobArtifacts(fileSystem_, options_.outputDirectory, filenameBase);
 }
 
 void DownloadJob::Execute() {

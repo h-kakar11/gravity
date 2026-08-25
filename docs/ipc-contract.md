@@ -108,8 +108,15 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 | `type` | `params` |
 |---|---|
 | `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset}` (`quality` defaults to `"BEST"`) |
+| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
 | `"TEST"` | `{}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
+
+#### `MediaProcessingOptions` (CONVERSION/COMPRESSION's `options`)
+
+`{outputFormat: string, quality?: "low"|"medium"|"high"|"lossless", videoCodec?: "auto"|"h264"|"h265"|"vp9"|"av1", hardwareAcceleration?: "auto"|"none"|"nvenc"|"amf"|"qsv", resolution?: {width: number, height: number}, trim?: {startSeconds?: number, endSeconds?: number}, watermark?: {imagePath: string, position: "top-left"|"top-right"|"bottom-left"|"bottom-right"|"center", opacity: number}, audioBitrateKbps?: number}`
+
+`outputFormat` is required (rejected with `E_INVALID_MEDIA_OPTIONS` if missing/empty). `quality: "lossless"` is rejected unconditionally with `E_PRO_FEATURE_LOCKED` — there is no Pro entitlement system yet, so this is a hard server-side gate, not a toggle; the frontend must never offer it as a selectable value. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
 
 ## Events (core -> ... -> React)
 

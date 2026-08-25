@@ -36,6 +36,7 @@
 #include "core/hardware/WindowsHardwareDetector.h"
 #include "core/jobs/DownloadJob.h"
 #include "core/jobs/JobManager.h"
+#include "core/jobs/MediaProcessingJob.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/Progress.h"
 #include "core/jobs/TestJob.h"
@@ -335,18 +336,85 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     return {{"jobId", id}};
 }
 
+// Shared by HandleCreateConversionJob/HandleCreateCompressionJob -- they differ only in
+// `isCompression` (which JobType the job runs as and which IMediaEngine method it calls);
+// per engines/ffmpeg/FFmpegArgBuilder.h, Compress is Convert with different default
+// option VALUES (supplied by the caller, i.e. the frontend's preset), not a different
+// code path here either.
+json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool isCompression) {
+    const std::string inputPath = jobParams.at("inputPath").get<std::string>();
+    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
+
+    const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
+    if (!filesystem::paths::IsSafeUserSuppliedPath(inputPath, allowNetworkPaths)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_INPUT_PATH", errors::ErrorCategory::Unknown,
+            "The input path must be an absolute path with no \"..\" segments" +
+                std::string(allowNetworkPaths ? "." : ", and network (UNC) paths are not enabled."),
+            "inputPath=" + inputPath));
+    }
+    if (!app.fileSystem.Exists(inputPath)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INPUT_FILE_NOT_FOUND", errors::ErrorCategory::FileNotFound,
+            "The input file does not exist.", "inputPath=" + inputPath));
+    }
+    if (!filesystem::paths::IsSafeUserSuppliedPath(outputDirectory, allowNetworkPaths)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
+            "The output directory must be an absolute path with no \"..\" segments" +
+                std::string(allowNetworkPaths ? "." : ", and network (UNC) paths are not enabled."),
+            "outputDirectory=" + outputDirectory));
+    }
+
+    const json processingOptions = jobParams.contains("options") ? jobParams.at("options") : json::object();
+    const std::string outputFormat = processingOptions.value("outputFormat", std::string());
+    if (outputFormat.empty()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_MEDIA_OPTIONS", errors::ErrorCategory::Unknown, "outputFormat is required."));
+    }
+    // Server-side Pro-tier gate, independent of the UI never offering this value at all
+    // (idealist.md: build the "Pro" affordances as visibly-present-but-inert, not wired
+    // to anything real) -- there is no entitlement system, so this is an unconditional
+    // rejection, not a toggle.
+    if (processingOptions.value("quality", std::string("medium")) == "lossless") {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_PRO_FEATURE_LOCKED", errors::ErrorCategory::UnsupportedFormat,
+            "Lossless quality is a Pro feature and is not available yet."));
+    }
+
+    jobs::MediaProcessingJob::Options options;
+    options.inputPath = inputPath;
+    options.outputDirectory = outputDirectory;
+    options.outputFormat = outputFormat;
+    options.engineOptions = processingOptions;
+    options.isCompression = isCompression;
+
+    auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
+                                                          app.fileSystem, app.reservationRegistry);
+    const jobs::JobId id = job->Id();
+    app.jobManager.SubmitJob(std::move(job));
+    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+    return {{"jobId", id}};
+}
+
 json HandleCreateJob(AppContext& app, const json& params) {
     const std::string typeWire = params.at("type").get<std::string>();
 
     if (typeWire == "DOWNLOAD") {
         return HandleCreateDownloadJob(app, params.at("params"));
     }
+    if (typeWire == "CONVERSION") {
+        return HandleCreateMediaProcessingJob(app, params.at("params"), /*isCompression=*/false);
+    }
+    if (typeWire == "COMPRESSION") {
+        return HandleCreateMediaProcessingJob(app, params.at("params"), /*isCompression=*/true);
+    }
 
     if (typeWire != "TEST") {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
-            "Only TEST and DOWNLOAD jobs are implemented so far -- " + typeWire +
-                " is scaffolded (see docs/roadmap.md) but not runnable yet.",
+            "Only TEST, DOWNLOAD, CONVERSION and COMPRESSION jobs are implemented so far -- " +
+                typeWire + " is scaffolded (see docs/roadmap.md) but not runnable yet.",
             "", false));
     }
 
