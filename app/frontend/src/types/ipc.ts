@@ -9,6 +9,7 @@ import type { Settings } from "./settings";
 import type { ErrorInfo } from "./error";
 import type { Progress } from "./progress";
 import type { DownloadMetadata, QualityPreset } from "./download";
+import type { Preset, PresetKind } from "./preset";
 
 export type CoreCommand =
   | "createJob"
@@ -24,7 +25,10 @@ export type CoreCommand =
   | "getCapabilities"
   | "getSettings"
   | "updateSettings"
-  | "getHardwareInfo";
+  | "getHardwareInfo"
+  | "listPresets"
+  | "savePreset"
+  | "deletePreset";
 
 // Params a DOWNLOAD-type createJob call takes, nested under CommandParams["createJob"].params
 // (see docs/ipc-contract.md "createJob params by type"). `quality` defaults to "BEST" on
@@ -51,6 +55,10 @@ export interface CommandParams {
   getSettings: Record<string, never>;
   updateSettings: { settings: Partial<Settings> };
   getHardwareInfo: Record<string, never>;
+  listPresets: Record<string, never>;
+  // `id` present means "update this existing preset"; omitted means "create a new one".
+  savePreset: { id?: string; name: string; kind: PresetKind; options: Record<string, unknown> };
+  deletePreset: { id: string };
 }
 
 // Result for each command, keyed by command name.
@@ -69,6 +77,9 @@ export interface CommandResult {
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };
   getHardwareInfo: { hardwareInfo: HardwareInfo };
+  listPresets: { presets: Preset[] };
+  savePreset: { preset: Preset };
+  deletePreset: Record<string, never>;
 }
 
 // Envelope written to mediatool-core's stdin (via the Tauri `send_core_command` command).

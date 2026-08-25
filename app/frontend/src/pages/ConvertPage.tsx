@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 import GlassCard from "../components/GlassCard";
+import PresetBar from "../components/PresetBar";
 import { ProLockedControl } from "../components/ProLockedBadge";
 import { useJobs } from "../hooks/useJobs";
 import { useNavigation } from "../navigation/NavigationContext";
@@ -123,17 +124,31 @@ export default function ConvertPage() {
   const canSubmit =
     inputPath !== null && outputFormat.trim().length > 0 && outputDirectory.trim().length > 0 && !creating && !jobInFlight;
 
+  // Plain function (not memoized): both handleSubmit and PresetBar's "save as preset"
+  // button need the options object built from whatever the form currently holds, and
+  // PresetBar re-renders alongside this component on every state change anyway.
+  const buildOptions = (): MediaProcessingOptions => ({
+    outputFormat,
+    quality,
+    ...(isVideo ? { videoCodec, hardwareAcceleration } : {}),
+    ...(hasAudio && audioBitrateKbps.trim() ? { audioBitrateKbps: Number(audioBitrateKbps) } : {}),
+  });
+
+  const applyPresetOptions = useCallback((options: Record<string, unknown>) => {
+    const opts = options as Partial<MediaProcessingOptions>;
+    if (typeof opts.outputFormat === "string") setOutputFormat(opts.outputFormat);
+    if (opts.quality && opts.quality !== "lossless") setQuality(opts.quality);
+    if (opts.videoCodec) setVideoCodec(opts.videoCodec);
+    if (opts.hardwareAcceleration) setHardwareAcceleration(opts.hardwareAcceleration);
+    if (typeof opts.audioBitrateKbps === "number") setAudioBitrateKbps(String(opts.audioBitrateKbps));
+  }, []);
+
   const handleSubmit = useCallback(async () => {
     if (!inputPath || !outputFormat) return;
     setCreating(true);
     setCreateError(null);
     try {
-      const options: MediaProcessingOptions = {
-        outputFormat,
-        quality,
-        ...(isVideo ? { videoCodec, hardwareAcceleration } : {}),
-        ...(hasAudio && audioBitrateKbps.trim() ? { audioBitrateKbps: Number(audioBitrateKbps) } : {}),
-      };
+      const options = buildOptions();
       const params = { inputPath, outputDirectory: outputDirectory.trim(), options };
       const { jobId } = mode === "convert" ? await coreClient.createConversionJob(params) : await coreClient.createCompressionJob(params);
       setActiveJobId(jobId);
@@ -235,6 +250,11 @@ export default function ConvertPage() {
 
           {fileInfo && !jobInFlight && !activeJob && (
             <GlassCard className={styles.section}>
+              <PresetBar
+                kind={mode === "convert" ? "CONVERSION" : "COMPRESSION"}
+                currentOptions={() => buildOptions() as unknown as Record<string, unknown>}
+                onApply={applyPresetOptions}
+              />
               <div className={styles.field}>
                 <label className={styles.fieldLabel}>Output format</label>
                 <select className={styles.selectInput} value={outputFormat} onChange={(e) => setOutputFormat(e.target.value)}>

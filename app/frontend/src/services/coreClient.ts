@@ -119,6 +119,9 @@ export const getSettings = () => sendCommand("getSettings", {});
 export const updateSettings = (settings: CommandParams["updateSettings"]["settings"]) =>
   sendCommand("updateSettings", { settings });
 export const getHardwareInfo = () => sendCommand("getHardwareInfo", {});
+export const listPresets = () => sendCommand("listPresets", {});
+export const savePreset = (params: CommandParams["savePreset"]) => sendCommand("savePreset", params);
+export const deletePreset = (id: string) => sendCommand("deletePreset", { id });
 
 // Reveals a completed download's output file in Windows Explorer via the Rust
 // `open_containing_folder` Tauri command (app/desktop/src-tauri/src/lib.rs) -- never a raw

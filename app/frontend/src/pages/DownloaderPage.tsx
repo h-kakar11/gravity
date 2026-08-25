@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import PresetBar from "../components/PresetBar";
 import { useJobs } from "../hooks/useJobs";
 import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
@@ -197,6 +198,14 @@ export default function DownloaderPage() {
       {metadata ? (
         <section style={styles.section}>
           <h2 style={styles.h2}>Download options</h2>
+          <PresetBar
+            kind="DOWNLOAD"
+            currentOptions={() => ({ quality, outputDirectory: outputDirectory.trim() })}
+            onApply={(options) => {
+              if (typeof options.quality === "string") setQuality(options.quality as QualityPreset);
+              if (typeof options.outputDirectory === "string") setOutputDirectory(options.outputDirectory);
+            }}
+          />
           <div style={styles.row}>
             <label style={styles.label}>
               Quality:{" "}

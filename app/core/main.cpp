@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -46,7 +47,9 @@
 #include "core/process/IProcessRunner.h"
 #include "core/process/RealProcessRunner.h"
 #include "core/settings/JsonFileSettingsStore.h"
+#include "core/settings/PresetStore.h"
 #include "core/settings/Settings.h"
+#include "core/common/Uuid.h"
 #include "engines/downloader/YtDlpProvider.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
 #include "engines/ffmpeg/FFmpegEngine.h"
@@ -109,6 +112,7 @@ struct AppContext {
     downloader::YtDlpProvider ytDlpProvider;
     jobs::JobManager jobManager;
     jobs::JobHistoryStore jobHistoryStore{jobs::DefaultJobHistoryFilePath()};
+    settings::PresetStore presetStore{settings::DefaultPresetsFilePath()};
 
     // Tracks each job's previous state purely to classify the Running state as either
     // "resumed from pause" or "(re)started" when JobManager reports a transition -- see
@@ -512,6 +516,78 @@ json HandleGetHardwareInfo(AppContext& app, const json&) {
     return {{"hardwareInfo", app.hardwareDetector.Detect().ToJson()}};
 }
 
+// --- Multi-Profile Presets (#4.6) --------------------------------------------------------
+// Schema/persistence (settings::PresetStore) landed in Phase 3.4; this is the IPC surface
+// on top of it.
+
+json HandleListPresets(AppContext& app, const json&) {
+    json array = json::array();
+    for (const auto& preset : app.presetStore.Load()) array.push_back(preset.ToJson());
+    return {{"presets", array}};
+}
+
+json HandleSavePreset(AppContext& app, const json& params) {
+    const std::string name = params.at("name").get<std::string>();
+    const std::string kind = params.at("kind").get<std::string>();
+    const json options = params.value("options", json::object());
+
+    if (name.empty()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PRESET", errors::ErrorCategory::Unknown, "A preset name is required.",
+            "name is empty"));
+    }
+    static const std::unordered_set<std::string> kAllowedKinds{"DOWNLOAD", "CONVERSION",
+                                                                 "COMPRESSION"};
+    if (!kAllowedKinds.count(kind)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PRESET", errors::ErrorCategory::Unknown, "Unrecognized preset kind.",
+            "kind=" + kind));
+    }
+
+    std::vector<settings::Preset> presets = app.presetStore.Load();
+
+    // A client-supplied `id` that matches an existing preset means "update this preset in
+    // place" (rename / re-save with new options); a missing or non-matching id means
+    // "create a new one" -- match-by-identity rather than trusting an index, so a stale id
+    // can never silently overwrite the wrong entry.
+    const std::string requestedId = params.value("id", std::string());
+    auto it = std::find_if(presets.begin(), presets.end(), [&](const settings::Preset& p) {
+        return !requestedId.empty() && p.id == requestedId;
+    });
+
+    settings::Preset preset;
+    preset.id = (it != presets.end()) ? it->id : "preset-" + common::GenerateUuidV4();
+    preset.name = name;
+    preset.kind = kind;
+    preset.options = options;
+
+    if (it != presets.end()) {
+        *it = preset;
+    } else {
+        presets.push_back(preset);
+    }
+
+    app.presetStore.Save(presets);
+    return {{"preset", preset.ToJson()}};
+}
+
+json HandleDeletePreset(AppContext& app, const json& params) {
+    const std::string id = params.at("id").get<std::string>();
+    std::vector<settings::Preset> presets = app.presetStore.Load();
+    const std::size_t before = presets.size();
+    presets.erase(
+        std::remove_if(presets.begin(), presets.end(),
+                        [&](const settings::Preset& p) { return p.id == id; }),
+        presets.end());
+    if (presets.size() == before) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_PRESET_NOT_FOUND", errors::ErrorCategory::Unknown,
+            "No preset with that id exists.", "id=" + id));
+    }
+    app.presetStore.Save(presets);
+    return json::object();
+}
+
 using Handler = std::function<json(AppContext&, const json&)>;
 
 const std::unordered_map<std::string, Handler>& CommandTable() {
@@ -530,6 +606,9 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
         {"getHardwareInfo", HandleGetHardwareInfo},
+        {"listPresets", HandleListPresets},
+        {"savePreset", HandleSavePreset},
+        {"deletePreset", HandleDeletePreset},
     };
     return table;
 }
