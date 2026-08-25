@@ -64,6 +64,17 @@ public:
     JobManager(const JobManager&) = delete;
     JobManager& operator=(const JobManager&) = delete;
 
+    // Cancels every still-Queued job (finalized synchronously, no worker needed) and
+    // requests cancellation of every currently-Running job, *before* waking/joining the
+    // worker pool -- so shutdown only ever waits on work already in flight, never on
+    // newly-started queued work (#6: previously the destructor let workers keep pulling
+    // and starting fresh jobs off the queue while it waited for all of them to run to
+    // completion). Safe to call more than once; the destructor calls this too, so an
+    // explicit prior call just makes it a no-op there. Does not itself impose a timeout --
+    // a Running job that never checks IsCancellationRequested() still blocks shutdown
+    // until its own Execute() returns.
+    void Shutdown();
+
     std::size_t MaxConcurrentJobs() const { return maxConcurrentJobs_; }
 
     // Registers `job` and enqueues it for execution on the worker pool. Ownership of

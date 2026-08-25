@@ -101,7 +101,10 @@ TEST_F(JsonFileSettingsStoreTest, SaveCreatesParentDirectoriesIfMissing) {
     EXPECT_TRUE(fs::exists(nestedPath));
 }
 
-TEST_F(JsonFileSettingsStoreTest, LoadOnCorruptedFileThrowsInvalidFile) {
+// Regression test for #5 (the "brick on next launch" half): a corrupt settings file on
+// disk must never prevent the app from starting -- Load() falls back to defaults instead
+// of throwing, and leaves the corrupt file on disk untouched.
+TEST_F(JsonFileSettingsStoreTest, LoadOnCorruptedFileFallsBackToDefaultsWithoutThrowing) {
     JsonFileSettingsStore store(settingsPath_);
     store.Save(Settings::Defaults());
     ASSERT_TRUE(fs::exists(settingsPath_));
@@ -111,31 +114,41 @@ TEST_F(JsonFileSettingsStoreTest, LoadOnCorruptedFileThrowsInvalidFile) {
         corrupt << "{ this is not valid json ][";
     }
 
-    bool threw = false;
-    try {
-        store.Load();
-    } catch (const errors::MediaToolException& e) {
-        threw = true;
-        EXPECT_EQ(e.Info().category, errors::ErrorCategory::InvalidFile);
-    }
-    EXPECT_TRUE(threw);
+    const Settings loaded = store.Load();
+    EXPECT_EQ(loaded.ToJson(), Settings::Defaults().ToJson());
+    // The corrupt file itself is left alone, not silently overwritten.
+    EXPECT_EQ(ReadFileRaw(), "{ this is not valid json ][");
 }
 
-TEST_F(JsonFileSettingsStoreTest, LoadOnValidJsonMissingSettingsFieldsThrowsInvalidFile) {
+TEST_F(JsonFileSettingsStoreTest, LoadOnValidJsonMissingSettingsFieldsFallsBackToDefaults) {
     {
         std::ofstream validButWrongShape(settingsPath_, std::ios::binary | std::ios::trunc);
         validButWrongShape << R"({"unrelated": true})";
     }
 
     JsonFileSettingsStore store(settingsPath_);
-    bool threw = false;
-    try {
-        store.Load();
-    } catch (const errors::MediaToolException& e) {
-        threw = true;
-        EXPECT_EQ(e.Info().category, errors::ErrorCategory::InvalidFile);
+    const Settings loaded = store.Load();
+    EXPECT_EQ(loaded.ToJson(), Settings::Defaults().ToJson());
+}
+
+// Regression test for #5 (the "unvalidated settings" half, at the store layer): a
+// settings file containing a well-formed but out-of-range value (as `updateSettings`
+// could previously write with no validation at all) must also fall back to defaults on
+// the next load, rather than throwing and preventing startup.
+TEST_F(JsonFileSettingsStoreTest, LoadOnOutOfRangeValueFallsBackToDefaults) {
+    Settings bad = Settings::Defaults();
+    bad.processing.concurrentJobs = 100000;
+    {
+        JsonFileSettingsStore writer(settingsPath_);
+        // Bypass Settings::Validate() (which Save() itself doesn't call) to simulate a
+        // file written before validation existed, or hand-edited directly.
+        std::ofstream out(settingsPath_, std::ios::binary | std::ios::trunc);
+        out << bad.ToJson().dump(2);
     }
-    EXPECT_TRUE(threw);
+
+    JsonFileSettingsStore store(settingsPath_);
+    const Settings loaded = store.Load();
+    EXPECT_EQ(loaded.ToJson(), Settings::Defaults().ToJson());
 }
 
 }  // namespace

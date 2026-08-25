@@ -118,6 +118,36 @@ TEST(JobManager, SubmitCancelRaceNeverCrashesTheWorker) {
     }
 }
 
+// Regression test for #6: destroying/shutting down a JobManager must not start freshly
+// -queued jobs and wait for them to run -- it should only ever wait on work already in
+// flight (the one Running job here), cancelling everything still queued.
+TEST(JobManager, ShutdownCancelsQueuedJobsAndDoesNotWaitForThem) {
+    JobManager manager(1);
+    const auto runningId = manager.SubmitJob(std::make_unique<TestJob>());
+    ASSERT_EQ(WaitForState(manager, runningId, std::chrono::seconds(2),
+                           [](JobState s) { return s == JobState::Running; }),
+              JobState::Running);
+
+    std::vector<mediatool::jobs::JobId> queuedIds;
+    for (int i = 0; i < 5; ++i) queuedIds.push_back(manager.SubmitJob(std::make_unique<TestJob>()));
+    for (const auto& id : queuedIds) EXPECT_EQ(manager.GetJob(id).state, JobState::Queued);
+
+    const auto shutdownStart = std::chrono::steady_clock::now();
+    manager.Shutdown();
+    const auto elapsed = std::chrono::steady_clock::now() - shutdownStart;
+
+    // TestJob's full run is ~1000ms; if shutdown incorrectly ran all 5 queued jobs to
+    // completion one after another (the old behavior), this would take several seconds.
+    // Bounding it well under that proves shutdown only waited on the one already-Running
+    // job's Cancel-triggered exit, not on freshly-started queued work.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(800));
+
+    for (const auto& id : queuedIds) {
+        EXPECT_EQ(manager.GetJob(id).state, JobState::Cancelled);
+    }
+    EXPECT_EQ(manager.GetJob(runningId).state, JobState::Cancelled);
+}
+
 TEST(JobManager, SecondJobWaitsForFirstWhenMaxConcurrentJobsIsOne) {
     JobManager manager(1);
     const auto id1 = manager.SubmitJob(std::make_unique<TestJob>());

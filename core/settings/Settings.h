@@ -46,6 +46,9 @@ struct AdvancedSettings {
     std::string ytDlpPath;     // empty = use bundled python/downloader venv
     std::string temporaryDirectory;  // empty = %LOCALAPPDATA%\MediaTool\temp
     std::string logLevel = "INFO";   // "DEBUG" | "INFO" | "WARNING" | "ERROR"
+    // Off by default: HandleCreateDownloadJob/HandleInspectFile reject UNC output
+    // directories unless this is explicitly turned on (spec/audit #11).
+    bool allowNetworkPaths = false;
 };
 
 struct Settings {
@@ -56,8 +59,19 @@ struct Settings {
     AdvancedSettings advanced;
 
     nlohmann::json ToJson() const;
+    // Parses `json` and then calls Validate() on the result -- FromJson never returns an
+    // out-of-range or malformed Settings object, it throws instead (see Validate()).
     static Settings FromJson(const nlohmann::json& json);
     static Settings Defaults();
+
+    // Throws errors::MediaToolException{ErrorCategory::Unknown, "E_INVALID_SETTINGS", ...}
+    // on the first field that is out of its allowed range/enum, or a non-empty path field
+    // that isn't a well-formed absolute path (existence is not required -- an output
+    // directory that hasn't been created yet is still valid). Exists so that neither
+    // updateSettings (a malicious or fat-fingered IPC call) nor loading a hand-edited or
+    // stale settings file from disk can ever put the app into a state that crashes or
+    // permanently fails to start (spec/audit #5).
+    void Validate() const;
 };
 
 }  // namespace mediatool::settings

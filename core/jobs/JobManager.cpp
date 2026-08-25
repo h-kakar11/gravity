@@ -13,11 +13,36 @@ JobManager::JobManager(std::size_t maxConcurrentJobs)
     }
 }
 
-JobManager::~JobManager() {
+JobManager::~JobManager() { Shutdown(); }
+
+void JobManager::Shutdown() {
+    std::vector<Job*> toCancel;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) return;  // already shut down
         stopping_ = true;
+
+        // Still-Queued jobs: cancel and drop from the queue now, so no worker ever picks
+        // them up and starts fresh work after shutdown has begun.
+        for (const auto& id : queue_) {
+            Job* job = LookupJobLocked(id);
+            if (job) toCancel.push_back(job);
+        }
+        queue_.clear();
+
+        // Currently-Running jobs: request cancellation so a well-behaved Execute() that
+        // polls IsCancellationRequested() exits promptly rather than running to natural
+        // completion while shutdown waits on it.
+        for (auto& [id, job] : jobs_) {
+            if (job->State() == JobState::Running) toCancel.push_back(job.get());
+        }
     }
+
+    // RequestCancel() is safe to call on any job in any state (a no-op once terminal),
+    // so calling it here outside the lock -- after a job may have already moved on --
+    // is never wrong, just occasionally redundant.
+    for (Job* job : toCancel) job->RequestCancel();
+
     queueCv_.notify_all();
     for (auto& worker : workers_) {
         if (worker.joinable()) worker.join();

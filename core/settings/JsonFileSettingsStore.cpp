@@ -11,6 +11,7 @@
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
+#include "core/logging/Logger.h"
 
 namespace fs = std::filesystem;
 
@@ -47,24 +48,33 @@ Settings JsonFileSettingsStore::Load() {
 
     std::ifstream input(filePath_, std::ios::binary);
     if (!input) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_SETTINGS_READ_FAILED", errors::ErrorCategory::InvalidFile,
-            "Could not read the settings file.", "Failed to open '" + filePath_ + "' for reading."));
+        logging::Log::Warning("Settings",
+                               "Could not open '" + filePath_ + "' for reading; using defaults.");
+        return Settings::Defaults();
     }
 
     std::ostringstream contentStream;
     contentStream << input.rdbuf();
     const std::string content = contentStream.str();
 
-    nlohmann::json parsed;
+    // A settings file that is unreadable JSON, missing fields, or fails Settings::Validate()
+    // (e.g. a hand-edited or out-of-range value, or a file written by a future/older
+    // version) must never stop the app from starting -- fall back to defaults rather than
+    // throwing. The file itself is left alone on disk, not overwritten, so it remains
+    // available to inspect; only a subsequent successful Save() replaces it.
     try {
-        parsed = nlohmann::json::parse(content);
+        const nlohmann::json parsed = nlohmann::json::parse(content);
         return Settings::FromJson(parsed);
     } catch (const nlohmann::json::exception& e) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_SETTINGS_PARSE_FAILED", errors::ErrorCategory::InvalidFile,
-            "The settings file is corrupt or invalid and could not be loaded.",
-            "Failed to parse '" + filePath_ + "': " + e.what()));
+        logging::Log::Warning("Settings", "Settings file '" + filePath_ +
+                                               "' is not valid JSON (" + e.what() +
+                                               "); using defaults.");
+        return Settings::Defaults();
+    } catch (const errors::MediaToolException& e) {
+        logging::Log::Warning("Settings", "Settings file '" + filePath_ +
+                                               "' failed validation (" + e.Info().details +
+                                               "); using defaults.");
+        return Settings::Defaults();
     }
 }
 

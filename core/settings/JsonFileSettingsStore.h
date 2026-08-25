@@ -21,8 +21,12 @@ public:
     explicit JsonFileSettingsStore(std::string filePath);
 
     // Returns Settings::Defaults() if the file doesn't exist yet -- that is the expected
-    // first-run state, not an error. Throws errors::MediaToolException{InvalidFile, ...}
-    // if the file exists but isn't valid Settings JSON.
+    // first-run state, not an error. Also returns Settings::Defaults() (logging a
+    // warning, never throwing) if the file exists but can't be read, isn't valid JSON, is
+    // missing fields, or fails Settings::Validate() -- a corrupt or stale settings file
+    // must never prevent the app from starting (spec/audit #5). The corrupt file itself
+    // is left untouched on disk (not overwritten) so it can still be inspected; it will
+    // only be replaced the next time Save() is called with a valid Settings object.
     Settings Load() override;
 
     // Creates parent directories if needed, then writes via the atomic write pattern

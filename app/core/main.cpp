@@ -587,15 +587,25 @@ void RunSelfTest(AppContext& app) {
 int main(int argc, char** argv) {
     logging::Logger::Init(logging::DefaultLogDirectory() + "/application.log", logging::LogLevel::Info);
 
-    settings::JsonFileSettingsStore bootstrapStore(settings::DefaultSettingsFilePath());
-    AppContext app(bootstrapStore.Load());
+    // Belt-and-suspenders around the whole startup sequence (#5): JsonFileSettingsStore::Load()
+    // already falls back to Settings::Defaults() rather than throwing on a corrupt/invalid
+    // settings file, so this should never actually fire for that specific case -- but
+    // nothing else in AppContext construction gets a free pass to bring down the process
+    // with an unhandled exception and no diagnostic either. Logged, not silent.
+    try {
+        settings::JsonFileSettingsStore bootstrapStore(settings::DefaultSettingsFilePath());
+        AppContext app(bootstrapStore.Load());
 
-    const bool selfTest = argc > 1 && std::string(argv[1]) == "--selftest";
-    if (selfTest) {
-        RunSelfTest(app);
+        const bool selfTest = argc > 1 && std::string(argv[1]) == "--selftest";
+        if (selfTest) {
+            RunSelfTest(app);
+            return 0;
+        }
+
+        RunIpcLoop(app);
         return 0;
+    } catch (const std::exception& e) {
+        logging::Log::Error("main", std::string("Fatal error during startup: ") + e.what());
+        return 1;
     }
-
-    RunIpcLoop(app);
-    return 0;
 }

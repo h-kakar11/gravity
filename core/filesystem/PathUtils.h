@@ -21,6 +21,15 @@ std::string Join(const std::string& base, const std::vector<std::string>& compon
 
 bool IsAbsolute(const std::string& path);
 
+// Windows path-shape checks implemented as plain string logic rather than via
+// std::filesystem::path::is_absolute()/IsAbsolute() above: that call's result depends on
+// the *host* platform's path grammar (e.g. it does not recognize "C:\Users\..." as
+// absolute when built on a POSIX host), which is wrong for software that only ever runs
+// on Windows and needs a consistent answer regardless of what platform it happens to be
+// built/tested on.
+bool LooksAbsoluteWindowsPath(const std::string& path);
+bool IsUncPath(const std::string& path);
+
 // Lexically collapses "." / ".." segments and redundant separators without touching
 // the filesystem (safe to call on paths that don't exist yet, e.g. an output path
 // that hasn't been created). Does not resolve symlinks.

@@ -1,10 +1,43 @@
 #include "core/settings/Settings.h"
 
 #include <cstdlib>
+#include <unordered_set>
+
+#include "core/errors/ErrorInfo.h"
+#include "core/errors/MediaToolException.h"
+#include "core/filesystem/PathUtils.h"
 
 namespace mediatool::settings {
 
 namespace {
+
+[[noreturn]] void ThrowInvalid(const std::string& reason) {
+    throw errors::MediaToolException(errors::ErrorInfo::Make(
+        "E_INVALID_SETTINGS", errors::ErrorCategory::Unknown,
+        "Settings failed validation.", reason));
+}
+
+void RequireInRange(int value, int min, int max, const std::string& field) {
+    if (value < min || value > max) {
+        ThrowInvalid(field + " must be between " + std::to_string(min) + " and " +
+                     std::to_string(max) + " (got " + std::to_string(value) + ")");
+    }
+}
+
+void RequireOneOf(const std::string& value, const std::unordered_set<std::string>& allowed,
+                   const std::string& field) {
+    if (!allowed.count(value)) {
+        ThrowInvalid(field + " has an unrecognized value: '" + value + "'");
+    }
+}
+
+// A non-empty path field must be a well-formed absolute path; it need not exist yet.
+void RequireAbsoluteIfPresent(const std::string& value, const std::string& field) {
+    if (value.empty()) return;  // empty means "use the default" for every path field here
+    if (!filesystem::paths::LooksAbsoluteWindowsPath(value)) {
+        ThrowInvalid(field + " must be an absolute path: '" + value + "'");
+    }
+}
 
 // Reads an environment variable, returning an empty string (never throwing) if unset --
 // callers here treat a missing env var as "no reasonable default", not an error.
@@ -57,6 +90,7 @@ nlohmann::json Settings::ToJson() const {
              {"ytDlpPath", advanced.ytDlpPath},
              {"temporaryDirectory", advanced.temporaryDirectory},
              {"logLevel", advanced.logLevel},
+             {"allowNetworkPaths", advanced.allowNetworkPaths},
          }},
     };
 }
@@ -93,8 +127,27 @@ Settings Settings::FromJson(const nlohmann::json& json) {
     settings.advanced.ytDlpPath = advanced.at("ytDlpPath").get<std::string>();
     settings.advanced.temporaryDirectory = advanced.at("temporaryDirectory").get<std::string>();
     settings.advanced.logLevel = advanced.at("logLevel").get<std::string>();
+    settings.advanced.allowNetworkPaths = advanced.value("allowNetworkPaths", false);
 
+    settings.Validate();
     return settings;
+}
+
+void Settings::Validate() const {
+    RequireInRange(downloads.concurrentDownloads, 1, 8, "downloads.concurrentDownloads");
+    RequireOneOf(downloads.speedUnits, {"MBps", "Mbps"}, "downloads.speedUnits");
+
+    RequireInRange(processing.concurrentJobs, 1, 16, "processing.concurrentJobs");
+    RequireOneOf(processing.defaultCompressionQuality, {"low", "medium", "high"},
+                 "processing.defaultCompressionQuality");
+
+    RequireOneOf(advanced.logLevel, {"DEBUG", "INFO", "WARNING", "ERROR"}, "advanced.logLevel");
+
+    RequireAbsoluteIfPresent(general.defaultOutputDirectory, "general.defaultOutputDirectory");
+    RequireAbsoluteIfPresent(downloads.downloadDirectory, "downloads.downloadDirectory");
+    RequireAbsoluteIfPresent(advanced.ffmpegPath, "advanced.ffmpegPath");
+    RequireAbsoluteIfPresent(advanced.ytDlpPath, "advanced.ytDlpPath");
+    RequireAbsoluteIfPresent(advanced.temporaryDirectory, "advanced.temporaryDirectory");
 }
 
 Settings Settings::Defaults() {
@@ -123,6 +176,7 @@ Settings Settings::Defaults() {
     settings.advanced.ytDlpPath = "";
     settings.advanced.temporaryDirectory = "";
     settings.advanced.logLevel = "INFO";
+    settings.advanced.allowNetworkPaths = false;
 
     return settings;
 }
