@@ -130,6 +130,40 @@ that is at minimum `{state: JobState}` and, for `jobProgress`, the full `Progres
 `downloadMetadataReceived` — `data: {jobId, title, durationSeconds, playlistIndex?, playlistCount?}`
 `logEvent` — `data: {level: "DEBUG"|"INFO"|"WARNING"|"ERROR", message: string, subsystem: string}`
 
+## Rust-only Tauri commands & events (Phase 4, not through the C++ core)
+
+OS-shell features (tray/background mode, Watch Folders, Scheduled Tasks, global Hotkeys)
+live entirely in `app/desktop/src-tauri/src/` and never get a `mediatool-core` command of
+their own -- when one needs to create a job, it just calls the existing `createJob` verb
+above through the same `CoreState::send_request` the `send_core_command` bridge uses.
+These commands are invoked directly (`invoke("command_name", params)`), not through
+`send_core_command`.
+
+| command | params | result | source |
+|---|---|---|---|
+| `add_watch_folder` | `{path: string, jobType: "CONVERSION"\|"COMPRESSION", defaultOptions: object}` | `{}` | `watch_folders.rs` |
+| `remove_watch_folder` | `{path: string}` | `{}` | `watch_folders.rs` |
+| `list_watch_folders` | `{}` | `WatchFolderConfig[]` (`{path, jobType, defaultOptions}`) | `watch_folders.rs` |
+| `add_scheduled_task` | `{name: string, cronExpression: string, jobType: "CONVERSION"\|"COMPRESSION"\|"DOWNLOAD", params: object}` | `ScheduledTaskConfig` | `scheduler.rs` |
+| `update_scheduled_task` | `{id: string, name?, cronExpression?, enabled?, params?}` | `ScheduledTaskConfig` | `scheduler.rs` |
+| `remove_scheduled_task` | `{id: string}` | `{}` | `scheduler.rs` |
+| `list_scheduled_tasks` | `{}` | `ScheduledTaskConfig[]` (`{id, name, cronExpression, jobType, params, enabled}`) | `scheduler.rs` |
+| `refresh_hotkeys` | `{}` | `{}` | `hotkeys.rs` -- call after any `updateSettings` that could have changed `general.hotkeyPasteAndDownload`/`hotkeyFocusQueue` |
+| `open_containing_folder` | `{path: string}` | `{}` | `lib.rs` |
+
+`cronExpression` uses the `cron` crate's 6-field syntax (seconds first --
+`sec min hour day month day-of-week`), not the 5-field Unix convention.
+
+Events emitted directly by Rust (via `AppHandle::emit`, subscribed with
+`@tauri-apps/api/event`'s `listen`, not `subscribeToJobEvents`'s `"core-event"`):
+
+| event | payload | fired by |
+|---|---|---|
+| `watch-folder-triggered` | `{path: string, jobId?: string}` | a watched folder auto-submitted a job |
+| `scheduled-task-fired` | `{taskId: string, taskName: string, jobId?: string}` | a scheduled task's cron fired |
+| `hotkey-paste-and-download` | `{url: string}` | the paste-and-download hotkey read a non-empty clipboard |
+| `hotkey-focus-queue` | `{}` | the focus-queue hotkey fired |
+
 ## Shared types
 
 ### `JobType` (UPPER_SNAKE_CASE)

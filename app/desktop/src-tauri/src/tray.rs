@@ -52,7 +52,9 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-fn show_main_window(app: &AppHandle) {
+// pub(crate): also reused by hotkeys.rs (Phase 4.4) to bring the window forward for the
+// focus-queue binding and after a paste-and-download hotkey fires.
+pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();

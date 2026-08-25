@@ -19,6 +19,8 @@ Settings MakeDistinctSettings() {
     settings.general.launchOnStartup = true;
     settings.general.showNotifications = false;
     settings.general.minimizeToTrayOnClose = false;
+    settings.general.hotkeyPasteAndDownload = "Alt+Shift+P";
+    settings.general.hotkeyFocusQueue = "";
 
     settings.downloads.defaultQuality = "1080p";
     settings.downloads.downloadDirectory = "D:\\Downloads\\MediaTool";
@@ -61,6 +63,8 @@ TEST(SettingsTest, RoundTripPreservesEveryGeneralField) {
     EXPECT_EQ(roundTripped.general.launchOnStartup, original.general.launchOnStartup);
     EXPECT_EQ(roundTripped.general.showNotifications, original.general.showNotifications);
     EXPECT_EQ(roundTripped.general.minimizeToTrayOnClose, original.general.minimizeToTrayOnClose);
+    EXPECT_EQ(roundTripped.general.hotkeyPasteAndDownload, original.general.hotkeyPasteAndDownload);
+    EXPECT_EQ(roundTripped.general.hotkeyFocusQueue, original.general.hotkeyFocusQueue);
 }
 
 TEST(SettingsTest, RoundTripPreservesEveryDownloadField) {
@@ -117,6 +121,8 @@ TEST(SettingsTest, DefaultsHaveExpectedSentinelValues) {
     EXPECT_FALSE(defaults.general.launchOnStartup);
     EXPECT_TRUE(defaults.general.showNotifications);
     EXPECT_TRUE(defaults.general.minimizeToTrayOnClose);
+    EXPECT_EQ(defaults.general.hotkeyPasteAndDownload, "CommandOrControl+Shift+D");
+    EXPECT_EQ(defaults.general.hotkeyFocusQueue, "CommandOrControl+Shift+Q");
     EXPECT_EQ(defaults.downloads.defaultQuality, "best");
     EXPECT_EQ(defaults.downloads.filenameTemplate, "%(title)s.%(ext)s");
     EXPECT_EQ(defaults.downloads.concurrentDownloads, 1);
@@ -164,6 +170,8 @@ TEST(SettingsTest, FromJsonRejectsOutOfRangeAndUnrecognizedValues) {
         {"logLevelBogus", [](Settings& s) { s.advanced.logLevel = "VERBOSE"; }},
         {"ffmpegPathRelative", [](Settings& s) { s.advanced.ffmpegPath = "..\\..\\ffmpeg.exe"; }},
         {"downloadDirectoryRelative", [](Settings& s) { s.downloads.downloadDirectory = "Downloads"; }},
+        {"hotkeyMissingKey", [](Settings& s) { s.general.hotkeyPasteAndDownload = "CommandOrControl+Shift+"; }},
+        {"hotkeyBogusModifier", [](Settings& s) { s.general.hotkeyFocusQueue = "Banana+Q"; }},
     };
 
     for (const auto& c : cases) {

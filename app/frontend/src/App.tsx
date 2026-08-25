@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import AppShell from "./components/AppShell";
 import { NavigationProvider, useNavigation } from "./navigation/NavigationContext";
 import ConvertPage from "./pages/ConvertPage";
@@ -6,9 +7,21 @@ import DownloaderPage from "./pages/DownloaderPage";
 import HomePage from "./pages/HomePage";
 import QueuePage from "./pages/QueuePage";
 import SettingsPage from "./pages/SettingsPage";
+import * as coreClient from "./services/coreClient";
 
 function Screens() {
-  const { screen } = useNavigation();
+  const { screen, navigate } = useNavigation();
+
+  // Global hotkeys (Phase 4.4) fire from Rust regardless of which screen is showing --
+  // paste-and-download jumps to the Download screen prefilled with the clipboard URL,
+  // focus-queue jumps to the Queue screen. Subscribed once at the top level rather than
+  // per-page so a hotkey works no matter where the user currently is.
+  useEffect(() => {
+    return coreClient.subscribeToHotkeyEvents({
+      onPasteAndDownload: (url) => navigate({ kind: "download", prefillUrl: url }),
+      onFocusQueue: () => navigate({ kind: "queue" }),
+    });
+  }, [navigate]);
 
   switch (screen.kind) {
     case "home":

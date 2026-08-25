@@ -6,6 +6,11 @@ export interface GeneralSettings {
   // Added ahead of the Phase 4 system-tray feature that reads it -- when true, closing
   // the window hides it to the tray instead of quitting.
   minimizeToTrayOnClose: boolean;
+  // Global hotkey bindings (Phase 4.4), Electron/tauri-plugin-global-shortcut accelerator
+  // syntax (e.g. "CommandOrControl+Shift+D"). Empty string means "no binding". Rust's
+  // hotkeys.rs reads these through getSettings/refresh_hotkeys -- it never owns them.
+  hotkeyPasteAndDownload: string;
+  hotkeyFocusQueue: string;
 }
 
 export interface DownloadSettings {

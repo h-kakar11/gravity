@@ -1,4 +1,5 @@
 mod core_bridge;
+mod hotkeys;
 mod paths;
 mod scheduler;
 mod tray;
@@ -78,6 +79,8 @@ fn open_containing_folder(path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let state = CoreState::spawn(handle).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -90,6 +93,10 @@ pub fn run() {
 
             app.manage(scheduler::ScheduledTaskState::default());
             scheduler::start_scheduler(&app.handle().clone());
+
+            if let Err(e) = hotkeys::refresh_hotkeys(app.handle().clone()) {
+                log::warn!("failed to register global hotkeys: {e}");
+            }
 
             // Background mode (#2): intercept the main window's close request and hide
             // to the tray instead of quitting, unless the user has opted out via
@@ -120,7 +127,8 @@ pub fn run() {
             scheduler::add_scheduled_task,
             scheduler::update_scheduled_task,
             scheduler::remove_scheduled_task,
-            scheduler::list_scheduled_tasks
+            scheduler::list_scheduled_tasks,
+            hotkeys::refresh_hotkeys
         ])
         .build(tauri::generate_context!())
         .expect("error while building the MediaTool Tauri application")

@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <unordered_set>
+#include <vector>
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
@@ -54,6 +55,46 @@ std::string DefaultUserOutputDirectory() {
     return userProfile + "\\Downloads\\Gravity";
 }
 
+// Loose validation of an Electron/tauri-plugin-global-shortcut accelerator string, e.g.
+// "CommandOrControl+Shift+D": every "+"-separated segment but the last must be a
+// recognized modifier name, and the last segment must be non-empty. This is defense in
+// depth (a malformed string would otherwise just fail silently to register in Rust), not a
+// full grammar check -- Rust's registration call is still the source of truth for whether a
+// given string is actually a valid accelerator.
+void RequireValidHotkeyIfPresent(const std::string& value, const std::string& field) {
+    if (value.empty()) return;  // empty means "no binding"
+
+    static const std::unordered_set<std::string> kModifiers = {
+        "CommandOrControl", "CmdOrCtrl", "Control", "Ctrl", "Command", "Cmd",
+        "Alt", "Option", "Shift", "Super", "Meta",
+    };
+
+    // Manual split (not std::getline, which silently drops a trailing empty token) so
+    // "CommandOrControl+Shift+" -- a real key missing after the last '+' -- is caught
+    // rather than parsed as a valid two-segment accelerator.
+    std::vector<std::string> segments;
+    size_t start = 0;
+    while (true) {
+        const size_t plus = value.find('+', start);
+        if (plus == std::string::npos) {
+            segments.push_back(value.substr(start));
+            break;
+        }
+        segments.push_back(value.substr(start, plus - start));
+        start = plus + 1;
+    }
+
+    if (segments.empty() || segments.back().empty()) {
+        ThrowInvalid(field + " is not a valid accelerator: '" + value + "'");
+    }
+    for (size_t i = 0; i + 1 < segments.size(); ++i) {
+        if (!kModifiers.count(segments[i])) {
+            ThrowInvalid(field + " has an unrecognized modifier '" + segments[i] + "' in '" +
+                         value + "'");
+        }
+    }
+}
+
 }  // namespace
 
 nlohmann::json Settings::ToJson() const {
@@ -64,6 +105,8 @@ nlohmann::json Settings::ToJson() const {
              {"launchOnStartup", general.launchOnStartup},
              {"showNotifications", general.showNotifications},
              {"minimizeToTrayOnClose", general.minimizeToTrayOnClose},
+             {"hotkeyPasteAndDownload", general.hotkeyPasteAndDownload},
+             {"hotkeyFocusQueue", general.hotkeyFocusQueue},
          }},
         {"downloads",
          {
@@ -104,6 +147,10 @@ Settings Settings::FromJson(const nlohmann::json& json) {
     settings.general.launchOnStartup = general.at("launchOnStartup").get<bool>();
     settings.general.showNotifications = general.at("showNotifications").get<bool>();
     settings.general.minimizeToTrayOnClose = general.value("minimizeToTrayOnClose", true);
+    settings.general.hotkeyPasteAndDownload =
+        general.value("hotkeyPasteAndDownload", std::string("CommandOrControl+Shift+D"));
+    settings.general.hotkeyFocusQueue =
+        general.value("hotkeyFocusQueue", std::string("CommandOrControl+Shift+Q"));
 
     const auto& downloads = json.at("downloads");
     settings.downloads.defaultQuality = downloads.at("defaultQuality").get<std::string>();
@@ -145,6 +192,9 @@ void Settings::Validate() const {
 
     RequireOneOf(advanced.logLevel, {"DEBUG", "INFO", "WARNING", "ERROR"}, "advanced.logLevel");
 
+    RequireValidHotkeyIfPresent(general.hotkeyPasteAndDownload, "general.hotkeyPasteAndDownload");
+    RequireValidHotkeyIfPresent(general.hotkeyFocusQueue, "general.hotkeyFocusQueue");
+
     RequireAbsoluteIfPresent(general.defaultOutputDirectory, "general.defaultOutputDirectory");
     RequireAbsoluteIfPresent(downloads.downloadDirectory, "downloads.downloadDirectory");
     RequireAbsoluteIfPresent(advanced.ffmpegPath, "advanced.ffmpegPath");
@@ -160,6 +210,8 @@ Settings Settings::Defaults() {
     settings.general.launchOnStartup = false;
     settings.general.showNotifications = true;
     settings.general.minimizeToTrayOnClose = true;
+    settings.general.hotkeyPasteAndDownload = "CommandOrControl+Shift+D";
+    settings.general.hotkeyFocusQueue = "CommandOrControl+Shift+Q";
 
     settings.downloads.defaultQuality = "best";
     settings.downloads.downloadDirectory = defaultDir;

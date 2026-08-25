@@ -21,6 +21,15 @@ struct GeneralSettings {
     // hides it to the tray instead of quitting; the Settings toggle lets a user opt back
     // into a normal full quit.
     bool minimizeToTrayOnClose = true;
+
+    // Global hotkey bindings (Phase 4.4), Electron/tauri-plugin-global-shortcut accelerator
+    // syntax (e.g. "CommandOrControl+Shift+D"). Live in this C++-validated struct rather
+    // than a fourth ad hoc Rust JSON file so they get the same range/enum-style checking as
+    // every other setting; the Rust side (src-tauri/src/hotkeys.rs) only ever reads them
+    // through getSettings, never owns them. Empty means "no binding" -- a user can clear a
+    // hotkey without picking a replacement.
+    std::string hotkeyPasteAndDownload = "CommandOrControl+Shift+D";
+    std::string hotkeyFocusQueue = "CommandOrControl+Shift+Q";
 };
 
 struct DownloadSettings {

@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useJobs } from "../hooks/useJobs";
+import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
 import { asErrorInfo } from "../utils/errors";
 import type { DownloadMetadata, QualityPreset } from "../types/download";
@@ -54,8 +55,19 @@ function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
 
 export default function DownloaderPage() {
   const { jobs, cancelJob } = useJobs();
+  const { screen } = useNavigation();
+  // Prefilled by HomePage's URL-less nav (nothing today) and by the paste-and-download
+  // global hotkey (App.tsx), which navigates here with the clipboard's URL already in hand.
+  const prefillUrl = screen.kind === "download" ? screen.prefillUrl : undefined;
 
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(prefillUrl ?? "");
+
+  // The page may already be mounted (user already on the Download screen) when a new
+  // paste-and-download hotkey event lands -- the initial useState above only covers a
+  // fresh mount, so re-sync whenever a new prefillUrl arrives.
+  useEffect(() => {
+    if (prefillUrl) setUrl(prefillUrl);
+  }, [prefillUrl]);
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState<ErrorInfo | null>(null);
   const [metadata, setMetadata] = useState<DownloadMetadata | null>(null);

@@ -67,6 +67,10 @@ export default function SettingsPage() {
       const { settings: saved } = await coreClient.updateSettings(settings);
       setSettings(saved);
       setSaveState("saved");
+      // Best-effort: a saved hotkey binding should take effect immediately rather than
+      // waiting for the next launch. Not fatal if it fails -- the new binding still lands
+      // on the next app start via refresh_hotkeys() in run()'s setup().
+      coreClient.refreshHotkeys().catch(() => {});
     } catch (err) {
       setSaveError(asErrorInfo(err).message);
       setSaveState("error");
@@ -107,6 +111,22 @@ export default function SettingsPage() {
             type="checkbox"
             checked={settings.general.minimizeToTrayOnClose}
             onChange={(e) => update("general", { minimizeToTrayOnClose: e.target.checked })}
+          />
+        </Field>
+        <Field label="Paste link and download" hint="Global hotkey, e.g. CommandOrControl+Shift+D. Leave empty to disable.">
+          <input
+            className={styles.textInput}
+            type="text"
+            value={settings.general.hotkeyPasteAndDownload}
+            onChange={(e) => update("general", { hotkeyPasteAndDownload: e.target.value })}
+          />
+        </Field>
+        <Field label="Focus queue" hint="Global hotkey, e.g. CommandOrControl+Shift+Q. Leave empty to disable.">
+          <input
+            className={styles.textInput}
+            type="text"
+            value={settings.general.hotkeyFocusQueue}
+            onChange={(e) => update("general", { hotkeyFocusQueue: e.target.value })}
           />
         </Field>
       </GlassCard>

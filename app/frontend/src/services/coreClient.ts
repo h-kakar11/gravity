@@ -130,3 +130,52 @@ export async function openContainingFolder(filePath: string): Promise<void> {
     throw toErrorInfo(reason);
   }
 }
+
+// Re-registers the global hotkeys (Phase 4.4) from whatever Settings currently holds --
+// call after a successful updateSettings so a changed or cleared binding takes effect
+// immediately instead of waiting for the next launch.
+export async function refreshHotkeys(): Promise<void> {
+  try {
+    await invoke("refresh_hotkeys");
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}
+
+// Subscribes to the two raw Tauri events hotkeys.rs emits directly (not "core-event" --
+// these never touch the C++ core). Returns an unsubscribe function, safe to call even
+// before the underlying listen() promises resolve.
+export function subscribeToHotkeyEvents(handlers: {
+  onPasteAndDownload?: (url: string) => void;
+  onFocusQueue?: () => void;
+}): () => void {
+  const unlistenFns: Array<() => void> = [];
+  let cancelled = false;
+
+  const track = (promise: Promise<() => void>) => {
+    promise.then((fn) => {
+      if (cancelled) fn();
+      else unlistenFns.push(fn);
+    });
+  };
+
+  if (handlers.onPasteAndDownload) {
+    track(
+      listen<{ url: string }>("hotkey-paste-and-download", (event) => {
+        handlers.onPasteAndDownload?.(event.payload.url);
+      }),
+    );
+  }
+  if (handlers.onFocusQueue) {
+    track(
+      listen("hotkey-focus-queue", () => {
+        handlers.onFocusQueue?.();
+      }),
+    );
+  }
+
+  return () => {
+    cancelled = true;
+    unlistenFns.forEach((fn) => fn());
+  };
+}
