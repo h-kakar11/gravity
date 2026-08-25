@@ -89,3 +89,58 @@ pub fn handle_second_instance(app: &AppHandle, args: &[String]) {
         let _ = app.emit(CLI_FILE_OPENED_EVENT, StartupFileAction { path, mode });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(rest: &[&str]) -> Vec<String> {
+        std::iter::once("gravity.exe".to_string())
+            .chain(rest.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn no_arguments_returns_none() {
+        assert_eq!(parse_cli_args(&args(&[])), None);
+    }
+
+    #[test]
+    fn bare_path_defaults_to_convert() {
+        assert_eq!(
+            parse_cli_args(&args(&["D:\\Videos\\clip.mov"])),
+            Some(("D:\\Videos\\clip.mov".to_string(), "convert".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_convert_flag() {
+        assert_eq!(
+            parse_cli_args(&args(&["--convert", "D:\\Videos\\clip.mov"])),
+            Some(("D:\\Videos\\clip.mov".to_string(), "convert".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_compress_flag() {
+        assert_eq!(
+            parse_cli_args(&args(&["--compress", "D:\\Videos\\clip.mov"])),
+            Some(("D:\\Videos\\clip.mov".to_string(), "compress".to_string()))
+        );
+    }
+
+    #[test]
+    fn compress_flag_with_no_following_path_yields_no_path() {
+        // A malformed launch (e.g. a stale/corrupted registry entry) must not panic or
+        // fall back to some earlier arg -- no path means no CLI action at all.
+        assert_eq!(parse_cli_args(&args(&["--compress"])), None);
+    }
+
+    #[test]
+    fn last_flag_wins_when_both_are_somehow_present() {
+        assert_eq!(
+            parse_cli_args(&args(&["--convert", "a.mov", "--compress", "b.mov"])),
+            Some(("b.mov".to_string(), "compress".to_string()))
+        );
+    }
+}
