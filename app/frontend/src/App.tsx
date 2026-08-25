@@ -1,26 +1,53 @@
-import { useState } from "react";
+import AppShell from "./components/AppShell";
+import { NavigationProvider, useNavigation } from "./navigation/NavigationContext";
 import DevConsole from "./pages/DevConsole";
 import DownloaderPage from "./pages/DownloaderPage";
+import HomePage from "./pages/HomePage";
+import QueuePage from "./pages/QueuePage";
+import SettingsPage from "./pages/SettingsPage";
+// ConvertPage lands with Phase 2.6's real Convert/Compress engine.
 
-type Tab = "download" | "devConsole";
+function Screens() {
+  const { screen } = useNavigation();
 
-// Minimal tab switch, not a router -- Phase 2 adds a second functional page alongside
-// Phase 1's IPC-proving dev console (spec section 34: basic styling is fine, this is not
-// the final UI).
+  switch (screen.kind) {
+    case "home":
+      return <HomePage />;
+    case "download":
+      return <DownloaderPage />;
+    case "queue":
+      return <QueuePage />;
+    case "settings":
+      return <SettingsPage />;
+    case "convert":
+      // Placeholder until the real Convert/Compress engine + page land.
+      return (
+        <div style={{ padding: 48, textAlign: "center", color: "var(--color-text-secondary)" }}>
+          <h2 style={{ color: "var(--color-text-primary)" }}>Convert &amp; Compress</h2>
+          <p>Coming soon.</p>
+        </div>
+      );
+  }
+}
+
+// The DevConsole (IPC-proving diagnostic tool from Phase 1) is a dev-only surface now,
+// not a visible tab -- it's not part of the product, per idealist.md's "no useless crap."
+// Reached via ?devConsole=1 during `npm run dev` only.
+function isDevConsoleRequested(): boolean {
+  if (!import.meta.env.DEV) return false;
+  return new URLSearchParams(window.location.search).has("devConsole");
+}
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>("download");
+  if (isDevConsoleRequested()) {
+    return <DevConsole />;
+  }
 
   return (
-    <div>
-      <nav style={{ display: "flex", gap: "0.5rem", padding: "0.75rem 1.5rem", borderBottom: "1px solid #ddd" }}>
-        <button onClick={() => setTab("download")} disabled={tab === "download"}>
-          Download
-        </button>
-        <button onClick={() => setTab("devConsole")} disabled={tab === "devConsole"}>
-          Dev Console
-        </button>
-      </nav>
-      {tab === "download" ? <DownloaderPage /> : <DevConsole />}
-    </div>
+    <NavigationProvider>
+      <AppShell>
+        <Screens />
+      </AppShell>
+    </NavigationProvider>
   );
 }
