@@ -8,7 +8,7 @@ import styles from "./AppShell.module.css";
 export default function AppShell({ children }: { children: ReactNode }) {
   const { screen, navigate } = useNavigation();
 
-  const navItem = (kind: "queue" | "settings", label: string) => (
+  const navItem = (kind: "queue" | "scheduledTasks" | "settings", label: string) => (
     <button
       className={`${styles.navButton} ${screen.kind === kind ? styles.navButtonActive : ""}`}
       onClick={() => navigate({ kind })}
@@ -26,6 +26,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
         </button>
         <nav className={styles.navGroup}>
           {navItem("queue", "Queue")}
+          {navItem("scheduledTasks", "Scheduled")}
           {navItem("settings", "Settings")}
         </nav>
       </header>

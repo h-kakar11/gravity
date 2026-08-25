@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import GlassCard from "../components/GlassCard";
+import WatchFoldersSection from "../components/WatchFoldersSection";
 import * as coreClient from "../services/coreClient";
 import type { CommandResult } from "../types/ipc";
 import type { Settings } from "../types/settings";
@@ -237,6 +238,11 @@ export default function SettingsPage() {
             onChange={(e) => update("processing", { concurrentJobs: Number(e.target.value) })}
           />
         </Field>
+      </GlassCard>
+
+      <GlassCard className={styles.section}>
+        <h2 className={styles.sectionTitle}>Watch Folders</h2>
+        <WatchFoldersSection />
       </GlassCard>
 
       <GlassCard className={styles.section}>

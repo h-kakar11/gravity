@@ -11,7 +11,8 @@ export type Screen =
   | { kind: "download"; prefillUrl?: string }
   | { kind: "convert"; prefillFilePath?: string; mode?: "convert" | "compress" }
   | { kind: "queue" }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "scheduledTasks" };
 
 interface NavigationContextValue {
   screen: Screen;

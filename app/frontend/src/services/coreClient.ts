@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { CoreCommand, CommandParams, CommandResult, CoreEvent, DownloadJobParams } from "../types/ipc";
 import type { ErrorInfo } from "../types/error";
 import type { MediaProcessingJobParams } from "../types/conversion";
+import type { AutomationJobType, ScheduledTaskConfig, ScheduledTaskJobType, WatchFolderConfig } from "../types/automation";
 
 function isErrorInfo(value: unknown): value is ErrorInfo {
   if (typeof value !== "object" || value === null) return false;
@@ -130,6 +131,73 @@ export const deletePreset = (id: string) => sendCommand("deletePreset", { id });
 export async function openContainingFolder(filePath: string): Promise<void> {
   try {
     await invoke("open_containing_folder", { path: filePath });
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}
+
+// Watch Folders (Phase 4.1) and Scheduled Tasks (Phase 4.3) -- Rust-only Tauri commands
+// (app/desktop/src-tauri/src/watch_folders.rs, scheduler.rs), never routed through
+// send_core_command since they never touch mediatool-core directly.
+
+export async function listWatchFolders(): Promise<WatchFolderConfig[]> {
+  return invoke<WatchFolderConfig[]>("list_watch_folders");
+}
+
+export async function addWatchFolder(
+  path: string,
+  jobType: AutomationJobType,
+  defaultOptions: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await invoke("add_watch_folder", { path, jobType, defaultOptions });
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}
+
+export async function removeWatchFolder(path: string): Promise<void> {
+  try {
+    await invoke("remove_watch_folder", { path });
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}
+
+export async function listScheduledTasks(): Promise<ScheduledTaskConfig[]> {
+  return invoke<ScheduledTaskConfig[]>("list_scheduled_tasks");
+}
+
+export async function addScheduledTask(params: {
+  name: string;
+  cronExpression: string;
+  jobType: ScheduledTaskJobType;
+  params: Record<string, unknown>;
+}): Promise<ScheduledTaskConfig> {
+  try {
+    return await invoke<ScheduledTaskConfig>("add_scheduled_task", params);
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}
+
+export async function updateScheduledTask(params: {
+  id: string;
+  name?: string;
+  cronExpression?: string;
+  enabled?: boolean;
+  params?: Record<string, unknown>;
+}): Promise<ScheduledTaskConfig> {
+  try {
+    return await invoke<ScheduledTaskConfig>("update_scheduled_task", params);
+  } catch (reason) {
+    throw toErrorInfo(reason);
+  }
+}
+
+export async function removeScheduledTask(id: string): Promise<void> {
+  try {
+    await invoke("remove_scheduled_task", { id });
   } catch (reason) {
     throw toErrorInfo(reason);
   }

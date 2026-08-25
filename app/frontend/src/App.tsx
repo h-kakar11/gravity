@@ -7,6 +7,7 @@ import DevConsole from "./pages/DevConsole";
 import DownloaderPage from "./pages/DownloaderPage";
 import HomePage from "./pages/HomePage";
 import QueuePage from "./pages/QueuePage";
+import ScheduledTasksPage from "./pages/ScheduledTasksPage";
 import SettingsPage from "./pages/SettingsPage";
 import * as coreClient from "./services/coreClient";
 
@@ -36,6 +37,8 @@ function Screens() {
       return <QueuePage />;
     case "settings":
       return <SettingsPage />;
+    case "scheduledTasks":
+      return <ScheduledTasksPage />;
     case "convert":
       return <ConvertPage />;
   }
