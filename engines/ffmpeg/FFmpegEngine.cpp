@@ -4,12 +4,15 @@
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <system_error>
 #include <utility>
 #include <vector>
 
 #include "core/errors/MediaToolException.h"
+#include "engines/ffmpeg/FFmpegArgBuilder.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
+#include "engines/ffmpeg/FFmpegProgressParser.h"
 
 namespace mediatool::media {
 
@@ -229,19 +232,119 @@ filesystem::FileInfo FFmpegEngine::Probe(const std::string& path) {
 void FFmpegEngine::ThrowNotImplemented(const std::string& operation) const {
     throw MediaToolException(ErrorInfo::Make(
         "E_NOT_IMPLEMENTED", ErrorCategory::UnsupportedFormat,
-        operation + " is not implemented in Phase 1",
-        "FFmpegEngine::" + operation + " is intentionally out of scope for Phase 1 (spec section 16)",
+        operation + " is not implemented",
+        "FFmpegEngine::" + operation + " is intentionally out of scope for now",
         /*recoverable=*/false));
 }
 
-void FFmpegEngine::Convert(const std::string&, const std::string&, const nlohmann::json&,
-                           ProgressCallback, CancelledCallback) {
-    ThrowNotImplemented("Convert");
+const std::set<std::string>& FFmpegEngine::AvailableEncoders() const {
+    if (!availableEncodersCache_.has_value()) {
+        // Computed once and cached, not per job -- mirrors the "one discovery path, one
+        // lifetime" principle FFmpegDiscovery::DiscoverFfmpegPath already documents.
+        auto ffmpegPath = ResolveFfmpegPath();
+        availableEncodersCache_ =
+            ffmpegPath.has_value() ? DiscoverAvailableEncoders(runner_, *ffmpegPath) : std::set<std::string>{};
+    }
+    return *availableEncodersCache_;
 }
 
-void FFmpegEngine::Compress(const std::string&, const std::string&, const nlohmann::json&,
-                            ProgressCallback, CancelledCallback) {
-    ThrowNotImplemented("Compress");
+void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string& outputPath,
+                                const nlohmann::json& options, ProgressCallback onProgress,
+                                CancelledCallback isCancelled) {
+    auto ffmpegPath = ResolveFfmpegPath();
+    if (!ffmpegPath.has_value()) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_FFMPEG_NOT_FOUND", ErrorCategory::EngineFailure,
+            "ffmpeg was not found on this system", "", /*recoverable=*/true));
+    }
+
+    const MediaProcessingOptions parsedOptions = MediaProcessingOptions::FromJson(options);
+
+    // Probing the input gives FFmpegProgressParser a total duration (for percentage/ETA)
+    // and bitrate (for a speedBytesPerSecond estimate) -- best-effort: a probe failure
+    // just means progress reports without those fields, not a fatal error for the job.
+    std::optional<double> totalDurationSeconds;
+    std::optional<double> inputBitrateBps;
+    try {
+        const filesystem::FileInfo inputInfo = Probe(inputPath);
+        totalDurationSeconds = inputInfo.durationSeconds;
+        if (inputInfo.bitrate.has_value()) inputBitrateBps = static_cast<double>(*inputInfo.bitrate);
+    } catch (const MediaToolException&) {
+    }
+    if (totalDurationSeconds.has_value()) {
+        const double start = parsedOptions.trimStartSeconds.value_or(0.0);
+        const double end = parsedOptions.trimEndSeconds.value_or(*totalDurationSeconds);
+        totalDurationSeconds = std::max(0.0, end - start);  // trim shortens what ffmpeg actually processes
+    }
+
+    const std::vector<std::string> args =
+        BuildFfmpegArgs(inputPath, outputPath, parsedOptions, AvailableEncoders());
+
+    FFmpegProgressParser parser(totalDurationSeconds, inputBitrateBps);
+    std::mutex progressMutex;  // IProcessRunner may deliver stdout from a background thread
+
+    auto handleStdout = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(progressMutex);
+        parser.FeedLine(line);
+        if (auto progress = parser.TakeProgressIfReady(); progress.has_value() && onProgress) {
+            onProgress(*progress);
+        }
+    };
+    auto ignoreStderr = [](const std::string&) {};
+
+    process::ProcessOptions processOptions;
+    std::unique_ptr<process::IProcess> child =
+        runner_.Start(*ffmpegPath, args, processOptions, handleStdout, ignoreStderr);
+    if (!child) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_FFMPEG_LAUNCH_FAILED", ErrorCategory::EngineFailure,
+            "Failed to launch ffmpeg", "IProcessRunner::Start returned null"));
+    }
+
+    // Cooperative cancellation, mirroring YtDlpProvider::RunPythonCommand's convention:
+    // Terminate() first, give it a couple seconds, Kill() if it's still not gone.
+    process::ProcessResult result;
+    bool finished = false;
+    while (!finished) {
+        if (isCancelled && isCancelled()) {
+            child->Terminate();
+            if (auto terminated = child->WaitFor(2000)) {
+                result = *terminated;
+            } else {
+                child->Kill();
+                result = child->Wait();
+            }
+            throw MediaToolException(ErrorInfo::Make(
+                "E_MEDIA_PROCESSING_CANCELLED", ErrorCategory::Cancelled,
+                "Conversion was cancelled.", "", /*recoverable=*/true));
+        }
+        if (auto finishedResult = child->WaitFor(200)) {
+            result = *finishedResult;
+            finished = true;
+        }
+    }
+
+    if (result.exitCode != 0) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_FFMPEG_FAILED", ErrorCategory::EngineFailure,
+            "ffmpeg exited with an error while processing this file.",
+            "exitCode=" + std::to_string(result.exitCode)));
+    }
+}
+
+void FFmpegEngine::Convert(const std::string& inputPath, const std::string& outputPath,
+                           const nlohmann::json& options, ProgressCallback onProgress,
+                           CancelledCallback isCancelled) {
+    RunFfmpegJob(inputPath, outputPath, options, std::move(onProgress), std::move(isCancelled));
+}
+
+void FFmpegEngine::Compress(const std::string& inputPath, const std::string& outputPath,
+                            const nlohmann::json& options, ProgressCallback onProgress,
+                            CancelledCallback isCancelled) {
+    // Compress is Convert with different default option VALUES (supplied by
+    // MediaProcessingJob), not a structurally different ffmpeg invocation -- see
+    // FFmpegArgBuilder.h.
+    RunFfmpegJob(inputPath, outputPath, options, std::move(onProgress), std::move(isCancelled));
 }
 
 void FFmpegEngine::ExtractAudio(const std::string&, const std::string&, ProgressCallback,

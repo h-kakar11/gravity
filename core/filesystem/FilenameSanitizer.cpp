@@ -1,8 +1,11 @@
 #include "core/filesystem/FilenameSanitizer.h"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
@@ -61,6 +64,44 @@ void TrimTrailingDotsAndSpaces(std::string& value) {
     }
 }
 
+// Case-insensitive Windows reserved device names -- reserved as a bare name AND with any
+// extension (e.g. "NUL", "NUL.txt", "nul.tar.gz" are all invalid).
+bool IsReservedWindowsDeviceName(const std::string& stem) {
+    static const std::unordered_set<std::string> kReserved = {
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+        "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+    std::string upper = stem;
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return kReserved.count(upper) > 0;
+}
+
+// Like TruncateUtf8 above, but bounded by byte count rather than codepoint count -- used
+// for the MAX_PATH budget below, which is itself a byte/char-count budget, not a
+// codepoint-count one.
+std::string TruncateUtf8Bytes(const std::string& input, std::size_t maxBytes) {
+    if (input.size() <= maxBytes) return input;
+    std::size_t byteIndex = 0;
+    while (byteIndex < maxBytes) {
+        const unsigned char lead = static_cast<unsigned char>(input[byteIndex]);
+        std::size_t seqLen = 1;
+        if ((lead & 0x80) == 0x00) seqLen = 1;
+        else if ((lead & 0xE0) == 0xC0) seqLen = 2;
+        else if ((lead & 0xF0) == 0xE0) seqLen = 3;
+        else if ((lead & 0xF8) == 0xF0) seqLen = 4;
+        if (byteIndex + seqLen > maxBytes) break;  // would split a sequence -- stop before it
+        byteIndex += seqLen;
+    }
+    return input.substr(0, byteIndex);
+}
+
+constexpr std::size_t kLegacyMaxPath = 259;  // MAX_PATH (260) minus the terminating null
+// Headroom left in the budget for a numbered dedup suffix (" (9999)" is 7 chars) plus a
+// reasonably long extension (e.g. ".webm" is 5) plus the path separator itself.
+constexpr std::size_t kPathReserveForSuffixAndExtension = 20;
+
 }  // namespace
 
 std::string SanitizeWindowsFilename(const std::string& rawTitle) {
@@ -80,7 +121,28 @@ std::string SanitizeWindowsFilename(const std::string& rawTitle) {
     if (result.empty()) {
         result = "untitled";
     }
+
+    const stdfs::path asPath(result);
+    const std::string stem = asPath.stem().string();
+    if (IsReservedWindowsDeviceName(stem)) {
+        result = stem + "_file" + asPath.extension().string();
+    }
+
     return result;
+}
+
+std::string TruncateBaseNameForMaxPath(const std::string& directory, const std::string& baseName) {
+    const std::size_t overhead = directory.size() + 1 + kPathReserveForSuffixAndExtension;
+    if (overhead >= kLegacyMaxPath) {
+        return baseName;  // directory alone leaves no usable budget -- nothing to do here
+    }
+    const std::size_t allowed = kLegacyMaxPath - overhead;
+    if (baseName.size() <= allowed) {
+        return baseName;
+    }
+    std::string truncated = TruncateUtf8Bytes(baseName, allowed);
+    TrimTrailingDotsAndSpaces(truncated);
+    return truncated.empty() ? "untitled" : truncated;
 }
 
 std::string DeduplicateFilename(const std::string& desiredPath, const IFileSystem& fs) {
@@ -136,6 +198,13 @@ std::string DeduplicateBaseName(const std::string& directory, const std::string&
         "E_DEDUP_EXHAUSTED", errors::ErrorCategory::Unknown,
         "Could not find a free base filename for " + desiredBaseName,
         "Exceeded " + std::to_string(kMaxDeduplicationAttempts) + " numbered variants in " + directory));
+}
+
+bool IsJobArtifactOf(const std::string& filenameBase, const std::string& candidateName) {
+    if (candidateName == filenameBase) return true;
+    if (candidateName.size() <= filenameBase.size()) return false;
+    if (candidateName.compare(0, filenameBase.size(), filenameBase) != 0) return false;
+    return candidateName[filenameBase.size()] == '.';
 }
 
 std::string WithPlaylistIndex(const std::string& filename, int index, int totalCount) {

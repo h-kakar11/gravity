@@ -14,6 +14,12 @@
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace mediatool::process {
 
 namespace {
@@ -78,6 +84,45 @@ public:
         // `pendingAction_`; this loop polls with a short, finite timeout specifically so
         // it can notice that flag promptly and act on it itself, rather than blocking
         // forever in a single infinite-timeout poll like reproc::drain() does.
+#ifdef _WIN32
+        // Wrap the child in a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        // (#9): reproc's own Kill() only ever terminates this one direct child, so a
+        // grandchild the child itself spawned (e.g. yt-dlp launching its own ffmpeg for a
+        // merge) survives a Kill() and is orphaned. Assigning the process to a job with
+        // this flag means the whole descendant tree dies together, either when
+        // TerminateJobObject() is called explicitly (see Kill() below) or when the last
+        // handle to the job is closed (see the destructor) -- so even a caller that drops
+        // this IProcess without calling Kill() can't leak the tree. Best-effort: if any
+        // step here fails, Kill() falls back to reproc's single-process termination only,
+        // same as before this fix existed.
+        {
+            auto [pid, pidEc] = process_.pid();
+            if (!pidEc) {
+                HANDLE job = CreateJobObjectW(nullptr, nullptr);
+                if (job != nullptr) {
+                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+                    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    bool assigned = false;
+                    if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info,
+                                                 sizeof(info))) {
+                        HANDLE proc =
+                            OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE,
+                                        static_cast<DWORD>(pid));
+                        if (proc != nullptr) {
+                            assigned = AssignProcessToJobObject(job, proc) != 0;
+                            CloseHandle(proc);
+                        }
+                    }
+                    if (assigned) {
+                        jobObject_ = job;
+                    } else {
+                        CloseHandle(job);
+                    }
+                }
+            }
+        }
+#endif
+
         drainThread_ = std::thread([this, onStdout = std::move(onStdout),
                                      onStderr = std::move(onStderr)]() mutable {
             LineSplitter outSink(std::move(onStdout));
@@ -144,6 +189,14 @@ public:
         if (drainThread_.joinable()) {
             drainThread_.join();
         }
+#ifdef _WIN32
+        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE means this alone terminates any descendant
+        // still alive, even if Kill() was never explicitly called.
+        if (jobObject_ != nullptr) {
+            CloseHandle(jobObject_);
+            jobObject_ = nullptr;
+        }
+#endif
     }
 
     RealProcess(const RealProcess&) = delete;
@@ -184,6 +237,16 @@ public:
     void Kill() override {
         killRequested_.store(true);
         pendingAction_.store(2);
+#ifdef _WIN32
+        // Unlike reproc's own kill/terminate (which only this drain thread may call, see
+        // the constructor comment), TerminateJobObject() acts on a separate Win32 handle
+        // (jobObject_) with no such restriction -- safe to call immediately from whatever
+        // thread calls Kill(), and it takes the whole descendant tree down at once rather
+        // than leaving that to reproc's single-process kill().
+        if (jobObject_ != nullptr) {
+            TerminateJobObject(jobObject_, 1);
+        }
+#endif
     }
 
     bool IsRunning() const override {
@@ -203,6 +266,9 @@ private:
     // 0 = none, 1 = terminate, 2 = kill. Only ever consumed (exchanged back to 0) by the
     // drain thread, which is the only thread allowed to act on `process_`.
     std::atomic<int> pendingAction_{0};
+#ifdef _WIN32
+    HANDLE jobObject_ = nullptr;  // see the constructor comment for #9 (orphaned children)
+#endif
 };
 
 }  // namespace

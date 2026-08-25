@@ -11,6 +11,7 @@
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
+#include "core/logging/Logger.h"
 
 namespace fs = std::filesystem;
 
@@ -31,41 +32,77 @@ std::string DefaultSettingsFilePath() {
         // No sensible absolute fallback -- keep this relative rather than throwing, since
         // this function itself must never throw (callers may invoke it just to display a
         // path in a settings UI).
+        return "Gravity\\settings.json";
+    }
+    return localAppData + "\\Gravity\\settings.json";
+}
+
+std::string LegacySettingsFilePath() {
+    const std::string localAppData = GetEnvOrEmpty("LOCALAPPDATA");
+    if (localAppData.empty()) {
         return "MediaTool\\settings.json";
     }
     return localAppData + "\\MediaTool\\settings.json";
 }
 
-JsonFileSettingsStore::JsonFileSettingsStore(std::string filePath) : filePath_(std::move(filePath)) {}
+JsonFileSettingsStore::JsonFileSettingsStore(std::string filePath, std::string legacyFilePath)
+    : filePath_(std::move(filePath)), legacyFilePath_(std::move(legacyFilePath)) {}
 
-Settings JsonFileSettingsStore::Load() {
+Settings JsonFileSettingsStore::LoadFrom(const std::string& path, bool& outExists) {
     std::error_code existsError;
-    const bool exists = fs::exists(filePath_, existsError);
-    if (existsError || !exists) {
+    outExists = fs::exists(path, existsError) && !existsError;
+    if (!outExists) {
         return Settings::Defaults();
     }
 
-    std::ifstream input(filePath_, std::ios::binary);
+    std::ifstream input(path, std::ios::binary);
     if (!input) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_SETTINGS_READ_FAILED", errors::ErrorCategory::InvalidFile,
-            "Could not read the settings file.", "Failed to open '" + filePath_ + "' for reading."));
+        logging::Log::Warning("Settings", "Could not open '" + path + "' for reading; using defaults.");
+        return Settings::Defaults();
     }
 
     std::ostringstream contentStream;
     contentStream << input.rdbuf();
     const std::string content = contentStream.str();
 
-    nlohmann::json parsed;
+    // A settings file that is unreadable JSON, missing fields, or fails Settings::Validate()
+    // (e.g. a hand-edited or out-of-range value, or a file written by a future/older
+    // version) must never stop the app from starting -- fall back to defaults rather than
+    // throwing. The file itself is left alone on disk, not overwritten, so it remains
+    // available to inspect; only a subsequent successful Save() replaces it.
     try {
-        parsed = nlohmann::json::parse(content);
+        const nlohmann::json parsed = nlohmann::json::parse(content);
         return Settings::FromJson(parsed);
     } catch (const nlohmann::json::exception& e) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_SETTINGS_PARSE_FAILED", errors::ErrorCategory::InvalidFile,
-            "The settings file is corrupt or invalid and could not be loaded.",
-            "Failed to parse '" + filePath_ + "': " + e.what()));
+        logging::Log::Warning("Settings",
+                               "Settings file '" + path + "' is not valid JSON (" + e.what() +
+                                   "); using defaults.");
+        return Settings::Defaults();
+    } catch (const errors::MediaToolException& e) {
+        logging::Log::Warning("Settings", "Settings file '" + path + "' failed validation (" +
+                                               e.Info().details + "); using defaults.");
+        return Settings::Defaults();
     }
+}
+
+Settings JsonFileSettingsStore::Load() {
+    bool exists = false;
+    Settings settings = LoadFrom(filePath_, exists);
+    if (exists) {
+        return settings;
+    }
+
+    if (!legacyFilePath_.empty()) {
+        bool legacyExists = false;
+        Settings legacy = LoadFrom(legacyFilePath_, legacyExists);
+        if (legacyExists) {
+            logging::Log::Info("Settings", "Migrated settings from legacy path '" + legacyFilePath_ +
+                                                "' (no file yet at '" + filePath_ + "').");
+            return legacy;
+        }
+    }
+
+    return settings;  // Settings::Defaults(), from the primary-path lookup above
 }
 
 void JsonFileSettingsStore::Save(const Settings& settings) {

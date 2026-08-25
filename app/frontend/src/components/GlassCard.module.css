@@ -1,0 +1,35 @@
+/* "Glassmorphism Lite" (idealist.md): subtle backdrop-blur, a 1px border, an inner glow --
+   never a heavy drop shadow. Reused by the home screen's two boxes and, from Phase 3, the
+   Queue/Settings cards. */
+
+.card {
+  position: relative;
+  background: var(--color-surface);
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius-card);
+  backdrop-filter: blur(var(--blur-glass));
+  -webkit-backdrop-filter: blur(var(--blur-glass));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition:
+    border-color var(--transition-standard),
+    background var(--transition-standard),
+    transform var(--transition-standard);
+}
+
+.interactive {
+  cursor: pointer;
+}
+
+.interactive:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-surface-border-hover);
+}
+
+.interactive:active {
+  transform: scale(0.99);
+}
+
+.dragActive {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
