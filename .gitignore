@@ -24,6 +24,11 @@
 /app/desktop/src-tauri/target/
 /app/desktop/src-tauri/Cargo.lock
 /app/desktop/src-tauri/gen/
+# Vendored sidecar/resource binaries (mediatool-core.exe, ffmpeg/ffprobe + DLLs, the
+# bundled Python runtime) -- populated by scripts/vendor_ffmpeg.ps1 and
+# scripts/vendor_python_runtime.ps1 (Phase 5.2) immediately before `tauri build`, never
+# committed. See docs/licensing.md for what gets vendored and from where.
+/app/desktop/src-tauri/resources/
 
 # --- Python ---
 /python/downloader/.venv/

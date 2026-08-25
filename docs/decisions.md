@@ -243,6 +243,39 @@ section 47. Newest entries at the bottom of each phase's section.
   the real pin happens when `scripts/vendor_ffmpeg.ps1` (Phase 5.2) actually downloads and
   hashes the artifact on a real build.
 
+### `bundle.resources` lives in a separate `tauri.release.conf.json`, not the base config
+- **Context:** wiring up Phase 5.2's sidecar bundling, adding `bundle.resources` entries
+  for `mediatool-core.exe`/ffmpeg/Python directly into `tauri.conf.json` broke `cargo
+  check` entirely: Tauri's build script validates every configured resource path actually
+  exists on disk, unconditionally, on every compile -- not just when actually running
+  `tauri build`. Confirmed by reproducing it locally: `cargo check` failed with `resource
+  path 'resources/ffmpeg' doesn't exist` the moment the config was added, with nothing in
+  `resources/` yet (which is correct -- it's populated by the Phase 5.2 vendor scripts,
+  not committed).
+- **Options considered:** (a) commit placeholder files (empty `.gitkeep`s, a stub
+  `mediatool-core.exe`) so the paths always exist; (b) split the resources config into a
+  separate file merged in only for the actual packaging command, via Tauri CLI's
+  `--config` (JSON Merge Patch over the base config).
+- **Choice:** (b) -- new `app/desktop/src-tauri/tauri.release.conf.json`, containing only
+  the `bundle.resources` object, passed as `npm run tauri build -- --config
+  tauri.release.conf.json`.
+- **Reason:** (a) would have meant nobody could `npm run tauri dev` or even `cargo check`
+  on a fresh clone without first vendoring 200+ MB of binaries -- a placeholder `.exe`
+  committed to git to work around that is also just an ugly, confusing thing to find in a
+  source tree. (b) keeps the base config (and therefore the entire existing dev loop)
+  completely unaffected, since dev commands never pass `--config` and never see the
+  resources key at all -- verified locally both ways (`cargo check` clean with the base
+  config; `TAURI_CONFIG=<release config json> cargo check` clean once placeholder resource
+  files existed).
+- **Consequences:** `docs/development.md`'s "Packaging" section and
+  `scripts/prepare_bundle_resources.ps1`'s final instructions both reference the
+  `--config` flag explicitly -- anyone packaging the app for real must remember it, or the
+  build silently ships without the bundled resources at all (still an `active: true`
+  NSIS bundle, just missing `externalBin`/resources, functionally identical to the #7
+  audit finding this phase exists to fix). Worth a CI/build-script check later that the
+  final `.exe`'s resource dir actually contains what's expected, not just that `tauri
+  build` exited zero.
+
 ### Gravity's own source LICENSE — deliberately left unresolved
 - **Context:** the plan flagged this as the user's call, not a default to pick.
 - **Choice:** asked directly (proprietary/all-rights-reserved vs. source-available vs.

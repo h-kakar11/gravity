@@ -96,6 +96,28 @@ std::string ResolveDownloaderScript() {
     return NativePath(EnvOr("MEDIATOOL_DOWNLOADER_SCRIPT", "python/downloader/downloader.py"));
 }
 
+// A user-supplied path in Settings always wins (they explicitly chose a different
+// ffmpeg); absent that, falls back to the bundled ffmpeg the packaged app ships (Phase
+// 5.2's resources -- app/desktop/src-tauri/src/core_bridge.rs sets this env var, pointing
+// at resource_dir()/ffmpeg/ffmpeg.exe, only once that file actually exists there). Neither
+// set means dev mode / no bundled ffmpeg yet, so DiscoverFfmpegPath's own PATH-search
+// fallback (pre-Phase-5.2 behavior) is unaffected.
+std::optional<std::string> EffectiveFfmpegOverride(const settings::Settings& settings) {
+    if (!settings.advanced.ffmpegPath.empty()) return settings.advanced.ffmpegPath;
+    const std::string bundled = EnvOr("MEDIATOOL_FFMPEG_PATH", "");
+    if (!bundled.empty()) return bundled;
+    return std::nullopt;
+}
+
+// Same reasoning as EffectiveFfmpegOverride, but ffprobe has no user-facing Settings field
+// of its own -- there's never been a reason to let a user override it independently of
+// ffmpeg, so this only ever consults the bundled-resource env var.
+std::optional<std::string> EffectiveFfprobeOverride() {
+    const std::string bundled = EnvOr("MEDIATOOL_FFPROBE_PATH", "");
+    if (!bundled.empty()) return bundled;
+    return std::nullopt;
+}
+
 // --- the wired-up application -----------------------------------------------------------
 
 struct AppContext {
@@ -121,19 +143,12 @@ struct AppContext {
     std::unordered_map<jobs::JobId, jobs::JobState> previousState;
 
     explicit AppContext(const settings::Settings& settings)
-        : ffmpegEngine(processRunner,
-                       settings.advanced.ffmpegPath.empty()
-                           ? std::nullopt
-                           : std::optional<std::string>(settings.advanced.ffmpegPath),
-                       std::nullopt),
+        : ffmpegEngine(processRunner, EffectiveFfmpegOverride(settings), EffectiveFfprobeOverride()),
           // Resolved once at startup (not per-download) and handed to yt-dlp so it merges
           // separate video/audio streams via the SAME ffmpeg binary the rest of the app
           // already uses -- see docs/decisions.md "Video/audio merge strategy".
           ytDlpProvider(processRunner, ResolvePythonExecutable(), ResolveDownloaderScript(),
-                        media::DiscoverFfmpegPath(processRunner, settings.advanced.ffmpegPath.empty()
-                                                                      ? std::nullopt
-                                                                      : std::optional<std::string>(
-                                                                            settings.advanced.ffmpegPath))
+                        media::DiscoverFfmpegPath(processRunner, EffectiveFfmpegOverride(settings))
                             .value_or("")),
           jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs))) {}
 };

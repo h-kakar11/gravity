@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/mediatool-core.exe": "mediatool-core.exe",
+      "resources/ffmpeg/": "ffmpeg/",
+      "resources/python/": "python/"
+    }
+  }
+}
