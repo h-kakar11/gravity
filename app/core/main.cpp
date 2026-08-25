@@ -95,7 +95,8 @@ std::string ResolveDownloaderScript() {
 struct AppContext {
     process::RealProcessRunner processRunner;
     events::EventBus eventBus;
-    settings::JsonFileSettingsStore settingsStore{settings::DefaultSettingsFilePath()};
+    settings::JsonFileSettingsStore settingsStore{settings::DefaultSettingsFilePath(),
+                                                   settings::LegacySettingsFilePath()};
     hardware::WindowsHardwareDetector hardwareDetector;
     filesystem::LocalFileSystem fileSystem;
     // Shared by every job type that allocates an output filename (#12) -- one instance
@@ -620,7 +621,8 @@ int main(int argc, char** argv) {
     // nothing else in AppContext construction gets a free pass to bring down the process
     // with an unhandled exception and no diagnostic either. Logged, not silent.
     try {
-        settings::JsonFileSettingsStore bootstrapStore(settings::DefaultSettingsFilePath());
+        settings::JsonFileSettingsStore bootstrapStore(settings::DefaultSettingsFilePath(),
+                                                        settings::LegacySettingsFilePath());
         AppContext app(bootstrapStore.Load());
 
         const bool selfTest = argc > 1 && std::string(argv[1]) == "--selftest";

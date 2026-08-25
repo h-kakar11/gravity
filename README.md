@@ -1,4 +1,4 @@
-# MediaTool ("gravity")
+# Gravity
 
 A local-first media downloader, converter, and compressor for Windows. No accounts, no
 telemetry, no cloud processing — everything runs on your machine (spec sections 24, 34).

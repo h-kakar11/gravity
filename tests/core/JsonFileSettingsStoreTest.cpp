@@ -151,5 +151,47 @@ TEST_F(JsonFileSettingsStoreTest, LoadOnOutOfRangeValueFallsBackToDefaults) {
     EXPECT_EQ(loaded.ToJson(), Settings::Defaults().ToJson());
 }
 
+// Regression test for the MediaTool -> Gravity rename: an existing user's settings must
+// survive the upgrade rather than silently resetting to defaults just because the
+// settings file now lives under a different product-name directory.
+TEST_F(JsonFileSettingsStoreTest, LoadMigratesFromLegacyPathWhenPrimaryPathHasNoFileYet) {
+    const std::string legacyPath = (tempDir_ / "legacy_settings.json").string();
+    {
+        JsonFileSettingsStore legacyStore(legacyPath);
+        Settings original = Settings::Defaults();
+        original.general.launchOnStartup = true;
+        original.downloads.concurrentDownloads = 3;
+        legacyStore.Save(original);
+    }
+
+    ASSERT_FALSE(fs::exists(settingsPath_));
+    JsonFileSettingsStore store(settingsPath_, legacyPath);
+    const Settings loaded = store.Load();
+
+    EXPECT_TRUE(loaded.general.launchOnStartup);
+    EXPECT_EQ(loaded.downloads.concurrentDownloads, 3);
+    // Migration is read-only -- it doesn't write the primary path itself; that happens
+    // the next time something actually calls Save().
+    EXPECT_FALSE(fs::exists(settingsPath_));
+}
+
+TEST_F(JsonFileSettingsStoreTest, LoadIgnoresLegacyPathOncePrimaryPathHasAFile) {
+    const std::string legacyPath = (tempDir_ / "legacy_settings.json").string();
+    {
+        JsonFileSettingsStore legacyStore(legacyPath);
+        Settings legacy = Settings::Defaults();
+        legacy.downloads.concurrentDownloads = 7;
+        legacyStore.Save(legacy);
+    }
+
+    JsonFileSettingsStore store(settingsPath_, legacyPath);
+    Settings current = Settings::Defaults();
+    current.downloads.concurrentDownloads = 2;
+    store.Save(current);
+
+    const Settings loaded = store.Load();
+    EXPECT_EQ(loaded.downloads.concurrentDownloads, 2);  // primary path wins, legacy ignored
+}
+
 }  // namespace
 }  // namespace mediatool::settings

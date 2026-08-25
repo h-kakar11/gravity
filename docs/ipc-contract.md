@@ -1,7 +1,7 @@
-# MediaTool IPC & Wire Contract
+# Gravity IPC & Wire Contract
 
 This is the single source of truth for every name, enum value, and JSON shape that
-crosses a process boundary in MediaTool:
+crosses a process boundary in Gravity:
 
 ```
 React/TypeScript  <--Tauri IPC-->  Rust (Tauri shell)  <--stdio NDJSON-->  C++ core (mediatool-core)

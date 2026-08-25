@@ -51,7 +51,7 @@ std::string DefaultUserOutputDirectory() {
     if (userProfile.empty()) {
         return "";
     }
-    return userProfile + "\\Downloads\\MediaTool";
+    return userProfile + "\\Downloads\\Gravity";
 }
 
 }  // namespace
