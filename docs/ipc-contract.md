@@ -154,6 +154,14 @@ These commands are invoked directly (`invoke("command_name", params)`), not thro
 `cronExpression` uses the `cron` crate's 6-field syntax (seconds first --
 `sec min hour day month day-of-week`), not the 5-field Unix convention.
 
+Desktop notifications (Phase 4.5) are the one exception to "OS-shell features live in
+Rust": they fire from the **frontend** via `@tauri-apps/plugin-notification`'s
+`sendNotification`/`requestPermission`/`isPermissionGranted` (wrapped in
+`app/frontend/src/services/notifications.ts`), gated by `general.showNotifications`, in
+response to the job lifecycle events above plus the two background-trigger events below --
+not a Tauri command of its own, since React already subscribes to everything it needs to
+react to.
+
 Events emitted directly by Rust (via `AppHandle::emit`, subscribed with
 `@tauri-apps/api/event`'s `listen`, not `subscribeToJobEvents`'s `"core-event"`):
 

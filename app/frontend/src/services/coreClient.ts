@@ -179,3 +179,41 @@ export function subscribeToHotkeyEvents(handlers: {
     unlistenFns.forEach((fn) => fn());
   };
 }
+
+// Subscribes to the two Tauri events emitted directly by Watch Folders (4.1) and Scheduled
+// Tasks (4.3) when either auto-submits a job in the background -- used by useNotifications
+// (4.5) to toast them regardless of which screen is currently showing.
+export function subscribeToBackgroundEvents(handlers: {
+  onWatchFolderTriggered?: (path: string) => void;
+  onScheduledTaskFired?: (taskName: string) => void;
+}): () => void {
+  const unlistenFns: Array<() => void> = [];
+  let cancelled = false;
+
+  const track = (promise: Promise<() => void>) => {
+    promise.then((fn) => {
+      if (cancelled) fn();
+      else unlistenFns.push(fn);
+    });
+  };
+
+  if (handlers.onWatchFolderTriggered) {
+    track(
+      listen<{ path: string; jobId?: string }>("watch-folder-triggered", (event) => {
+        handlers.onWatchFolderTriggered?.(event.payload.path);
+      }),
+    );
+  }
+  if (handlers.onScheduledTaskFired) {
+    track(
+      listen<{ taskId: string; taskName: string; jobId?: string }>("scheduled-task-fired", (event) => {
+        handlers.onScheduledTaskFired?.(event.payload.taskName);
+      }),
+    );
+  }
+
+  return () => {
+    cancelled = true;
+    unlistenFns.forEach((fn) => fn());
+  };
+}

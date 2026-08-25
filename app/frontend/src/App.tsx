@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import AppShell from "./components/AppShell";
+import { useNotifications } from "./hooks/useNotifications";
 import { NavigationProvider, useNavigation } from "./navigation/NavigationContext";
 import ConvertPage from "./pages/ConvertPage";
 import DevConsole from "./pages/DevConsole";
@@ -22,6 +23,9 @@ function Screens() {
       onFocusQueue: () => navigate({ kind: "queue" }),
     });
   }, [navigate]);
+
+  // Toast notifications (Phase 4.5), same "fires regardless of active screen" reasoning.
+  useNotifications();
 
   switch (screen.kind) {
     case "home":
