@@ -31,6 +31,7 @@
 #include "core/events/EventBus.h"
 #include "core/filesystem/FileInfo.h"
 #include "core/filesystem/LocalFileSystem.h"
+#include "core/filesystem/PathUtils.h"
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
 #include "core/jobs/DownloadJob.h"
@@ -287,6 +288,16 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
             "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
             "An output directory is required."));
     }
+    // #11: reject traversal and (unless explicitly opted into) UNC output directories --
+    // previously any string was accepted as-is.
+    const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
+    if (!filesystem::paths::IsSafeUserSuppliedPath(outputDirectory, allowNetworkPaths)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
+            "The output directory must be an absolute path with no \"..\" segments" +
+                std::string(allowNetworkPaths ? "." : ", and network (UNC) paths are not enabled."),
+            "outputDirectory=" + outputDirectory));
+    }
 
     // A coarse floor, not a real "will this download fit" check (that needs the file
     // size, which isn't known until Inspect() runs inside the job) -- catches the
@@ -376,7 +387,19 @@ json HandleRetryJob(AppContext& app, const json& params) {
 }
 
 json HandleInspectFile(AppContext& app, const json& params) {
-    return {{"fileInfo", InspectFileEnriched(app, params.at("path").get<std::string>()).ToJson()}};
+    const std::string path = params.at("path").get<std::string>();
+    // #11: same traversal/UNC gate as HandleCreateDownloadJob's output directory --
+    // inspectFile previously accepted any absolute path with no restriction at all
+    // (e.g. a traversal or UNC path reaching well outside anything the user selected).
+    const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
+    if (!filesystem::paths::IsSafeUserSuppliedPath(path, allowNetworkPaths)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PATH", errors::ErrorCategory::Unknown,
+            "The path must be an absolute path with no \"..\" segments" +
+                std::string(allowNetworkPaths ? "." : ", and network (UNC) paths are not enabled."),
+            "path=" + path));
+    }
+    return {{"fileInfo", InspectFileEnriched(app, path).ToJson()}};
 }
 
 json HandleGetCapabilities(AppContext& app, const json& params) {

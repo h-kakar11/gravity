@@ -31,6 +31,26 @@ bool IsUncPath(const std::string& path) {
            (path[1] == '\\' || path[1] == '/');
 }
 
+namespace {
+
+// Host-platform-independent traversal check: splits on either separator (Windows accepts
+// both) and looks for a literal ".." segment, rather than relying on
+// std::filesystem::path::lexically_normal() -- which, like IsAbsolute() above, answers
+// according to the *host's* path grammar and would silently fail to collapse "C:\a\..\b"
+// at all when built on a POSIX host (backslash isn't a separator there).
+bool ContainsTraversalSegment(const std::string& path) {
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '\\' || path[i] == '/') {
+            if (path.compare(start, i - start, "..") == 0) return true;
+            start = i + 1;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 bool LooksAbsoluteWindowsPath(const std::string& path) {
     if (IsUncPath(path)) return true;
     // "C:\..." or "C:/..." -- a drive letter followed by a colon and a separator. Not
@@ -41,6 +61,14 @@ bool LooksAbsoluteWindowsPath(const std::string& path) {
         return true;
     }
     return false;
+}
+
+bool IsSafeUserSuppliedPath(const std::string& path, bool allowNetworkPaths) {
+    if (path.empty()) return false;
+    if (!allowNetworkPaths && IsUncPath(path)) return false;
+    if (!LooksAbsoluteWindowsPath(path)) return false;
+    if (ContainsTraversalSegment(path)) return false;
+    return true;
 }
 
 std::string Normalize(const std::string& path) {
