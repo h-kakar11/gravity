@@ -1,3 +1,4 @@
+mod cli;
 mod core_bridge;
 mod hotkeys;
 mod paths;
@@ -79,10 +80,23 @@ fn open_containing_folder(path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Registered first, per tauri-plugin-single-instance's own requirement: plugins run
+        // in registration order, and this one needs to intercept a second launch before
+        // anything else in the chain reacts to app startup. See src/cli.rs -- the
+        // already-running-instance half of the Phase 5.3 CLI contract.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            cli::handle_second_instance(app, &args);
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            app.manage(cli::CliState::default());
+            // Cold-start half of the Phase 5.3 CLI contract -- the frontend isn't mounted
+            // yet, so this stashes the parsed action rather than emitting an event (see
+            // cli.rs's module doc for why).
+            cli::store_startup_action(&app.handle().clone(), &std::env::args().collect::<Vec<_>>());
+
             let handle = app.handle().clone();
             let state = CoreState::spawn(handle).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(state);
@@ -129,7 +143,8 @@ pub fn run() {
             scheduler::update_scheduled_task,
             scheduler::remove_scheduled_task,
             scheduler::list_scheduled_tasks,
-            hotkeys::refresh_hotkeys
+            hotkeys::refresh_hotkeys,
+            cli::get_startup_file_action
         ])
         .build(tauri::generate_context!())
         .expect("error while building the MediaTool Tauri application")

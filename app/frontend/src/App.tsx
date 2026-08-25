@@ -28,6 +28,21 @@ function Screens() {
   // Toast notifications (Phase 4.5), same "fires regardless of active screen" reasoning.
   useNotifications();
 
+  // Windows context menu CLI contract (Phase 5.3): a cold start with --convert/--compress
+  // "<path>" (checked once, after mount, so the Rust side has had a chance to stash it --
+  // see cli.rs's module doc for why this is a command instead of an event for this case),
+  // and a second launch redirected here while already running (a live event instead, since
+  // this component -- and therefore its listener -- is already mounted by then).
+  useEffect(() => {
+    coreClient.getStartupFileAction().then((action) => {
+      if (action) navigate({ kind: "convert", prefillFilePath: action.path, mode: action.mode });
+    }).catch(() => {});
+
+    return coreClient.subscribeToCliFileOpened((action) => {
+      navigate({ kind: "convert", prefillFilePath: action.path, mode: action.mode });
+    });
+  }, [navigate]);
+
   switch (screen.kind) {
     case "home":
       return <HomePage />;

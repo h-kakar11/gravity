@@ -203,6 +203,37 @@ export async function removeScheduledTask(id: string): Promise<void> {
   }
 }
 
+// Windows context menu CLI contract (Phase 5.3) -- app/desktop/src-tauri/src/cli.rs.
+// getStartupFileAction covers a cold start (--convert/--compress path passed at launch);
+// subscribeToCliFileOpened covers a second launch redirected to an already-running
+// instance via tauri-plugin-single-instance.
+
+export interface StartupFileAction {
+  path: string;
+  mode: "convert" | "compress";
+}
+
+export async function getStartupFileAction(): Promise<StartupFileAction | null> {
+  return invoke<StartupFileAction | null>("get_startup_file_action");
+}
+
+export function subscribeToCliFileOpened(handler: (action: StartupFileAction) => void): () => void {
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+
+  listen<StartupFileAction>("cli-file-opened", (event) => {
+    handler(event.payload);
+  }).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+
+  return () => {
+    cancelled = true;
+    if (unlisten) unlisten();
+  };
+}
+
 // Re-registers the global hotkeys (Phase 4.4) from whatever Settings currently holds --
 // call after a successful updateSettings so a changed or cleared binding takes effect
 // immediately instead of waiting for the next launch.

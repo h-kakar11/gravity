@@ -149,6 +149,7 @@ These commands are invoked directly (`invoke("command_name", params)`), not thro
 | `remove_scheduled_task` | `{id: string}` | `{}` | `scheduler.rs` |
 | `list_scheduled_tasks` | `{}` | `ScheduledTaskConfig[]` (`{id, name, cronExpression, jobType, params, enabled}`) | `scheduler.rs` |
 | `refresh_hotkeys` | `{}` | `{}` | `hotkeys.rs` -- call after any `updateSettings` that could have changed `general.hotkeyPasteAndDownload`/`hotkeyFocusQueue` |
+| `get_startup_file_action` | `{}` | `{path: string, mode: "convert"\|"compress"} \| null` | `cli.rs` -- call once on frontend mount to fetch-and-consume a `--convert`/`--compress` path Gravity was launched with (Phase 5.3 Windows context menu); returns `null` on a normal launch |
 | `open_containing_folder` | `{path: string}` | `{}` | `lib.rs` |
 
 `cronExpression` uses the `cron` crate's 6-field syntax (seconds first --
@@ -171,6 +172,7 @@ Events emitted directly by Rust (via `AppHandle::emit`, subscribed with
 | `scheduled-task-fired` | `{taskId: string, taskName: string, jobId?: string}` | a scheduled task's cron fired |
 | `hotkey-paste-and-download` | `{url: string}` | the paste-and-download hotkey read a non-empty clipboard |
 | `hotkey-focus-queue` | `{}` | the focus-queue hotkey fired |
+| `cli-file-opened` | `{path: string, mode: "convert"\|"compress"}` | Phase 5.3: a second `gravity.exe --convert`/`--compress "<path>"` launch was redirected to this already-running instance by `tauri-plugin-single-instance` -- the cold-start equivalent is `get_startup_file_action` above, not this event (the frontend isn't mounted/listening yet at cold start) |
 
 ## Shared types
 
