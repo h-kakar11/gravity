@@ -1,4 +1,8 @@
 mod core_bridge;
+mod paths;
+mod scheduler;
+mod tray;
+mod watch_folders;
 
 use core_bridge::CoreState;
 use serde_json::Value;
@@ -78,9 +82,46 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = CoreState::spawn(handle).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(state);
+
+            tray::setup_tray(app)?;
+
+            app.manage(watch_folders::WatchFolderState::default());
+            watch_folders::restore_watch_folders(&app.handle().clone());
+
+            app.manage(scheduler::ScheduledTaskState::default());
+            scheduler::start_scheduler(&app.handle().clone());
+
+            // Background mode (#2): intercept the main window's close request and hide
+            // to the tray instead of quitting, unless the user has opted out via
+            // Settings -- see tray::should_minimize_to_tray. Watch Folders (4.1) and
+            // Scheduled Tasks (4.3) both need the process to survive past this point.
+            if let Some(window) = app.get_webview_window("main") {
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if tray::should_minimize_to_tray(&app_handle) {
+                            api.prevent_close();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![send_core_command, open_containing_folder])
+        .invoke_handler(tauri::generate_handler![
+            send_core_command,
+            open_containing_folder,
+            watch_folders::add_watch_folder,
+            watch_folders::remove_watch_folder,
+            watch_folders::list_watch_folders,
+            scheduler::add_scheduled_task,
+            scheduler::update_scheduled_task,
+            scheduler::remove_scheduled_task,
+            scheduler::list_scheduled_tasks
+        ])
         .build(tauri::generate_context!())
         .expect("error while building the MediaTool Tauri application")
         .run(|app_handle, event| {
