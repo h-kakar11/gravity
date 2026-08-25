@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window. App-defined commands (send_core_command) are always invokable and need no explicit permission entry; this grants the baseline window/core APIs Tauri itself needs plus the plugin permissions actually called from the frontend -- notification:default for Phase 4.5's toast notifications (sendNotification/requestPermission/isPermissionGranted are called directly from React, unlike tray-icon/global-shortcut/clipboard-manager, which are only ever driven from the Rust side).",
+  "description": "Capability for the main window. App-defined commands (send_core_command) are always invokable and need no explicit permission entry; this grants only the baseline window/core APIs Tauri itself needs.",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": ["core:default"]
 }

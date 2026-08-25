@@ -5,7 +5,6 @@
 #include "core/errors/MediaToolException.h"
 #include "core/filesystem/FilenameSanitizer.h"
 #include "core/filesystem/PathUtils.h"
-#include "core/jobs/JobArtifactCleanup.h"
 
 namespace mediatool::jobs {
 
@@ -29,28 +28,32 @@ nlohmann::json MetadataToJson(const downloads::DownloadMetadata& metadata) {
 }  // namespace
 
 DownloadJob::DownloadJob(Options options, downloads::IDownloadProvider& provider,
-                          filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine,
-                          filesystem::FilenameReservationRegistry& reservationRegistry)
+                          filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine)
     : Job(JobType::Download),
       options_(std::move(options)),
       provider_(provider),
       fileSystem_(fileSystem),
-      mediaEngine_(mediaEngine),
-      reservationRegistry_(reservationRegistry) {}
+      mediaEngine_(mediaEngine) {}
 
 DownloadJob::DownloadJob(Options options, downloads::IDownloadProvider& provider,
                           filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine,
-                          filesystem::FilenameReservationRegistry& reservationRegistry,
                           common::IClock& clock)
     : Job(JobType::Download, clock),
       options_(std::move(options)),
       provider_(provider),
       fileSystem_(fileSystem),
-      mediaEngine_(mediaEngine),
-      reservationRegistry_(reservationRegistry) {}
+      mediaEngine_(mediaEngine) {}
 
 void DownloadJob::CleanupArtifacts(const std::string& filenameBase) {
-    CleanupJobArtifacts(fileSystem_, options_.outputDirectory, filenameBase);
+    try {
+        for (const auto& name : fileSystem_.ListDirectory(options_.outputDirectory)) {
+            if (name.rfind(filenameBase, 0) == 0) {
+                fileSystem_.Delete(filesystem::paths::Join(options_.outputDirectory, name));
+            }
+        }
+    } catch (...) {
+        // Best-effort cleanup; a cleanup failure must never mask the real job error.
+    }
 }
 
 void DownloadJob::Execute() {
@@ -64,18 +67,10 @@ void DownloadJob::Execute() {
         provider_.Inspect(options_.url, [this] { return IsCancellationRequested(); });
     SetMetadata(MetadataToJson(metadata));
 
-    std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
-    safeTitle = filesystem::TruncateBaseNameForMaxPath(options_.outputDirectory, safeTitle);
+    const std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
     fileSystem_.CreateDirectory(options_.outputDirectory);
-    // Reserve (not just probe) the output base name: DeduplicateBaseName alone only
-    // checks the disk, which is a TOCTOU race once concurrency > 1 -- two jobs racing to
-    // download videos with the same title could both compute the same "next free" name
-    // (#12). The reservation is released automatically when it goes out of scope at the
-    // end of this function (success or exception alike), freeing the name for reuse once
-    // this job is no longer using it.
-    auto reservation =
-        reservationRegistry_.Reserve(options_.outputDirectory, safeTitle, fileSystem_);
-    const std::string& filenameBase = reservation.BaseName();
+    const std::string filenameBase =
+        filesystem::DeduplicateBaseName(options_.outputDirectory, safeTitle, fileSystem_);
 
     Progress starting;
     starting.statusMessage = "Starting download";

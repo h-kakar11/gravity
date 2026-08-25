@@ -20,7 +20,7 @@ enum class LogLevel {
     Error,
 };
 
-// %LOCALAPPDATA%\Gravity\logs on Windows; falls back to "./logs" if LOCALAPPDATA is
+// %LOCALAPPDATA%\MediaTool\logs on Windows; falls back to "./logs" if LOCALAPPDATA is
 // unset (e.g. a stripped-down test environment). Do not hardcode this path elsewhere.
 std::string DefaultLogDirectory();
 

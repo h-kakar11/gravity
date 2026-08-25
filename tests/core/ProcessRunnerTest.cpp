@@ -80,38 +80,3 @@ TEST(RealProcessRunnerTest, KillStopsLongRunningProcessQuickly) {
     EXPECT_TRUE(result->wasTerminated);
     EXPECT_FALSE(process->IsRunning());
 }
-
-// Regression test for #9 (orphaned child processes): killing the direct child must also
-// terminate any grandchild it spawned, not just leave it running. Requires a Windows host
-// to actually run (like the two tests above) -- NOT independently verified here.
-TEST(RealProcessRunnerTest, KillTerminatesGrandchildProcessesToo) {
-    RealProcessRunner runner;
-
-    // cmd.exe launches ping.exe as its own direct child (not detached via "start"), so
-    // the process tree is: this test -> cmd.exe (the IProcess we control) -> ping.exe
-    // (a grandchild, invisible to and untouched by reproc's own single-process kill()).
-    // Previously Kill() only terminated cmd.exe, leaving ping.exe running indefinitely.
-    auto process = runner.Start("cmd.exe", {"/c", "ping", "-n", "30", "127.0.0.1"},
-                                 ProcessOptions{}, [](const std::string&) {},
-                                 [](const std::string&) {});
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    ASSERT_TRUE(process->IsRunning());
-
-    process->Kill();
-    auto result = process->WaitFor(5000);
-    ASSERT_TRUE(result.has_value());
-
-    // Give the OS a moment to finish tearing down the job-object-terminated tree.
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-    RealProcessRunner checker;
-    std::string tasklistOutput;
-    auto check = checker.Start(
-        "tasklist", {"/FI", "IMAGENAME eq ping.exe"}, ProcessOptions{},
-        [&](const std::string& line) { tasklistOutput += line + "\n"; }, [](const std::string&) {});
-    check->Wait();
-
-    EXPECT_EQ(tasklistOutput.find("ping.exe"), std::string::npos)
-        << "ping.exe (a grandchild of the killed process) is still running:\n" << tasklistOutput;
-}

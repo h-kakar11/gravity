@@ -97,29 +97,5 @@ export function useJobs() {
     [refreshJob],
   );
 
-  const pauseJob = useCallback(
-    async (jobId: string): Promise<void> => {
-      await coreClient.pauseJob(jobId);
-      await refreshJob(jobId);
-    },
-    [refreshJob],
-  );
-
-  const resumeJob = useCallback(
-    async (jobId: string): Promise<void> => {
-      await coreClient.resumeJob(jobId);
-      await refreshJob(jobId);
-    },
-    [refreshJob],
-  );
-
-  const retryJob = useCallback(
-    async (jobId: string): Promise<void> => {
-      await coreClient.retryJob(jobId);
-      await refreshJob(jobId);
-    },
-    [refreshJob],
-  );
-
-  return { jobs, connectionError, createTestJob, cancelJob, pauseJob, resumeJob, retryJob };
+  return { jobs, connectionError, createTestJob, cancelJob };
 }

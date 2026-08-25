@@ -1,10 +1,4 @@
-mod cli;
 mod core_bridge;
-mod hotkeys;
-mod paths;
-mod scheduler;
-mod tray;
-mod watch_folders;
 
 use core_bridge::CoreState;
 use serde_json::Value;
@@ -80,72 +74,13 @@ fn open_containing_folder(path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Registered first, per tauri-plugin-single-instance's own requirement: plugins run
-        // in registration order, and this one needs to intercept a second launch before
-        // anything else in the chain reacts to app startup. See src/cli.rs -- the
-        // already-running-instance half of the Phase 5.3 CLI contract.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            cli::handle_second_instance(app, &args);
-        }))
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            app.manage(cli::CliState::default());
-            // Cold-start half of the Phase 5.3 CLI contract -- the frontend isn't mounted
-            // yet, so this stashes the parsed action rather than emitting an event (see
-            // cli.rs's module doc for why).
-            cli::store_startup_action(&app.handle().clone(), &std::env::args().collect::<Vec<_>>());
-
             let handle = app.handle().clone();
             let state = CoreState::spawn(handle).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(state);
-
-            tray::setup_tray(app)?;
-
-            app.manage(watch_folders::WatchFolderState::default());
-            watch_folders::restore_watch_folders(&app.handle().clone());
-
-            app.manage(scheduler::ScheduledTaskState::default());
-            scheduler::start_scheduler(&app.handle().clone());
-
-            if let Err(e) = hotkeys::refresh_hotkeys(app.handle().clone()) {
-                log::warn!("failed to register global hotkeys: {e}");
-            }
-
-            // Background mode (#2): intercept the main window's close request and hide
-            // to the tray instead of quitting, unless the user has opted out via
-            // Settings -- see tray::should_minimize_to_tray. Watch Folders (4.1) and
-            // Scheduled Tasks (4.3) both need the process to survive past this point.
-            if let Some(window) = app.get_webview_window("main") {
-                let app_handle = app.handle().clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        if tray::should_minimize_to_tray(&app_handle) {
-                            api.prevent_close();
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.hide();
-                            }
-                        }
-                    }
-                });
-            }
-
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            send_core_command,
-            open_containing_folder,
-            watch_folders::add_watch_folder,
-            watch_folders::remove_watch_folder,
-            watch_folders::list_watch_folders,
-            scheduler::add_scheduled_task,
-            scheduler::update_scheduled_task,
-            scheduler::remove_scheduled_task,
-            scheduler::list_scheduled_tasks,
-            hotkeys::refresh_hotkeys,
-            cli::get_startup_file_action
-        ])
+        .invoke_handler(tauri::generate_handler![send_core_command, open_containing_folder])
         .build(tauri::generate_context!())
         .expect("error while building the MediaTool Tauri application")
         .run(|app_handle, event| {

@@ -172,7 +172,7 @@ network-failure detection).
 
 `core/filesystem/LocalFileSystem` implements `IFileSystem` on top of `std::filesystem`
 (never manual path string concatenation, spec section 11). `TempDirectory` gives each job
-an isolated working directory under `%LOCALAPPDATA%\Gravity\temp\job-<id>\`; `AtomicOutput`
+an isolated working directory under `%LOCALAPPDATA%\MediaTool\temp\job-<id>\`; `AtomicOutput`
 implements the "write to a `.processing` file, rename over the real path only on success"
 pattern (spec section 13) so a crash mid-operation never destroys or corrupts a user's
 file. `FilenameSanitizer` is the one place Windows-illegal-filename handling lives — the

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Gravity
+project(MediaTool
     VERSION 0.1.0
-    DESCRIPTION "Gravity: local-first media downloader, converter, and compressor - C++ core"
+    DESCRIPTION "Local-first media downloader, converter, and compressor - C++ core"
     LANGUAGES CXX
 )
 

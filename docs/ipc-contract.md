@@ -1,7 +1,7 @@
-# Gravity IPC & Wire Contract
+# MediaTool IPC & Wire Contract
 
 This is the single source of truth for every name, enum value, and JSON shape that
-crosses a process boundary in Gravity:
+crosses a process boundary in MediaTool:
 
 ```
 React/TypeScript  <--Tauri IPC-->  Rust (Tauri shell)  <--stdio NDJSON-->  C++ core (mediatool-core)
@@ -88,7 +88,6 @@ verified without hitting a real URL.
 | command | params | result |
 |---|---|---|
 | `createJob` | `{type: JobType, params: object}` | `{jobId: string}` |
-| `listJobHistory` | `{limit?: number}` | `{jobs: JobSnapshot[]}` (most-recent-first; backed by `job_history.json`, a bounded ring buffer of terminal-state jobs -- see `core/jobs/JobHistoryStore.h`) |
 | `getJob` | `{jobId: string}` | `{job: JobSnapshot}` |
 | `listJobs` | `{}` | `{jobs: JobSnapshot[]}` |
 | `cancelJob` | `{jobId: string}` | `{}` |
@@ -109,15 +108,8 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 | `type` | `params` |
 |---|---|
 | `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset}` (`quality` defaults to `"BEST"`) |
-| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
 | `"TEST"` | `{}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
-
-#### `MediaProcessingOptions` (CONVERSION/COMPRESSION's `options`)
-
-`{outputFormat: string, quality?: "low"|"medium"|"high"|"lossless", videoCodec?: "auto"|"h264"|"h265"|"vp9"|"av1", hardwareAcceleration?: "auto"|"none"|"nvenc"|"amf"|"qsv", resolution?: {width: number, height: number}, trim?: {startSeconds?: number, endSeconds?: number}, watermark?: {imagePath: string, position: "top-left"|"top-right"|"bottom-left"|"bottom-right"|"center", opacity: number}, audioBitrateKbps?: number}`
-
-`outputFormat` is required (rejected with `E_INVALID_MEDIA_OPTIONS` if missing/empty). `quality: "lossless"` is rejected unconditionally with `E_PRO_FEATURE_LOCKED` — there is no Pro entitlement system yet, so this is a hard server-side gate, not a toggle; the frontend must never offer it as a selectable value. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
 
 ## Events (core -> ... -> React)
 
@@ -129,50 +121,6 @@ that is at minimum `{state: JobState}` and, for `jobProgress`, the full `Progres
 `hardwareDetected` — `data: {hardwareInfo: HardwareInfo}`
 `downloadMetadataReceived` — `data: {jobId, title, durationSeconds, playlistIndex?, playlistCount?}`
 `logEvent` — `data: {level: "DEBUG"|"INFO"|"WARNING"|"ERROR", message: string, subsystem: string}`
-
-## Rust-only Tauri commands & events (Phase 4, not through the C++ core)
-
-OS-shell features (tray/background mode, Watch Folders, Scheduled Tasks, global Hotkeys)
-live entirely in `app/desktop/src-tauri/src/` and never get a `mediatool-core` command of
-their own -- when one needs to create a job, it just calls the existing `createJob` verb
-above through the same `CoreState::send_request` the `send_core_command` bridge uses.
-These commands are invoked directly (`invoke("command_name", params)`), not through
-`send_core_command`.
-
-| command | params | result | source |
-|---|---|---|---|
-| `add_watch_folder` | `{path: string, jobType: "CONVERSION"\|"COMPRESSION", defaultOptions: object}` | `{}` | `watch_folders.rs` |
-| `remove_watch_folder` | `{path: string}` | `{}` | `watch_folders.rs` |
-| `list_watch_folders` | `{}` | `WatchFolderConfig[]` (`{path, jobType, defaultOptions}`) | `watch_folders.rs` |
-| `add_scheduled_task` | `{name: string, cronExpression: string, jobType: "CONVERSION"\|"COMPRESSION"\|"DOWNLOAD", params: object}` | `ScheduledTaskConfig` | `scheduler.rs` |
-| `update_scheduled_task` | `{id: string, name?, cronExpression?, enabled?, params?}` | `ScheduledTaskConfig` | `scheduler.rs` |
-| `remove_scheduled_task` | `{id: string}` | `{}` | `scheduler.rs` |
-| `list_scheduled_tasks` | `{}` | `ScheduledTaskConfig[]` (`{id, name, cronExpression, jobType, params, enabled}`) | `scheduler.rs` |
-| `refresh_hotkeys` | `{}` | `{}` | `hotkeys.rs` -- call after any `updateSettings` that could have changed `general.hotkeyPasteAndDownload`/`hotkeyFocusQueue` |
-| `get_startup_file_action` | `{}` | `{path: string, mode: "convert"\|"compress"} \| null` | `cli.rs` -- call once on frontend mount to fetch-and-consume a `--convert`/`--compress` path Gravity was launched with (Phase 5.3 Windows context menu); returns `null` on a normal launch |
-| `open_containing_folder` | `{path: string}` | `{}` | `lib.rs` |
-
-`cronExpression` uses the `cron` crate's 6-field syntax (seconds first --
-`sec min hour day month day-of-week`), not the 5-field Unix convention.
-
-Desktop notifications (Phase 4.5) are the one exception to "OS-shell features live in
-Rust": they fire from the **frontend** via `@tauri-apps/plugin-notification`'s
-`sendNotification`/`requestPermission`/`isPermissionGranted` (wrapped in
-`app/frontend/src/services/notifications.ts`), gated by `general.showNotifications`, in
-response to the job lifecycle events above plus the two background-trigger events below --
-not a Tauri command of its own, since React already subscribes to everything it needs to
-react to.
-
-Events emitted directly by Rust (via `AppHandle::emit`, subscribed with
-`@tauri-apps/api/event`'s `listen`, not `subscribeToJobEvents`'s `"core-event"`):
-
-| event | payload | fired by |
-|---|---|---|
-| `watch-folder-triggered` | `{path: string, jobId?: string}` | a watched folder auto-submitted a job |
-| `scheduled-task-fired` | `{taskId: string, taskName: string, jobId?: string}` | a scheduled task's cron fired |
-| `hotkey-paste-and-download` | `{url: string}` | the paste-and-download hotkey read a non-empty clipboard |
-| `hotkey-focus-queue` | `{}` | the focus-queue hotkey fired |
-| `cli-file-opened` | `{path: string, mode: "convert"\|"compress"}` | Phase 5.3: a second `gravity.exe --convert`/`--compress "<path>"` launch was redirected to this already-running instance by `tauri-plugin-single-instance` -- the cold-start equivalent is `get_startup_file_action` above, not this event (the frontend isn't mounted/listening yet at cold start) |
 
 ## Shared types
 

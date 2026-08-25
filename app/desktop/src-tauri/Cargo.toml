@@ -1,7 +1,7 @@
 [package]
-name = "gravity-desktop"
+name = "mediatool-desktop"
 version = "0.1.0"
-description = "Gravity desktop shell (Tauri) -- bridges the React frontend to the mediatool-core sidecar over stdio NDJSON."
+description = "MediaTool desktop shell (Tauri) -- bridges the React frontend to the mediatool-core sidecar over stdio NDJSON."
 edition = "2021"
 rust-version = "1.77"
 
@@ -20,25 +20,18 @@ rust-version = "1.77"
 # desktop `main.rs` binary needs; re-add cdylib only if/when this target list grows a
 # mobile build, at which point building that variant with the MSVC toolchain instead of
 # MinGW is the more likely fix anyway.
-name = "gravity_desktop_lib"
+name = "mediatool_desktop_lib"
 crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-single-instance = "2"
+tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "io-util"] }
 log = "0.4"
-notify = "6"
-cron = "0.12"
-chrono = "0.4"
 
 [profile.release]
 codegen-units = 1

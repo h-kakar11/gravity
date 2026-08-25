@@ -49,9 +49,8 @@ std::optional<double> ParseSpeed(const std::string& value) {
 
 }  // namespace
 
-FFmpegProgressParser::FFmpegProgressParser(std::optional<double> totalDurationSeconds,
-                                           std::optional<double> inputBitrateBps)
-    : totalDurationSeconds_(totalDurationSeconds), inputBitrateBps_(inputBitrateBps) {}
+FFmpegProgressParser::FFmpegProgressParser(std::optional<double> totalDurationSeconds)
+    : totalDurationSeconds_(totalDurationSeconds) {}
 
 void FFmpegProgressParser::FeedLine(const std::string& line) {
     std::string trimmed = Trim(line);
@@ -101,10 +100,6 @@ jobs::Progress FFmpegProgressParser::BuildProgress(bool isEnd) const {
 
     if (auto totalSize = field("total_size")) {
         progress.processedBytes = ParseUInt64(*totalSize);
-    }
-
-    if (speedFactor.has_value() && inputBitrateBps_.has_value() && *inputBitrateBps_ > 0.0 && !isEnd) {
-        progress.speedBytesPerSecond = *speedFactor * (*inputBitrateBps_ / 8.0);
     }
 
     if (isEnd) {

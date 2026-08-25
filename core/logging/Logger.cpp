@@ -67,7 +67,7 @@ std::string ToWireLevel(LogLevel level) {
 std::string DefaultLogDirectory() {
     const char* localAppData = std::getenv("LOCALAPPDATA");
     if (localAppData != nullptr && *localAppData != '\0') {
-        return (std::filesystem::path(localAppData) / "Gravity" / "logs").string();
+        return (std::filesystem::path(localAppData) / "MediaTool" / "logs").string();
     }
     return "./logs";
 }

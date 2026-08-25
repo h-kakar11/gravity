@@ -11,7 +11,6 @@
 
 #include "core/downloads/IDownloadProvider.h"
 #include "core/downloads/QualityPreset.h"
-#include "core/filesystem/FilenameReservationRegistry.h"
 #include "core/filesystem/IFileSystem.h"
 #include "core/jobs/Job.h"
 #include "core/media/IMediaEngine.h"
@@ -26,39 +25,32 @@ public:
         downloads::QualityPreset quality = downloads::QualityPreset::Best;
     };
 
-    // `provider`, `fileSystem` and `reservationRegistry` must outlive this job.
-    // `mediaEngine` may be nullptr -- output verification then relies on existence +
-    // non-zero size only, skipping the ffprobe cross-check (see Execute()).
-    // `reservationRegistry` is the process-wide filename-collision guard (#12): every job
-    // that allocates an output filename shares one instance so two concurrent jobs can
-    // never both claim the same name.
+    // `provider` and `fileSystem` must outlive this job. `mediaEngine` may be nullptr --
+    // output verification then relies on existence + non-zero size only, skipping the
+    // ffprobe cross-check (see Execute()).
     DownloadJob(Options options, downloads::IDownloadProvider& provider,
-                filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine,
-                filesystem::FilenameReservationRegistry& reservationRegistry);
+                filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine);
     // `clock` must outlive this job. Lets tests inject a fixed/fake clock, mirroring
     // TestJob's (JobType, IClock&) constructor.
     DownloadJob(Options options, downloads::IDownloadProvider& provider,
                 filesystem::IFileSystem& fileSystem, media::IMediaEngine* mediaEngine,
-                filesystem::FilenameReservationRegistry& reservationRegistry, common::IClock& clock);
+                common::IClock& clock);
 
     void Execute() override;
 
 private:
-    // Best-effort: deletes every file in outputDirectory that filesystem::IsJobArtifactOf
-    // recognizes as belonging to `filenameBase` (yt-dlp's own ".part"/intermediate-format
-    // artifacts, sidecar metadata, or a fully written but since-rejected output) -- never
-    // a bare prefix match, and never a recursive directory delete (uses
-    // IFileSystem::DeleteFile, not Delete). Safe because DeduplicateBaseName chose
-    // `filenameBase` specifically to not collide with anything that predates this job, so
-    // anything IsJobArtifactOf accepts was created by this run. Never lets a cleanup
-    // failure mask the real job error.
+    // Best-effort: deletes every file in outputDirectory whose name starts with
+    // `filenameBase` (yt-dlp's own ".part"/intermediate-format artifacts, or a fully
+    // written but since-rejected output). Safe because DeduplicateBaseName chose
+    // `filenameBase` specifically to not collide with anything that predates this job,
+    // so anything matching it now was created by this run. Never lets a cleanup failure
+    // mask the real job error.
     void CleanupArtifacts(const std::string& filenameBase);
 
     Options options_;
     downloads::IDownloadProvider& provider_;
     filesystem::IFileSystem& fileSystem_;
     media::IMediaEngine* mediaEngine_;
-    filesystem::FilenameReservationRegistry& reservationRegistry_;
 };
 
 }  // namespace mediatool::jobs

@@ -128,22 +128,6 @@ TEST_F(LocalFileSystemTest, CopyMoveRenameDelete) {
     EXPECT_FALSE(fs_.Exists(renamed));
 }
 
-TEST_F(LocalFileSystemTest, DeleteFileRemovesAFile) {
-    const std::string path = WriteFile("scratch.txt", "hello");
-    fs_.DeleteFile(path);
-    EXPECT_FALSE(fs_.Exists(path));
-}
-
-TEST_F(LocalFileSystemTest, DeleteFileRefusesToRemoveADirectory) {
-    const std::string sub = (stdfs::path(root_) / "sub").string();
-    stdfs::create_directories(sub);
-    WriteFile("sub/keep.txt", "still here");
-
-    EXPECT_THROW(fs_.DeleteFile(sub), MediaToolException);
-    EXPECT_TRUE(fs_.Exists(sub));
-    EXPECT_TRUE(fs_.Exists((stdfs::path(sub) / "keep.txt").string()));
-}
-
 TEST_F(LocalFileSystemTest, CreateDirectoryIsRecursive) {
     const std::string nested = (stdfs::path(root_) / "a" / "b" / "c").string();
     fs_.CreateDirectory(nested);
