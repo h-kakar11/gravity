@@ -218,3 +218,37 @@ section 47. Newest entries at the bottom of each phase's section.
   paragraph is the entire close-out. If a future architecture change ever did route raw
   media bytes through a Gravity-owned buffer (e.g. an in-process filter chain instead of
   shelling out), this decision should be revisited then, not before.
+
+## Phase 5
+
+### FFmpeg vendor: BtbN/FFmpeg-Builds, not gyan.dev — correcting an earlier planning assumption
+- **Context:** the original plan (locked decision #1) specified vendoring gyan.dev's
+  "essentials-shared" build as "LGPL-labeled." Verifying this while writing
+  `docs/licensing.md` found it was wrong: gyan.dev's "essentials", "full", and
+  "full-shared" builds are all **GPLv3** (they bundle `libx264`), and gyan.dev does not
+  publish a ready-made LGPL artifact at all.
+- **Options considered:** (a) proceed with gyan.dev's shared build anyway, accepting it's
+  GPL, and relax decision #1's "no GPL codecs bundled" claim; (b) find and vendor a build
+  from a source that actually ships a genuine LGPL variant.
+- **Choice:** (b) — [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), which
+  publishes explicit `*-lgpl-shared`/`*-lgpl` variants alongside its GPL ones specifically
+  to serve this use case. See `docs/licensing.md` for the exact artifact.
+- **Reason:** (a) would have silently broken the entire licensing strategy this project
+  was built around — shipping a GPLv3 FFmpeg while documenting "LGPL, no GPL codecs
+  bundled" is a real compliance defect, not a rounding error. Catching it in the docs pass
+  before Phase 5.2 actually vendors a binary means the fix costs nothing; catching it after
+  shipping would not.
+- **Consequences:** `docs/licensing.md`'s pinning note documents why no SHA256 is recorded
+  yet (BtbN publishes under a rolling `latest` release tag with no stable pre-hash URL) —
+  the real pin happens when `scripts/vendor_ffmpeg.ps1` (Phase 5.2) actually downloads and
+  hashes the artifact on a real build.
+
+### Gravity's own source LICENSE — deliberately left unresolved
+- **Context:** the plan flagged this as the user's call, not a default to pick.
+- **Choice:** asked directly (proprietary/all-rights-reserved vs. source-available vs.
+  permissive open source vs. skip) — the user chose to skip it for this pass.
+- **Consequences:** no root `LICENSE` file exists. The repository's default legal state
+  ("all rights reserved," matching the Pro-tier commercial model) applies by absence of a
+  file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
+  mistaken for a deliberate "we chose all-rights-reserved" decision later. Revisit before
+  any public source distribution.
