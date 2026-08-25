@@ -198,3 +198,23 @@ section 47. Newest entries at the bottom of each phase's section.
 - **Consequences:** documented here per spec section 47 as a deliberate deviation from
   the letter of section 40, in keeping with its spirit (thorough, isolated, no-network
   protocol testing).
+
+## Phase 4
+
+### "Zero-Copy Transfer" (4.9) — not applicable to this architecture, dropped
+- **Context:** the must-have feature list asked for a "Zero-Copy Transfer" capability
+  alongside Watch Folders, Scheduled Tasks, Hotkeys, Notifications, Presets, Hardware
+  Acceleration, and Parallel Processing.
+- **Options considered:** none — there was no ambiguity to resolve once the actual data
+  flow was traced. `ffmpeg`/`ffprobe` and yt-dlp read and write media bytes directly on
+  disk as independent OS processes; Gravity itself never holds a media buffer in memory to
+  begin with. Everything that crosses a process or IPC boundary in this app (React <->
+  Rust <-> C++ core <-> engines) is small JSON control/progress messages — job parameters,
+  `-progress pipe:1` lines, NDJSON events — never raw audio/video/image bytes.
+- **Choice:** treat this as not applicable rather than build a placeholder or a
+  Pro-locked stub for it. There is no raw-media copy anywhere in the pipeline to
+  eliminate, so there is nothing a "zero-copy" mode could actually turn off.
+- **Consequences:** no code, no UI affordance, no IPC surface for this item — this
+  paragraph is the entire close-out. If a future architecture change ever did route raw
+  media bytes through a Gravity-owned buffer (e.g. an in-process filter chain instead of
+  shelling out), this decision should be revisited then, not before.

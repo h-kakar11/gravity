@@ -224,7 +224,10 @@ export default function SettingsPage() {
             <option value="high">High</option>
           </select>
         </Field>
-        <Field label="Concurrent jobs" hint="1-16">
+        <Field
+          label="Concurrent jobs"
+          hint="1-16. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
+        >
           <input
             className={styles.numberInput}
             type="number"

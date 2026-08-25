@@ -168,3 +168,31 @@ TEST(JobManager, SecondJobWaitsForFirstWhenMaxConcurrentJobsIsOne) {
         WaitForState(manager, id2, std::chrono::seconds(5), IsTerminal);
     EXPECT_EQ(secondFinal, JobState::Completed);
 }
+
+// Verification for #4.8 (Parallel Processing): the complement of the concurrency=1 test
+// above -- proves `concurrentJobs > 1` actually runs jobs in parallel rather than just
+// accepting the setting and silently still serializing them. TestJob's full run is ~1000ms
+// (10 steps x 100ms); if this were secretly serialized, only the first job would reach
+// Running within the 500ms window below and the rest would still be Queued, each waiting
+// on the one ahead of it.
+TEST(JobManager, AllJobsRunConcurrentlyWhenMaxConcurrentJobsAllowsIt) {
+    constexpr std::size_t kConcurrency = 4;
+    JobManager manager(kConcurrency);
+
+    std::vector<mediatool::jobs::JobId> ids;
+    for (std::size_t i = 0; i < kConcurrency; ++i) {
+        ids.push_back(manager.SubmitJob(std::make_unique<TestJob>()));
+    }
+
+    for (const auto& id : ids) {
+        EXPECT_EQ(WaitForState(manager, id, std::chrono::milliseconds(500),
+                               [](JobState s) { return s == JobState::Running; }),
+                  JobState::Running)
+            << "job " << id << " never reached Running promptly -- looks serialized, not parallel";
+    }
+
+    for (const auto& id : ids) {
+        EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(5), IsTerminal),
+                  JobState::Completed);
+    }
+}
