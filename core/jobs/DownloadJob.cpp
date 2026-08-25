@@ -74,7 +74,8 @@ void DownloadJob::Execute() {
         provider_.Inspect(options_.url, [this] { return IsCancellationRequested(); });
     SetMetadata(MetadataToJson(metadata));
 
-    const std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
+    std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
+    safeTitle = filesystem::TruncateBaseNameForMaxPath(options_.outputDirectory, safeTitle);
     fileSystem_.CreateDirectory(options_.outputDirectory);
     // Reserve (not just probe) the output base name: DeduplicateBaseName alone only
     // checks the disk, which is a TOCTOU race once concurrency > 1 -- two jobs racing to
