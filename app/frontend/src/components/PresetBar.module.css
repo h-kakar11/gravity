@@ -1,0 +1,54 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-surface-border);
+  margin-bottom: 4px;
+}
+
+.select,
+.nameInput {
+  background: var(--color-bg);
+  border: 1px solid var(--color-surface-border);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-control);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-family);
+}
+
+.select {
+  min-width: 140px;
+}
+
+.nameInput {
+  width: 140px;
+}
+
+.smallButton {
+  background: transparent;
+  border: 1px solid var(--color-surface-border);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.smallButton:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-surface-border-hover);
+}
+
+.smallButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.error {
+  color: var(--color-error);
+  font-size: 12px;
+}

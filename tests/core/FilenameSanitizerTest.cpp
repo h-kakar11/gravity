@@ -11,8 +11,10 @@
 namespace stdfs = std::filesystem;
 using mediatool::filesystem::DeduplicateBaseName;
 using mediatool::filesystem::DeduplicateFilename;
+using mediatool::filesystem::IsJobArtifactOf;
 using mediatool::filesystem::LocalFileSystem;
 using mediatool::filesystem::SanitizeWindowsFilename;
+using mediatool::filesystem::TruncateBaseNameForMaxPath;
 using mediatool::filesystem::WithPlaylistIndex;
 
 TEST(FilenameSanitizerTest, ReplacesIllegalWindowsCharacters) {
@@ -79,6 +81,57 @@ TEST(FilenameSanitizerTest, FallsBackToUntitledWhenNothingSurvives) {
     EXPECT_EQ(SanitizeWindowsFilename(std::string("\x01\x02\x03")), "untitled");
 }
 
+// Regression tests for #13: Windows reserved device names must be renamed, not passed
+// through -- a job that ends up trying to create a file literally named "NUL" or "COM1"
+// fails or behaves bizarrely on real Windows filesystems.
+TEST(FilenameSanitizerTest, RenamesReservedWindowsDeviceNames) {
+    EXPECT_EQ(SanitizeWindowsFilename("CON"), "CON_file");
+    EXPECT_EQ(SanitizeWindowsFilename("NUL"), "NUL_file");
+    EXPECT_EQ(SanitizeWindowsFilename("con"), "con_file");
+    EXPECT_EQ(SanitizeWindowsFilename("COM1"), "COM1_file");
+    EXPECT_EQ(SanitizeWindowsFilename("LPT9"), "LPT9_file");
+}
+
+TEST(FilenameSanitizerTest, ReservedNameCheckIgnoresExtension) {
+    // "NUL.txt" is just as reserved as bare "NUL" -- Windows matches on the stem.
+    EXPECT_EQ(SanitizeWindowsFilename("NUL.txt"), "NUL_file.txt");
+}
+
+TEST(FilenameSanitizerTest, DoesNotFlagNamesThatMerelyContainAReservedWord) {
+    EXPECT_EQ(SanitizeWindowsFilename("CONcert"), "CONcert");
+    EXPECT_EQ(SanitizeWindowsFilename("My CON Video"), "My CON Video");
+}
+
+TEST(TruncateBaseNameForMaxPathTest, LeavesShortNamesUnchanged) {
+    EXPECT_EQ(TruncateBaseNameForMaxPath("C:\\out", "My Video"), "My Video");
+}
+
+TEST(TruncateBaseNameForMaxPathTest, TruncatesNamesThatWouldExceedMaxPath) {
+    const std::string longTitle(500, 'a');
+    const std::string result = TruncateBaseNameForMaxPath("C:\\Users\\test\\Downloads", longTitle);
+    EXPECT_LT(result.size(), longTitle.size());
+    // "C:\Users\test\Downloads" + "\" + result must leave room for a dedup suffix and an
+    // extension, i.e. land comfortably under the legacy 259-character budget.
+    EXPECT_LT(std::string("C:\\Users\\test\\Downloads").size() + 1 + result.size(), 259u - 15);
+}
+
+TEST(TruncateBaseNameForMaxPathTest, DoesNotSplitMultiByteUtf8) {
+    std::string longTitle;
+    for (int i = 0; i < 300; ++i) longTitle += "\xC3\xA9";  // "é" repeated (2 bytes each)
+    const std::string result = TruncateBaseNameForMaxPath("C:\\out", longTitle);
+
+    EXPECT_EQ(result.size() % 2, 0u);
+    for (std::size_t i = 0; i < result.size(); i += 2) {
+        EXPECT_EQ(static_cast<unsigned char>(result[i]), 0xC3);
+        EXPECT_EQ(static_cast<unsigned char>(result[i + 1]), 0xA9);
+    }
+}
+
+TEST(TruncateBaseNameForMaxPathTest, LeavesNameUnchangedWhenDirectoryAloneIsAlreadyOverBudget) {
+    const std::string hugeDirectory(300, 'd');
+    EXPECT_EQ(TruncateBaseNameForMaxPath(hugeDirectory, "My Video"), "My Video");
+}
+
 namespace {
 
 class FilenameDedupTest : public ::testing::Test {
@@ -143,6 +196,33 @@ TEST_F(FilenameDedupTest, DeduplicateBaseNameNumbersSequentiallyRegardlessOfExte
 TEST_F(FilenameDedupTest, DeduplicateBaseNameIgnoresUnrelatedFilesSharingAPrefix) {
     Touch("video (backup).mp4");  // stem is "video (backup)", not "video" -- must not collide
     EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video");
+}
+
+TEST(IsJobArtifactOfTest, MatchesExactBaseName) {
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip"));
+}
+
+TEST(IsJobArtifactOfTest, MatchesOwnOutputAndIntermediateArtifacts) {
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.mp4"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.mp4.part"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.mp4.ytdl"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.f137.mp4"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.temp.mp4"));
+    EXPECT_TRUE(IsJobArtifactOf("Clip", "Clip.info.json"));
+}
+
+TEST(IsJobArtifactOfTest, RejectsUnrelatedFilesSharingOnlyATextPrefix) {
+    // The exact reproduction scenario from the audit: a pre-existing file/directory
+    // whose name merely starts with the job's title text must never match.
+    EXPECT_FALSE(IsJobArtifactOf("Vacation", "Vacation Photos.zip"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Clip Backup"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Clip Notes.txt"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "ClipX.mp4"));
+}
+
+TEST(IsJobArtifactOfTest, RejectsShorterOrUnrelatedNames) {
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Cli"));
+    EXPECT_FALSE(IsJobArtifactOf("Clip", "Other.mp4"));
 }
 
 TEST(WithPlaylistIndexTest, ZeroPadsToTotalCountDigitWidth) {
