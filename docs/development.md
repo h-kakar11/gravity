@@ -102,15 +102,25 @@ gitignored (never committed; see `docs/licensing.md` for what's vendored and fro
 
 ```powershell
 cmake --build --preset windows-mingw-release
+cargo build --release --manifest-path app\desktop\src-tauri\Cargo.toml
 .\scripts\prepare_bundle_resources.ps1
 cd app\desktop
 npm run tauri build -- --config ..\..\app\desktop\src-tauri\tauri.release.conf.json
 ```
 
-`prepare_bundle_resources.ps1` copies the freshly-built `mediatool-core.exe` and calls
-`scripts/vendor_ffmpeg.ps1` (LGPL FFmpeg, see `docs/licensing.md`) and
-`scripts/vendor_python_runtime.ps1` (a redistributable Python + `pip install`ed yt-dlp) --
-each also runs standalone if only one needs refreshing.
+`prepare_bundle_resources.ps1` copies the freshly-built `mediatool-core.exe` and
+`WebView2Loader.dll`, and calls `scripts/vendor_ffmpeg.ps1` (LGPL FFmpeg, see
+`docs/licensing.md`) and `scripts/vendor_python_runtime.ps1` (a redistributable Python +
+`pip install`ed yt-dlp) -- each also runs standalone if only one needs refreshing.
+
+**The preliminary `cargo build --release`**: Tauri's own bundler auto-includes
+`WebView2Loader.dll` for the MSVC target, but not for the GNU/MinGW target this project
+uses -- without it, the packaged app fails at launch with "WebView2Loader.dll was not
+found." `prepare_bundle_resources.ps1` bundles it explicitly (same as `mediatool-core.exe`),
+but that requires it to already exist in `target\release\`, which only happens once the
+Tauri/Rust side has been compiled at least once -- hence this step before
+`prepare_bundle_resources.ps1`. The subsequent `npm run tauri build` reuses cargo's cache
+rather than rebuilding from scratch.
 
 **Why `--config tauri.release.conf.json` instead of putting `bundle.resources` straight
 into `tauri.conf.json`:** Tauri's build script validates every configured resource path
