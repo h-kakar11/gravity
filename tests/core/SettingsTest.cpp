@@ -2,8 +2,15 @@
 
 #include <gtest/gtest.h>
 
+#include <functional>
+#include <vector>
+
+#include "core/errors/MediaToolException.h"
+
 namespace mediatool::settings {
 namespace {
+
+using mediatool::errors::MediaToolException;
 
 Settings MakeDistinctSettings() {
     Settings settings;
@@ -11,6 +18,9 @@ Settings MakeDistinctSettings() {
     settings.general.defaultOutputDirectory = "C:\\Users\\test\\Videos";
     settings.general.launchOnStartup = true;
     settings.general.showNotifications = false;
+    settings.general.minimizeToTrayOnClose = false;
+    settings.general.hotkeyPasteAndDownload = "Alt+Shift+P";
+    settings.general.hotkeyFocusQueue = "";
 
     settings.downloads.defaultQuality = "1080p";
     settings.downloads.downloadDirectory = "D:\\Downloads\\MediaTool";
@@ -52,6 +62,9 @@ TEST(SettingsTest, RoundTripPreservesEveryGeneralField) {
     EXPECT_EQ(roundTripped.general.defaultOutputDirectory, original.general.defaultOutputDirectory);
     EXPECT_EQ(roundTripped.general.launchOnStartup, original.general.launchOnStartup);
     EXPECT_EQ(roundTripped.general.showNotifications, original.general.showNotifications);
+    EXPECT_EQ(roundTripped.general.minimizeToTrayOnClose, original.general.minimizeToTrayOnClose);
+    EXPECT_EQ(roundTripped.general.hotkeyPasteAndDownload, original.general.hotkeyPasteAndDownload);
+    EXPECT_EQ(roundTripped.general.hotkeyFocusQueue, original.general.hotkeyFocusQueue);
 }
 
 TEST(SettingsTest, RoundTripPreservesEveryDownloadField) {
@@ -107,6 +120,9 @@ TEST(SettingsTest, DefaultsHaveExpectedSentinelValues) {
 
     EXPECT_FALSE(defaults.general.launchOnStartup);
     EXPECT_TRUE(defaults.general.showNotifications);
+    EXPECT_TRUE(defaults.general.minimizeToTrayOnClose);
+    EXPECT_EQ(defaults.general.hotkeyPasteAndDownload, "CommandOrControl+Shift+D");
+    EXPECT_EQ(defaults.general.hotkeyFocusQueue, "CommandOrControl+Shift+Q");
     EXPECT_EQ(defaults.downloads.defaultQuality, "best");
     EXPECT_EQ(defaults.downloads.filenameTemplate, "%(title)s.%(ext)s");
     EXPECT_EQ(defaults.downloads.concurrentDownloads, 1);
@@ -128,6 +144,58 @@ TEST(SettingsTest, DefaultsRoundTripThroughJson) {
     const Settings roundTripped = Settings::FromJson(defaults.ToJson());
 
     EXPECT_EQ(roundTripped.ToJson(), defaults.ToJson());
+}
+
+TEST(SettingsTest, DefaultsPassValidation) {
+    EXPECT_NO_THROW(Settings::Defaults().Validate());
+}
+
+// Regression test for #5: an updateSettings call (or a hand-edited/stale settings file)
+// containing an out-of-range or unrecognized value must be rejected rather than silently
+// accepted -- the exact "concurrentJobs: 100000" case the audit's fuzz pass found
+// accepted with no validation at all.
+TEST(SettingsTest, FromJsonRejectsOutOfRangeAndUnrecognizedValues) {
+    struct Case {
+        const char* name;
+        std::function<void(Settings&)> corrupt;
+    };
+    const std::vector<Case> cases = {
+        {"concurrentJobsTooHigh", [](Settings& s) { s.processing.concurrentJobs = 100000; }},
+        {"concurrentJobsZero", [](Settings& s) { s.processing.concurrentJobs = 0; }},
+        {"concurrentJobsNegative", [](Settings& s) { s.processing.concurrentJobs = -1; }},
+        {"concurrentDownloadsTooHigh", [](Settings& s) { s.downloads.concurrentDownloads = 50; }},
+        {"speedUnitsBogus", [](Settings& s) { s.downloads.speedUnits = "lightyears"; }},
+        {"compressionQualityBogus",
+         [](Settings& s) { s.processing.defaultCompressionQuality = "ultra"; }},
+        {"logLevelBogus", [](Settings& s) { s.advanced.logLevel = "VERBOSE"; }},
+        {"ffmpegPathRelative", [](Settings& s) { s.advanced.ffmpegPath = "..\\..\\ffmpeg.exe"; }},
+        {"downloadDirectoryRelative", [](Settings& s) { s.downloads.downloadDirectory = "Downloads"; }},
+        {"hotkeyMissingKey", [](Settings& s) { s.general.hotkeyPasteAndDownload = "CommandOrControl+Shift+"; }},
+        {"hotkeyBogusModifier", [](Settings& s) { s.general.hotkeyFocusQueue = "Banana+Q"; }},
+    };
+
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        Settings settings = Settings::Defaults();
+        c.corrupt(settings);
+        EXPECT_THROW(Settings::FromJson(settings.ToJson()), MediaToolException) << c.name;
+        EXPECT_THROW(settings.Validate(), MediaToolException) << c.name;
+    }
+}
+
+TEST(SettingsTest, ValidateAcceptsWindowsAbsolutePathsAndUncPaths) {
+    Settings settings = Settings::Defaults();
+    settings.advanced.ffmpegPath = "C:\\tools\\ffmpeg.exe";
+    settings.downloads.downloadDirectory = "\\\\server\\share\\Downloads";
+    EXPECT_NO_THROW(settings.Validate());
+}
+
+TEST(SettingsTest, ValidateAcceptsEmptyOptionalPathFields) {
+    Settings settings = Settings::Defaults();
+    settings.advanced.ffmpegPath = "";
+    settings.advanced.ytDlpPath = "";
+    settings.advanced.temporaryDirectory = "";
+    EXPECT_NO_THROW(settings.Validate());
 }
 
 }  // namespace

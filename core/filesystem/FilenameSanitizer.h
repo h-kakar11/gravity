@@ -11,10 +11,24 @@
 namespace mediatool::filesystem {
 
 // Strips/replaces the Windows-illegal characters (< > : " / \ | ? * and ASCII control
-// characters), trims trailing dots/spaces (Windows rejects names ending in either), and
-// caps length to ~200 characters. Never touches non-ASCII bytes, so Unicode/emoji in
-// `rawTitle` pass through untouched. Returns "untitled" if nothing legal survives.
+// characters), trims trailing dots/spaces (Windows rejects names ending in either), caps
+// length to ~200 characters, and appends a suffix if the result is one of Windows'
+// reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9 -- matched case-insensitively
+// against the name with any extension stripped, since those are reserved regardless of
+// extension, e.g. "NUL.txt" is just as invalid as "NUL"). Never touches non-ASCII bytes,
+// so Unicode/emoji in `rawTitle` pass through untouched. Returns "untitled" if nothing
+// legal survives.
 std::string SanitizeWindowsFilename(const std::string& rawTitle);
+
+// Legacy MAX_PATH (260 including the terminating null, so 259 usable characters) that
+// this codebase targets -- see docs/development.md for why full \\?\ long-path opt-in is
+// out of scope for now. Truncates `baseName` (preserving its full UTF-8 codepoints, never
+// splitting one) so that `directory + "\" + baseName` leaves headroom for a numbered
+// dedup suffix like " (9999)" and a reasonably long extension, without needing to know
+// either at truncation time. Returns `baseName` unchanged if it already fits, or if
+// `directory` alone is already at/over budget (nothing achievable by trimming the name in
+// that case -- Windows will surface its own path-length error at write time).
+std::string TruncateBaseNameForMaxPath(const std::string& directory, const std::string& baseName);
 
 // Returns `desiredPath` unchanged if it doesn't already exist; otherwise finds the
 // first free "<name> (N).<ext>" variant by probing fs.Exists() with increasing N.
@@ -32,5 +46,16 @@ std::string DeduplicateBaseName(const std::string& directory, const std::string&
 // Prefixes `filename` with `index` zero-padded to totalCount's digit width, e.g.
 // index 3 of 42 -> "03 - <filename>".
 std::string WithPlaylistIndex(const std::string& filename, int index, int totalCount);
+
+// Used by cleanup-after-failure logic to decide whether `candidateName` (a bare
+// filename, no directory component) was created by the job that owns `filenameBase`,
+// as opposed to an unrelated pre-existing file that merely starts with the same text
+// (e.g. filenameBase "Vacation" must never match a pre-existing "Vacation Photos.zip").
+// True only for an exact match, or a match immediately followed by '.' (covering the
+// job's own final output, yt-dlp intermediate artifacts like ".mp4.part"/".f137.mp4",
+// and sidecar files like ".info.json") -- never a bare prefix match. DeduplicateBaseName
+// already guarantees no file predated the job with this exact base, so anything that
+// passes this check was created by this run.
+bool IsJobArtifactOf(const std::string& filenameBase, const std::string& candidateName);
 
 }  // namespace mediatool::filesystem
