@@ -155,9 +155,6 @@ jobs:
           cmake --preset windows-mingw-release
           cmake --build --preset windows-mingw-release
 
-      - name: Vendor FFmpeg + Python runtime, stage resources
-        run: .\scripts\prepare_bundle_resources.ps1
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -174,6 +171,16 @@ jobs:
         run: |
           npm ci --prefix app/frontend
           npm ci --prefix app/desktop
+
+      - name: Build Tauri/Rust side once (produces WebView2Loader.dll)
+        # Tauri's bundler auto-includes WebView2Loader.dll for the MSVC target, but not for
+        # the GNU/MinGW target this project uses -- prepare_bundle_resources.ps1 bundles it
+        # explicitly instead, which requires it to already exist in target/release/. See
+        # docs/development.md "Packaging".
+        run: cargo build --release --manifest-path app\desktop\src-tauri\Cargo.toml
+
+      - name: Vendor FFmpeg + Python runtime, stage resources
+        run: .\scripts\prepare_bundle_resources.ps1
 
       - name: tauri build (NSIS, with bundled resources)
         run: npm run tauri build -- --config ..\..\app\desktop\src-tauri\tauri.release.conf.json

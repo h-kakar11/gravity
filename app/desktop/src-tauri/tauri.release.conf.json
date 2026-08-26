@@ -3,6 +3,7 @@
   "bundle": {
     "resources": {
       "resources/mediatool-core.exe": "mediatool-core.exe",
+      "resources/WebView2Loader.dll": "WebView2Loader.dll",
       "resources/ffmpeg/": "ffmpeg/",
       "resources/python/": "python/"
     }
