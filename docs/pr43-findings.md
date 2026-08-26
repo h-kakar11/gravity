@@ -18,6 +18,11 @@ architectural ideas its queue implementation has that `master`'s doesn't.
 
 ## Live bugs confirmed to also affect `master` (verified directly, not just carried over from PR #43's claims)
 
+**Both fixed** — see the commit on `fix/live-bugs-utf8-and-cancel-hang` fixing them, with
+regression tests in `JobHistoryStoreTest`, `JsonFileSettingsStoreTest`, `PresetStoreTest`,
+and `ProcessRunnerTest`. Left the analysis below as-is since it's the record of how each
+was found.
+
 ### 1. IPC stdout serialization crashes on invalid UTF-8 (HIGH)
 
 `app/core/main.cpp`'s `WriteLine()` is the single chokepoint every IPC response and

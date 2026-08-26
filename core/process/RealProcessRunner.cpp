@@ -140,7 +140,18 @@ public:
 
                 auto [events, pollEc] =
                     process_.poll(reproc::event::out | reproc::event::err, reproc::milliseconds(200));
-                if (pollEc == std::errc::timed_out) {
+                // reproc represents "our 200ms poll window elapsed with nothing ready" as
+                // a SUCCESS code (empty pollEc) with events == 0, not as a distinct timeout
+                // error -- reproc_poll() (reproc/src/reproc.c) only ever sets a DEADLINE
+                // event when some other, earlier deadline cut the wait short, which isn't
+                // the case here. A prior version of this check compared pollEc to
+                // std::errc::timed_out, which reproc never actually returns for this path:
+                // that made the check dead code, so execution fell through to the read()
+                // below with events == 0, which resolves to reproc::stream::err and BLOCKS
+                // on it -- meaning Kill()/Terminate() (which only set pendingAction_, read
+                // back at the top of this loop) would not actually run until the child
+                // produced output or exited on its own. See docs/pr43-findings.md.
+                if (!pollEc && events == 0) {
                     continue;  // no output ready -- loop back around to re-check pendingAction_
                 }
                 if (pollEc == reproc::error::broken_pipe) {

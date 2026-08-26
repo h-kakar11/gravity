@@ -80,5 +80,21 @@ TEST_F(JobHistoryStoreTest, AppendCreatesParentDirectoriesIfMissing) {
     EXPECT_TRUE(fs::exists(nestedPath));
 }
 
+// Regression test: a job title can carry text this process doesn't control the byte-level
+// encoding of (an unusually-encoded video title, ffmpeg/yt-dlp error text). Default
+// nlohmann::json::dump() throws on invalid UTF-8 -- see docs/pr43-findings.md. This must
+// not throw, and the entry must still be persisted (with the offending byte substituted).
+TEST_F(JobHistoryStoreTest, AppendSurvivesInvalidUtf8InTextFields) {
+    JobHistoryStore store(historyPath_);
+    nlohmann::json snapshot = MakeSnapshot("job-1");
+    snapshot["title"] = "bad-title-\xC3\x28-end";  // 0xC3 with no valid continuation byte
+
+    EXPECT_NO_THROW(store.Append(snapshot));
+
+    const auto entries = store.Load();
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].at("id"), "job-1");
+}
+
 }  // namespace
 }  // namespace mediatool::jobs

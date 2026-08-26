@@ -113,7 +113,10 @@ void PresetStore::Save(const std::vector<Preset>& presets) {
                 "E_PRESETS_WRITE_FAILED", errors::ErrorCategory::PermissionError,
                 "Could not write the presets file.", "Failed to open '" + tempPath.string() + "' for writing."));
         }
-        output << array.dump(2);
+        // error_handler_t::replace: preset names/options are user-supplied text this
+        // process doesn't control the encoding of -- default strict dump() would throw
+        // on invalid UTF-8, aborting the whole write rather than substituting the byte.
+        output << array.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
     }
 
     std::error_code renameError;

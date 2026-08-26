@@ -115,3 +115,33 @@ TEST(RealProcessRunnerTest, KillTerminatesGrandchildProcessesToo) {
     EXPECT_EQ(tasklistOutput.find("ping.exe"), std::string::npos)
         << "ping.exe (a grandchild of the killed process) is still running:\n" << tasklistOutput;
 }
+
+// Regression test: the drain loop's "no output ready" check previously compared reproc's
+// poll() error code to std::errc::timed_out, which reproc never actually returns for a
+// plain poll-window timeout (it signals that as success with events==0) -- see
+// docs/pr43-findings.md. That made the check dead code and left the loop blocked in a
+// read() call whenever the child stayed silent, so Kill() (which only sets a flag the loop
+// rechecks at its top) didn't actually run until the child eventually produced output or
+// exited on its own. 192.0.2.1 is TEST-NET-1 (RFC 5737), guaranteed non-routable, so this
+// ping produces zero stdout/stderr for its whole ~8s timeout -- silent well past the
+// drain loop's 200ms poll window, exercising exactly the path that used to hang.
+TEST(RealProcessRunnerTest, KillTakesEffectPromptlyOnASilentChild) {
+    RealProcessRunner runner;
+    auto process = runner.Start("ping", {"-n", "1", "-w", "8000", "192.0.2.1"}, ProcessOptions{},
+                                 [](const std::string&) {}, [](const std::string&) {});
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(process->IsRunning());
+
+    const auto killedAt = std::chrono::steady_clock::now();
+    process->Kill();
+    auto result = process->WaitFor(5000);
+    const auto elapsed = std::chrono::steady_clock::now() - killedAt;
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->wasTerminated);
+    // Before the fix this could take up to the child's own ~8s silent timeout to notice
+    // Kill() at all; bound tightly so a regression shows up as a clear failure, not a
+    // borderline pass.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(2000));
+}
