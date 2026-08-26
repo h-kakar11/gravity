@@ -71,6 +71,23 @@ TEST_F(PresetStoreTest, SaveOverwritesThePreviousList) {
     EXPECT_EQ(loaded[0].id, "2");
 }
 
+// Regression test: preset names are user-supplied text this process doesn't control the
+// byte-level encoding of. Default nlohmann::json::dump() throws on invalid UTF-8 -- see
+// docs/pr43-findings.md. Save() must not throw, and the preset must still round-trip.
+TEST_F(PresetStoreTest, SaveSurvivesInvalidUtf8InPresetName) {
+    PresetStore store(presetsPath_);
+    Preset preset;
+    preset.id = "preset-1";
+    preset.name = "bad-\xC3\x28-name";  // invalid UTF-8
+    preset.kind = "CONVERSION";
+
+    EXPECT_NO_THROW(store.Save({preset}));
+
+    const auto loaded = store.Load();
+    ASSERT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(loaded[0].id, "preset-1");
+}
+
 TEST_F(PresetStoreTest, LoadOnCorruptFileReturnsEmptyWithoutThrowing) {
     {
         std::ofstream corrupt(presetsPath_, std::ios::binary | std::ios::trunc);

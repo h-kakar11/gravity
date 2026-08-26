@@ -130,7 +130,10 @@ void JsonFileSettingsStore::Save(const Settings& settings) {
                 "Could not write the settings file.",
                 "Failed to open '" + tempPath.string() + "' for writing."));
         }
-        output << settings.ToJson().dump(2);
+        // error_handler_t::replace: settings paths are user-supplied and this process
+        // doesn't control their encoding -- default strict dump() would throw on invalid
+        // UTF-8, uncaught up to the settings-load/save boundary.
+        output << settings.ToJson().dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         output.flush();
         if (!output) {
             throw errors::MediaToolException(errors::ErrorInfo::Make(

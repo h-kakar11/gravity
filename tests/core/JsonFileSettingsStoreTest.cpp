@@ -151,6 +151,21 @@ TEST_F(JsonFileSettingsStoreTest, LoadOnOutOfRangeValueFallsBackToDefaults) {
     EXPECT_EQ(loaded.ToJson(), Settings::Defaults().ToJson());
 }
 
+// Regression test: settings paths are user-supplied text this process doesn't control
+// the byte-level encoding of. Default nlohmann::json::dump() throws on invalid UTF-8 --
+// see docs/pr43-findings.md. Save() must not throw, and must still produce valid,
+// parseable JSON on disk (with the offending byte substituted).
+TEST_F(JsonFileSettingsStoreTest, SaveSurvivesInvalidUtf8InPathFields) {
+    JsonFileSettingsStore store(settingsPath_);
+    Settings settings = Settings::Defaults();
+    settings.advanced.ffmpegPath = "E:\\tools\\bad-\xC3\x28-ffmpeg.exe";  // invalid UTF-8
+
+    EXPECT_NO_THROW(store.Save(settings));
+
+    const std::string raw = ReadFileRaw();
+    EXPECT_NO_THROW(nlohmann::json::parse(raw));
+}
+
 // Regression test for the MediaTool -> Gravity rename: an existing user's settings must
 // survive the upgrade rather than silently resetting to defaults just because the
 // settings file now lives under a different product-name directory.

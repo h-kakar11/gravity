@@ -88,7 +88,12 @@ void JobHistoryStore::Append(nlohmann::json snapshotJson) {
                 logging::Log::Warning("JobHistory", "Could not open '" + tempPath.string() + "' for writing.");
                 return;
             }
-            output << nlohmann::json(entries).dump(2);
+            // error_handler_t::replace: entries carry externally-influenced text (job
+            // titles, paths) this process doesn't control the encoding of -- default
+            // strict dump() would throw on invalid UTF-8, aborting this whole write (and,
+            // uncaught further up the stack, crashing the process) rather than persisting
+            // history with the offending byte substituted.
+            output << nlohmann::json(entries).dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         }
 
         std::error_code renameError;

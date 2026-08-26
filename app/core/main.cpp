@@ -68,7 +68,12 @@ std::mutex g_stdoutMutex;
 
 void WriteLine(const json& payload) {
     std::lock_guard<std::mutex> lock(g_stdoutMutex);
-    std::cout << payload.dump() << std::endl;
+    // error_handler_t::replace: payload carries externally-influenced text this process
+    // doesn't control the encoding of (video titles, ffmpeg/yt-dlp error text, paths) --
+    // nlohmann::json::dump()'s default strict handling throws on invalid UTF-8, which
+    // would crash the whole core process on a single malformed byte. Substituting the
+    // byte instead is the only difference from dump()'s default output for valid input.
+    std::cout << payload.dump(-1, ' ', false, json::error_handler_t::replace) << std::endl;
 }
 
 // --- path resolution ---------------------------------------------------------------------
