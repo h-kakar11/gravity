@@ -65,6 +65,15 @@
   background: var(--color-surface);
 }
 
+.coreUnavailableBanner {
+  padding: 10px 24px;
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  border-bottom: 1px solid var(--color-warning);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
 .content {
   flex: 1;
   overflow-y: auto;

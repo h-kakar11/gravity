@@ -97,6 +97,32 @@ export function subscribeToJobEvents(callback: (event: CoreEvent) => void): () =
   };
 }
 
+// Subscribes to the "core-unavailable" Tauri event, emitted once by core_bridge.rs's
+// stdout reader thread the moment mediatool-core's stdout closes (process died or was
+// killed -- see issue #23). Any request in flight at that moment already rejects on its
+// own with an E_CORE_UNAVAILABLE ErrorInfo (toErrorInfo handles it like any other error);
+// this is purely for a proactive "backend unavailable" UI state, so the app doesn't wait
+// for the user to notice the next failed action. Returns an unsubscribe function.
+export function subscribeToCoreUnavailable(callback: () => void): () => void {
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+
+  listen("core-unavailable", () => {
+    callback();
+  }).then((fn) => {
+    if (cancelled) {
+      fn();
+    } else {
+      unlisten = fn;
+    }
+  });
+
+  return () => {
+    cancelled = true;
+    if (unlisten) unlisten();
+  };
+}
+
 // Thin, typed conveniences over sendCommand -- kept in this module so nothing else needs to
 // know the command name strings from docs/ipc-contract.md.
 export const createJob = (params: CommandParams["createJob"]) => sendCommand("createJob", params);

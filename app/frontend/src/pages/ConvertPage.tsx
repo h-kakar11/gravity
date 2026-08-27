@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import GlassCard from "../components/GlassCard";
 import PresetBar from "../components/PresetBar";
 import { ProLockedControl } from "../components/ProLockedBadge";
@@ -30,13 +30,6 @@ const FORMAT_OPTIONS_BY_CATEGORY: Record<FileCategory, string[]> = {
   UNKNOWN: ["mp4", "mp3", "png"],
 };
 
-function extractDroppedPath(files: FileList): string | undefined {
-  const first = files[0];
-  // Tauri's webview exposes a real filesystem path via `.path` on a dropped File -- same
-  // extraction HomePage.tsx already relies on for its own drop targets.
-  return (first as File & { path?: string }).path;
-}
-
 function ErrorBanner({ error }: { error: ErrorInfo | null }) {
   if (!error) return null;
   return (
@@ -55,7 +48,6 @@ export default function ConvertPage() {
   const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState<ErrorInfo | null>(null);
-  const [dropActive, setDropActive] = useState(false);
 
   const [outputFormat, setOutputFormat] = useState("");
   const [quality, setQuality] = useState<MediaQuality>("medium");
@@ -110,13 +102,6 @@ export default function ConvertPage() {
       active = false;
     };
   }, [inputPath]);
-
-  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setDropActive(false);
-    const path = extractDroppedPath(event.dataTransfer.files);
-    if (path) setInputPath(path);
-  }, []);
 
   const formatOptions = fileInfo ? FORMAT_OPTIONS_BY_CATEGORY[fileInfo.category] : [];
   const isVideo = fileInfo?.category === "VIDEO";
@@ -206,18 +191,13 @@ export default function ConvertPage() {
 
       {!inputPath ? (
         <GlassCard
-          className={`${styles.dropzone} ${dropActive ? styles.dropzoneActive : ""}`}
+          className={styles.dropzone}
           ariaLabel="Drop a file to convert or compress"
+          onFilesDropped={(paths) => {
+            if (paths[0]) setInputPath(paths[0]);
+          }}
         >
-          <div
-            className={styles.dropzoneInner}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDropActive(true);
-            }}
-            onDragLeave={() => setDropActive(false)}
-            onDrop={handleDrop}
-          >
+          <div className={styles.dropzoneInner}>
             <div className={styles.dropIcon}>&#8646;</div>
             <p>Drop a file here to get started.</p>
             <ProLockedControl label="Select multiple files for batch conversion">

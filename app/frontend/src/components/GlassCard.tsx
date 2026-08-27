@@ -1,37 +1,27 @@
-import { type DragEvent, type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
+import { useTauriDragDrop } from "../hooks/useTauriDragDrop";
 import styles from "./GlassCard.module.css";
 
 interface GlassCardProps {
   children: ReactNode;
   onClick?: () => void;
-  onFilesDropped?: (files: FileList) => void;
+  onFilesDropped?: (paths: string[]) => void;
   className?: string;
   ariaLabel?: string;
 }
 
 // The reusable "Glassmorphism Lite" card. Doubles as a drag-and-drop target when
 // `onFilesDropped` is supplied -- drag-and-drop is a hard requirement throughout the app,
-// and the home screen's two boxes are the primary place it needs to work first.
+// and the home screen's two boxes are the primary place it needs to work first. Uses
+// `useTauriDragDrop` rather than HTML5 drag events: Tauri v2 intercepts OS-level
+// drag-and-drop by default, so plain `onDrop`/`dataTransfer.files` never receives real
+// file paths here (see issue #57).
 export default function GlassCard({ children, onClick, onFilesDropped, className, ariaLabel }: GlassCardProps) {
-  const [dragActive, setDragActive] = useState(false);
+  const { ref, isDragOver } = useTauriDragDrop<HTMLDivElement>((paths) => {
+    onFilesDropped?.(paths);
+  });
   const interactive = Boolean(onClick || onFilesDropped);
-
-  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
-    if (!onFilesDropped) return;
-    event.preventDefault();
-    setDragActive(true);
-  };
-
-  const handleDragLeave = () => setDragActive(false);
-
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
-    if (!onFilesDropped) return;
-    event.preventDefault();
-    setDragActive(false);
-    if (event.dataTransfer.files.length > 0) {
-      onFilesDropped(event.dataTransfer.files);
-    }
-  };
+  const dragActive = Boolean(onFilesDropped) && isDragOver;
 
   const classes = [styles.card, interactive ? styles.interactive : "", dragActive ? styles.dragActive : "", className]
     .filter(Boolean)
@@ -39,11 +29,9 @@ export default function GlassCard({ children, onClick, onFilesDropped, className
 
   return (
     <div
+      ref={onFilesDropped ? ref : undefined}
       className={classes}
       onClick={onClick}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       aria-label={ariaLabel}

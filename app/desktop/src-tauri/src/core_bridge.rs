@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +37,29 @@ pub struct CoreState {
     child: Mutex<Child>,
     pending: PendingMap,
     next_id: AtomicU64,
+    /// Flipped to false exactly once, by the stdout reader thread, the moment
+    /// mediatool-core's stdout closes (process exited, crashed, or was killed) -- see
+    /// issue #23. Checked by `send_request` so a request made after that point fails
+    /// immediately with a clear error instead of hitting a raw OS pipe-write error or
+    /// silently sitting until the 30s timeout in `send_core_command`.
+    alive: Arc<AtomicBool>,
+}
+
+/// Builds the same `{"ok":false,"error":{...}}` envelope shape `send_core_command`
+/// (lib.rs) already expects from a real core response, so a synthetic failure requires no
+/// special-casing on either the Rust or the frontend side of `send_request`'s callers --
+/// `coreClient.ts`'s `toErrorInfo` already knows how to turn this into an `ErrorInfo`.
+fn core_unavailable_error(command: &str) -> Value {
+    serde_json::json!({
+        "ok": false,
+        "error": {
+            "code": "E_CORE_UNAVAILABLE",
+            "category": "ENGINE_FAILURE",
+            "message": "Gravity's background engine isn't responding right now.",
+            "details": format!("mediatool-core is not running; '{command}' could not be sent"),
+            "recoverable": true
+        }
+    })
 }
 
 impl CoreState {
@@ -48,6 +71,19 @@ impl CoreState {
 
         let mut command = Command::new(&path);
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        // mediatool-core.exe is a console-subsystem binary; plain std::process::Command
+        // shows its console window on Windows unless told not to (unlike reproc, which
+        // RealProcessRunner.cpp uses for ffmpeg/yt-dlp/where and which already hides its
+        // children's windows internally via STARTF_USESHOWWINDOW/SW_HIDE -- this is the
+        // one spawn site in the app that needs the flag explicitly). CREATE_NO_WINDOW =
+        // 0x08000000. See issue #37.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
 
         // Only set for a packaged build where these bundled resources actually exist
         // (Phase 5.2) -- in dev mode none of these paths exist, so main.cpp's existing
@@ -73,8 +109,9 @@ impl CoreState {
         let stderr = child.stderr.take().expect("child stderr was requested as piped");
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
 
-        spawn_stdout_reader(stdout, pending.clone(), app_handle);
+        spawn_stdout_reader(stdout, pending.clone(), alive.clone(), app_handle);
         spawn_stderr_logger(stderr);
 
         Ok(CoreState {
@@ -82,6 +119,7 @@ impl CoreState {
             child: Mutex::new(child),
             pending,
             next_id: AtomicU64::new(1),
+            alive,
         })
     }
 
@@ -94,6 +132,12 @@ impl CoreState {
         params: Value,
     ) -> Result<(String, oneshot::Receiver<Value>), String> {
         let id = format!("req-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+
+        if !self.alive.load(Ordering::SeqCst) {
+            let (tx, rx) = oneshot::channel::<Value>();
+            let _ = tx.send(core_unavailable_error(command));
+            return Ok((id, rx));
+        }
 
         let (tx, rx) = oneshot::channel::<Value>();
         self.pending.lock().unwrap().insert(id.clone(), tx);
@@ -134,6 +178,7 @@ impl CoreState {
 fn spawn_stdout_reader(
     stdout: std::process::ChildStdout,
     pending: PendingMap,
+    alive: Arc<AtomicBool>,
     app_handle: AppHandle,
 ) {
     std::thread::spawn(move || {
@@ -175,6 +220,24 @@ fn spawn_stdout_reader(
             }
         }
         log::info!("mediatool-core stdout closed; reader thread exiting");
+
+        // Stdout only closes when the process has exited (crash, kill, or a clean exit we
+        // never intentionally trigger outside of CoreState::shutdown) -- this is the
+        // earliest and most reliable liveness signal available, so it doubles as the
+        // "core died" detector for #23. Every request still waiting on a response gets
+        // failed immediately instead of sitting until send_core_command's 30s timeout, and
+        // the frontend gets a one-shot event so it can show a real "backend unavailable"
+        // state rather than a raw IPC error surfacing wherever the next command happened
+        // to be in flight.
+        alive.store(false, Ordering::SeqCst);
+        let mut pending = pending.lock().unwrap();
+        for (_, tx) in pending.drain() {
+            let _ = tx.send(core_unavailable_error("(pending request)"));
+        }
+        drop(pending);
+        if let Err(e) = app_handle.emit("core-unavailable", ()) {
+            log::warn!("failed to emit core-unavailable to frontend: {e}");
+        }
     });
 }
 
