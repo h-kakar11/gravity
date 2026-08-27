@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -115,6 +116,8 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
     std::mutex stateMutex;
     bool completedReceived = false;
     std::optional<errors::MediaToolException> pendingError;
+    std::deque<std::string> stderrRing;
+    static constexpr std::size_t kMaxStderrLines = 20;
 
     auto handleLine = [&](const std::string& line) {
         const auto parsed = downloads::ParseNdjsonLine(line);
@@ -138,13 +141,20 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
         if (onEvent) onEvent(type, data);
     };
 
-    auto ignoreStderr = [](const std::string& /*line*/) {
-        // downloader.py's own debug/log chatter; not part of the NDJSON protocol.
+    auto captureStderr = [&](const std::string& line) {
+        // downloader.py's own debug/log chatter; not part of the NDJSON protocol. Kept
+        // only as a bounded tail for diagnostics if the process exits without ever
+        // emitting a structured error event -- see RunOutcome::stderrTail.
+        std::lock_guard<std::mutex> lock(stateMutex);
+        stderrRing.push_back(line);
+        if (stderrRing.size() > kMaxStderrLines) {
+            stderrRing.pop_front();
+        }
     };
 
     process::ProcessOptions processOptions;
     std::unique_ptr<process::IProcess> child = processRunner_.Start(
-        pythonExecutable_, {scriptPath_, "--command-stdin"}, processOptions, handleLine, ignoreStderr);
+        pythonExecutable_, {scriptPath_, "--command-stdin"}, processOptions, handleLine, captureStderr);
 
     child->WriteLine(command.dump());
     child->CloseStdin();
@@ -176,6 +186,9 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
         std::lock_guard<std::mutex> lock(stateMutex);
         outcome.error = pendingError;
         outcome.completedReceived = completedReceived;
+        for (const std::string& line : stderrRing) {
+            outcome.stderrTail += line + "\n";
+        }
     }
     return outcome;
 }
@@ -207,7 +220,8 @@ downloads::DownloadMetadata YtDlpProvider::Inspect(const std::string& url,
             "E_INSPECT_NO_RESULT", errors::ErrorCategory::EngineFailure,
             "Downloader process exited without reporting metadata.",
             "downloader.py exited with code " + std::to_string(outcome.processResult.exitCode) +
-                " without emitting a metadata event.",
+                " without emitting a metadata event." +
+                (outcome.stderrTail.empty() ? "" : "\nstderr:\n" + outcome.stderrTail),
             /*recoverable=*/false));
     }
 
@@ -272,7 +286,8 @@ void YtDlpProvider::Download(const downloads::DownloadOptions& options,
             "E_DOWNLOAD_NO_RESULT", errors::ErrorCategory::EngineFailure,
             "Downloader process exited without reporting completion.",
             "downloader.py exited with code " + std::to_string(outcome.processResult.exitCode) +
-                " without emitting a completed or error event.",
+                " without emitting a completed or error event." +
+                (outcome.stderrTail.empty() ? "" : "\nstderr:\n" + outcome.stderrTail),
             /*recoverable=*/false));
     }
 }

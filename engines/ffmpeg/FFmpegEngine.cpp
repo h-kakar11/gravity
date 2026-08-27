@@ -86,11 +86,17 @@ FFmpegEngine::FFmpegEngine(process::IProcessRunner& runner,
       overrideFfprobePath_(std::move(overrideFfprobePath)) {}
 
 std::optional<std::string> FFmpegEngine::ResolveFfmpegPath() const {
-    return DiscoverFfmpegPath(runner_, overrideFfmpegPath_);
+    if (!ffmpegPathCache_.has_value()) {
+        ffmpegPathCache_ = DiscoverFfmpegPath(runner_, overrideFfmpegPath_);
+    }
+    return *ffmpegPathCache_;
 }
 
 std::optional<std::string> FFmpegEngine::ResolveFfprobePath() const {
-    return DiscoverFfprobePath(runner_, overrideFfprobePath_);
+    if (!ffprobePathCache_.has_value()) {
+        ffprobePathCache_ = DiscoverFfprobePath(runner_, overrideFfprobePath_);
+    }
+    return *ffprobePathCache_;
 }
 
 bool FFmpegEngine::IsAvailable() const {

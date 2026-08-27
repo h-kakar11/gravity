@@ -1,11 +1,12 @@
 #pragma once
 
-// Phase 1 implementation of media::IMediaEngine (spec section 16). The only thing in the
-// codebase allowed to invoke ffmpeg/ffprobe, always through the injected IProcessRunner
-// with a structured argv vector -- never a shell string. Probe() is fully implemented;
-// Convert/Compress/ExtractAudio/ExtractFrames intentionally throw
-// errors::MediaToolException{ErrorCategory::UnsupportedFormat, ...} -- out of scope for
-// Phase 1 (spec section 16: "do NOT implement every operation now").
+// Implementation of media::IMediaEngine (spec section 16). The only thing in the codebase
+// allowed to invoke ffmpeg/ffprobe, always through the injected IProcessRunner with a
+// structured argv vector -- never a shell string. Probe()/Convert()/Compress() are fully
+// implemented (Phase 2.6) -- Compress is Convert with different default option values, not
+// a different code path, see RunFfmpegJob(). ExtractAudio/ExtractFrames still intentionally
+// throw errors::MediaToolException{ErrorCategory::UnsupportedFormat, ...}; still out of
+// scope (spec section 16: "do NOT implement every operation now").
 
 #include <optional>
 #include <set>
@@ -57,6 +58,13 @@ private:
     std::optional<std::string> overrideFfmpegPath_;
     std::optional<std::string> overrideFfprobePath_;
     mutable std::optional<std::set<std::string>> availableEncodersCache_;
+    // Outer optional = "not yet resolved this process lifetime"; inner optional = the
+    // resolved path itself (DiscoverFfmpegPath/DiscoverFfprobePath's own "not found" case).
+    // Same "one discovery path, one lifetime" principle FFmpegDiscovery.h already documents
+    // for DiscoverAvailableEncoders -- resolution previously re-ran (and re-spawned `where`)
+    // on every single call (issue #20).
+    mutable std::optional<std::optional<std::string>> ffmpegPathCache_;
+    mutable std::optional<std::optional<std::string>> ffprobePathCache_;
 
     std::optional<std::string> ResolveFfmpegPath() const;
     std::optional<std::string> ResolveFfprobePath() const;

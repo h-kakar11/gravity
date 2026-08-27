@@ -1,15 +1,17 @@
 #pragma once
 
 // One of the five mockable interfaces called out in spec section 37. FFmpegEngine
-// (engines/ffmpeg) is the Phase 1 implementation; MockMediaEngine (tests) is a
-// scripted stand-in so job/engine wiring can be tested without a real ffmpeg binary.
+// (engines/ffmpeg) is the implementation; MockMediaEngine (tests) is a scripted stand-in
+// so job/engine wiring can be tested without a real ffmpeg binary.
 //
-// Phase 1 scope (spec section 16): Probe() must work end-to-end against a real ffprobe
-// when one is discovered. Convert/Compress/ExtractAudio/ExtractFrames are declared for
-// interface completeness but are NOT required to do real work yet -- a correct Phase 1
-// implementation throws errors::MediaToolException with
-// ErrorCategory::UnsupportedFormat and a message that says so plainly. Do not fake a
-// success result for an operation that doesn't actually run ffmpeg.
+// Phase 1 scope (spec section 16) required only Probe() to work end-to-end against a real
+// ffprobe; Convert/Compress/ExtractAudio/ExtractFrames were declared for interface
+// completeness with no obligation to do real work yet. That's now only true for
+// ExtractAudio/ExtractFrames -- Convert and Compress were implemented for real in Phase
+// 2.6 (see FFmpegEngine.h). The original rule still holds for whatever remains
+// unimplemented: throw errors::MediaToolException with ErrorCategory::UnsupportedFormat
+// and a message that says so plainly, never fake a success result for an operation that
+// doesn't actually run ffmpeg.
 
 #include <functional>
 #include <optional>

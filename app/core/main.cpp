@@ -498,6 +498,22 @@ json HandleRetryJob(AppContext& app, const json& params) {
     return json::object();
 }
 
+// JobManager::RemoveJob already existed (throws ThrowInvalidOperation for a non-terminal
+// job, ThrowNotFound for an unknown id -- both surface as the usual structured error), it
+// was just never reachable from any IPC command. Completed jobs otherwise accumulate
+// forever in JobManager::jobs_, AppContext::previousState, and the frontend's job list
+// (issue #29).
+json HandleRemoveJob(AppContext& app, const json& params) {
+    const std::string jobId = params.at("jobId").get<std::string>();
+    app.jobManager.RemoveJob(jobId);
+    // JobManager::RemoveJob() already rejects a non-terminal job, so by the time this
+    // erase runs no further transition will ever be published for this id -- safe to drop
+    // its previousState entry too, for the same "stop accumulating forever" reason.
+    std::lock_guard<std::mutex> lock(app.previousStateMutex);
+    app.previousState.erase(jobId);
+    return json::object();
+}
+
 json HandleInspectFile(AppContext& app, const json& params) {
     const std::string path = params.at("path").get<std::string>();
     // #11: same traversal/UNC gate as HandleCreateDownloadJob's output directory --
@@ -649,6 +665,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"pauseJob", HandlePauseJob},
         {"resumeJob", HandleResumeJob},
         {"retryJob", HandleRetryJob},
+        {"removeJob", HandleRemoveJob},
         {"inspectFile", HandleInspectFile},
         {"inspectDownloadUrl", HandleInspectDownloadUrl},
         {"getCapabilities", HandleGetCapabilities},
@@ -679,10 +696,26 @@ void RunIpcLoop(AppContext& app) {
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
 
+        // A missing or non-string "id" can't be recovered from by writing a response --
+        // the Rust bridge (core_bridge.rs) matches responses to pending requests purely by
+        // id, and no pending request will ever be waiting on an empty/garbage one (real
+        // ids are always "req-<n>"). Writing one anyway used to just waste a line and leave
+        // the actual caller (whatever sent the malformed line) hanging for the full 30s
+        // timeout with no faster failure available -- log and skip instead (issue #21).
+        json request;
         std::string id;
         try {
-            json request = json::parse(line);
+            request = json::parse(line);
             id = request.at("id").get<std::string>();
+        } catch (const std::exception& e) {
+            logging::Log::Warning("mediatool-core",
+                                   "rejecting request with missing/malformed id, no response "
+                                   "possible: " +
+                                       std::string(e.what()));
+            continue;
+        }
+
+        try {
             const std::string command = request.at("command").get<std::string>();
             const json params = request.value("params", json::object());
 
@@ -827,11 +860,21 @@ void RunSelfTest(AppContext& app) {
     std::cout << "\nSelf-test complete.\n";
 }
 
+// advanced.logLevel is one of Settings::Validate()'s validated enum strings
+// ("DEBUG"|"INFO"|"WARNING"|"ERROR") -- unrecognized input can't reach here, but this
+// still defends with the same INFO fallback Logger::Init used unconditionally before this
+// was wired up (issue #18).
+logging::LogLevel ResolveLogLevel(const settings::Settings& settings) {
+    const std::string& level = settings.advanced.logLevel;
+    if (level == "DEBUG") return logging::LogLevel::Debug;
+    if (level == "WARNING") return logging::LogLevel::Warning;
+    if (level == "ERROR") return logging::LogLevel::Error;
+    return logging::LogLevel::Info;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    logging::Logger::Init(logging::DefaultLogDirectory() + "/application.log", logging::LogLevel::Info);
-
     // Belt-and-suspenders around the whole startup sequence (#5): JsonFileSettingsStore::Load()
     // already falls back to Settings::Defaults() rather than throwing on a corrupt/invalid
     // settings file, so this should never actually fire for that specific case -- but
@@ -840,7 +883,14 @@ int main(int argc, char** argv) {
     try {
         settings::JsonFileSettingsStore bootstrapStore(settings::DefaultSettingsFilePath(),
                                                         settings::LegacySettingsFilePath());
-        AppContext app(bootstrapStore.Load());
+        const settings::Settings settings = bootstrapStore.Load();
+
+        // Loaded before Logger::Init (rather than the previous hardcoded LogLevel::Info)
+        // so advanced.logLevel actually takes effect from the first line logged -- see
+        // issue #18, which found this setting persisted and validated but never read.
+        logging::Logger::Init(logging::DefaultLogDirectory() + "/application.log", ResolveLogLevel(settings));
+
+        AppContext app(settings);
 
         const bool selfTest = argc > 1 && std::string(argv[1]) == "--selftest";
         if (selfTest) {

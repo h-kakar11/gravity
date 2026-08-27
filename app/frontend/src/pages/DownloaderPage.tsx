@@ -42,13 +42,30 @@ function formatDuration(seconds: number | undefined): string {
   return formatEta(seconds);
 }
 
+// A dedicated, plain-language treatment for connectivity failures (issue #55) instead of
+// the generic banner's raw category/code -- these are the one error class a user can
+// usually just retry once whatever's interrupting their connection clears up.
+function NetworkErrorBanner() {
+  return (
+    <div style={styles.errorBanner} role="alert">
+      Can&apos;t reach the network. Check your internet connection and try again.
+    </div>
+  );
+}
+
 function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
   if (!error) return null;
+  if (error.category === "NETWORK_ERROR") return <NetworkErrorBanner />;
   return (
-    <div style={styles.errorBanner}>
+    <div style={styles.errorBanner} role="alert">
       <strong>{error.category}</strong> ({error.code}): {error.message}
       {error.details && error.details !== error.message ? (
-        <div style={styles.errorDetails}>{error.details}</div>
+        // Raw diagnostic text (can be a full Python traceback, per downloader.py's
+        // emit_error) collapsed behind a disclosure instead of always shown -- issue #33.
+        <details style={styles.errorDetails}>
+          <summary>Technical details</summary>
+          <div>{error.details}</div>
+        </details>
       ) : null}
     </div>
   );
@@ -75,6 +92,25 @@ export default function DownloaderPage() {
 
   const [quality, setQuality] = useState<QualityPreset>("BEST");
   const [outputDirectory, setOutputDirectory] = useState("");
+
+  // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
+  // started blank regardless of the user's configured default (issue #54), and the quality
+  // selector always started at "BEST" regardless of downloads.defaultQuality (part of
+  // issue #18). The backend stores defaultQuality lowercase ("best"); validate + uppercase
+  // before trusting it as a QualityPreset rather than assuming the stored value is already
+  // one of the known presets. The user can still override either per download.
+  useEffect(() => {
+    coreClient
+      .getSettings()
+      .then(({ settings }) => {
+        setOutputDirectory(settings.general.defaultOutputDirectory);
+        const upper = settings.downloads.defaultQuality.toUpperCase() as QualityPreset;
+        if (QUALITY_OPTIONS.includes(upper)) setQuality(upper);
+      })
+      .catch(() => {
+        // Non-fatal -- the fields just start at their existing defaults.
+      });
+  }, []);
 
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<ErrorInfo | null>(null);
@@ -158,10 +194,7 @@ export default function DownloaderPage() {
   return (
     <div style={styles.page}>
       <h1 style={styles.h1}>Download</h1>
-      <p style={styles.subtitle}>
-        Phase 2 vertical slice: URL -&gt; metadata -&gt; quality selection -&gt; real download -&gt;
-        progress -&gt; verified completion. Not the final UI (spec section 34).
-      </p>
+      <p style={styles.subtitle}>Paste a link to download it.</p>
 
       <section style={styles.section}>
         <div style={styles.row}>
@@ -199,9 +232,35 @@ export default function DownloaderPage() {
                 <div style={styles.title}>{metadata.title}</div>
                 {metadata.uploader ? <div style={styles.muted}>{metadata.uploader}</div> : null}
                 <div style={styles.muted}>Duration: {formatDuration(metadata.durationSeconds)}</div>
-                <div style={styles.muted}>{metadata.formats.length} available format(s)</div>
               </div>
             </div>
+            {metadata.formats.length > 0 ? (
+              // Backend already returns full per-format detail (codec, resolution, fps,
+              // bitrate, size) -- this used to be discarded down to a bare count. Read-only
+              // for now: picking one of these to actually drive the download needs a
+              // formatId param on createDownloadJob, a backend change left for later
+              // (issue #31).
+              <details style={styles.formatsDisclosure}>
+                <summary>{metadata.formats.length} available format(s)</summary>
+                <ul style={styles.formatsList}>
+                  {metadata.formats.map((format) => (
+                    <li key={format.formatId}>
+                      {format.formatId}
+                      {format.resolution ? ` · ${format.resolution}` : ""}
+                      {format.fps ? ` · ${format.fps}fps` : ""}
+                      {format.hasVideo && format.videoCodec ? ` · ${format.videoCodec}` : ""}
+                      {format.hasAudio && format.audioCodec ? ` · ${format.audioCodec}` : ""}
+                      {!format.hasVideo && !format.hasAudio ? " · unknown" : ""}
+                      {!format.hasVideo ? " · audio only" : !format.hasAudio ? " · video only" : ""}
+                      {format.extension ? ` · .${format.extension}` : ""}
+                      {formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes) !== "?"
+                        ? ` · ${formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes)}`
+                        : ""}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -239,7 +298,7 @@ export default function DownloaderPage() {
               <input
                 style={styles.input}
                 type="text"
-                placeholder="D:\Videos"
+                placeholder="Choose an output folder"
                 value={outputDirectory}
                 onChange={(e) => setOutputDirectory(e.target.value)}
                 disabled={canCancel}
@@ -264,12 +323,19 @@ export default function DownloaderPage() {
         <section style={styles.section}>
           <h2 style={styles.h2}>Job {activeJob.id}</h2>
           <div style={styles.card}>
-            <div>
+            <div aria-live="polite">
               state: <strong>{activeJob.state}</strong>
             </div>
-            <div>{activeJob.progress.statusMessage}</div>
+            <div aria-live="polite">{activeJob.progress.statusMessage}</div>
             {activeJob.progress.percentage !== undefined ? (
-              <div style={styles.progressTrack}>
+              <div
+                style={styles.progressTrack}
+                role="progressbar"
+                aria-valuenow={Math.round(activeJob.progress.percentage)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Download progress"
+              >
                 <div style={{ ...styles.progressFill, width: `${activeJob.progress.percentage}%` }} />
               </div>
             ) : null}
@@ -280,7 +346,7 @@ export default function DownloaderPage() {
             </div>
 
             {activeJob.state === "COMPLETED" ? (
-              <div style={styles.okBanner}>
+              <div style={styles.okBanner} role="status">
                 Download complete.
                 {typeof activeJob.result?.outputPath === "string" ? (
                   <div style={styles.muted}>{activeJob.result.outputPath}</div>
@@ -348,6 +414,15 @@ const styles: Record<string, CSSProperties> = {
   },
   metadataRow: { display: "flex", gap: "0.75rem", alignItems: "flex-start" },
   thumbnail: { width: 120, borderRadius: 4 },
+  formatsDisclosure: { marginTop: "0.5rem", fontSize: "0.85rem", color: "#666" },
+  formatsList: {
+    margin: "0.4rem 0 0",
+    paddingLeft: "1.2rem",
+    fontSize: "0.8rem",
+    color: "#444",
+    maxHeight: 220,
+    overflowY: "auto",
+  },
   title: { fontWeight: 600, color: "#1a1a1a" },
   progressTrack: { background: "#e5e5e5", borderRadius: 4, height: 8, overflow: "hidden" },
   progressFill: { background: "#3b82f6", height: "100%" },
@@ -371,5 +446,7 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: "column",
     gap: "0.4rem",
   },
-  muted: { color: "#888", fontSize: "0.85rem" },
+  // #888 on this page's #fafafa card background was ~2.9:1, below WCAG AA's 4.5:1 for
+  // normal text (issue #32). #666 gives ~5.4:1.
+  muted: { color: "#666", fontSize: "0.85rem" },
 };

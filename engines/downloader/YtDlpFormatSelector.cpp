@@ -19,7 +19,16 @@ std::string FormatSelectorForQuality(QualityPreset preset) {
         case QualityPreset::P480:
             return "bestvideo[height<=480]+bestaudio/best[height<=480]";
         case QualityPreset::AudioOnly:
-            return "bestaudio/best";
+            // No "/best" fallback here on purpose (issue #31): that fallback means "best
+            // combined format if no pure-audio format exists," which can silently hand
+            // back a full video file for an "Audio only" request. yt-dlp fails clearly
+            // with E_FORMAT_UNAVAILABLE if no audio-only stream exists at all, which is
+            // the correct behavior for this preset -- matches the existing
+            // AudioOnlyNeverSelectsVideo test's intent (its literal assertion, "selector
+            // doesn't contain the substring 'video'", already passed with "bestaudio/best"
+            // too, since "/best" itself doesn't fail that check -- this closes the gap
+            // between what the test asserts and what it's actually named for).
+            return "bestaudio";
     }
     return "bestvideo*+bestaudio/best";
 }

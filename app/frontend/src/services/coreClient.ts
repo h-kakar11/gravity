@@ -133,6 +133,7 @@ export const cancelJob = (jobId: string) => sendCommand("cancelJob", { jobId });
 export const pauseJob = (jobId: string) => sendCommand("pauseJob", { jobId });
 export const resumeJob = (jobId: string) => sendCommand("resumeJob", { jobId });
 export const retryJob = (jobId: string) => sendCommand("retryJob", { jobId });
+export const removeJob = (jobId: string) => sendCommand("removeJob", { jobId });
 export const inspectFile = (path: string) => sendCommand("inspectFile", { path });
 export const inspectDownloadUrl = (url: string) => sendCommand("inspectDownloadUrl", { url });
 export const createDownloadJob = (params: DownloadJobParams) =>

@@ -56,6 +56,13 @@ private:
         process::ProcessResult processResult;
         std::optional<errors::MediaToolException> error;
         bool completedReceived = false;
+        // Last few lines of downloader.py's stderr (its own debug/log chatter, not part
+        // of the NDJSON protocol) -- empty unless the process exits without ever emitting
+        // a structured error event, the one case where this is actually attached to an
+        // ErrorInfo (issue #24). Previously discarded entirely, which meant that specific
+        // failure mode (an unhandled crash outside downloader.py's own try/except) had no
+        // diagnostic at all beyond a bare exit code.
+        std::string stderrTail;
     };
 
     RunOutcome RunPythonCommand(
