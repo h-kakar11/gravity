@@ -4,10 +4,12 @@ import { useJobs } from "../hooks/useJobs";
 import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
 import { asErrorInfo } from "../utils/errors";
+import { formatSpeedWithUnit } from "../utils/format";
 import type { DownloadMetadata, QualityPreset } from "../types/download";
 import { QUALITY_PRESET_LABELS } from "../types/download";
 import type { ErrorInfo } from "../types/error";
 import type { JobState } from "../types/job";
+import type { SpeedUnit } from "../types/settings";
 
 // Functional Phase 2 downloader screen (spec section 34) -- proves URL -> metadata ->
 // quality selection -> real download -> progress -> cancellation -> verified completion
@@ -22,11 +24,6 @@ function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "?";
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatSpeed(bytesPerSecond: number | undefined): string {
-  if (bytesPerSecond === undefined) return "?";
-  return `${(bytesPerSecond / (1024 * 1024)).toFixed(2)} MB/s`;
 }
 
 function formatEta(seconds: number | undefined): string {
@@ -92,13 +89,17 @@ export default function DownloaderPage() {
 
   const [quality, setQuality] = useState<QualityPreset>("BEST");
   const [outputDirectory, setOutputDirectory] = useState("");
+  const [speedUnit, setSpeedUnit] = useState<SpeedUnit>("MBps");
 
   // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
   // started blank regardless of the user's configured default (issue #54), and the quality
   // selector always started at "BEST" regardless of downloads.defaultQuality (part of
   // issue #18). The backend stores defaultQuality lowercase ("best"); validate + uppercase
   // before trusting it as a QualityPreset rather than assuming the stored value is already
-  // one of the known presets. The user can still override either per download.
+  // one of the known presets. downloads.speedUnits was persisted and shown in Settings but
+  // never actually consumed anywhere -- the progress display always hardcoded MB/s
+  // regardless (also part of #18/#59). The user can still override quality/output dir per
+  // download; speed units stay a Settings-level choice, same as elsewhere in the app.
   useEffect(() => {
     coreClient
       .getSettings()
@@ -106,6 +107,7 @@ export default function DownloaderPage() {
         setOutputDirectory(settings.general.defaultOutputDirectory);
         const upper = settings.downloads.defaultQuality.toUpperCase() as QualityPreset;
         if (QUALITY_OPTIONS.includes(upper)) setQuality(upper);
+        setSpeedUnit(settings.downloads.speedUnits);
       })
       .catch(() => {
         // Non-fatal -- the fields just start at their existing defaults.
@@ -341,7 +343,7 @@ export default function DownloaderPage() {
             ) : null}
             <div style={styles.row}>
               <span>{formatBytes(activeJob.progress.processedBytes)} / {formatBytes(activeJob.progress.totalBytes)}</span>
-              <span>{formatSpeed(activeJob.progress.speedBytesPerSecond)}</span>
+              <span>{formatSpeedWithUnit(activeJob.progress.speedBytesPerSecond, speedUnit) ?? "?"}</span>
               <span>ETA {formatEta(activeJob.progress.etaSeconds)}</span>
             </div>
 

@@ -37,7 +37,8 @@ struct DownloadSettings {
     std::string downloadDirectory;
     std::string filenameTemplate = "%(title)s.%(ext)s";
     int concurrentDownloads = 1;
-    std::string speedUnits = "MBps";  // "MBps" | "Mbps"
+    // "KBps" | "KiBps" | "MBps" | "MiBps" | "GBps" | "GiBps" | "Mbps"
+    std::string speedUnits = "MBps";
 };
 
 struct ProcessingSettings {

@@ -3,7 +3,7 @@ import GlassCard from "../components/GlassCard";
 import WatchFoldersSection from "../components/WatchFoldersSection";
 import * as coreClient from "../services/coreClient";
 import type { CommandResult } from "../types/ipc";
-import type { Settings } from "../types/settings";
+import type { Settings, SpeedUnit } from "../types/settings";
 import { asErrorInfo } from "../utils/errors";
 import styles from "./SettingsPage.module.css";
 
@@ -213,10 +213,15 @@ export default function SettingsPage() {
           <select
             className={styles.selectInput}
             value={settings.downloads.speedUnits}
-            onChange={(e) => update("downloads", { speedUnits: e.target.value as "MBps" | "Mbps" })}
+            onChange={(e) => update("downloads", { speedUnits: e.target.value as SpeedUnit })}
           >
-            <option value="MBps">MB/s</option>
-            <option value="Mbps">Mb/s</option>
+            <option value="KBps">Kilobytes/sec (KB/s)</option>
+            <option value="KiBps">Kibibytes/sec (KiB/s)</option>
+            <option value="MBps">Megabytes/sec (MB/s)</option>
+            <option value="MiBps">Mebibytes/sec (MiB/s)</option>
+            <option value="GBps">Gigabytes/sec (GB/s)</option>
+            <option value="GiBps">Gibibytes/sec (GiB/s)</option>
+            <option value="Mbps">Megabits/sec (Mb/s)</option>
           </select>
         </Field>
       </GlassCard>

@@ -184,7 +184,8 @@ Settings Settings::FromJson(const nlohmann::json& json) {
 
 void Settings::Validate() const {
     RequireInRange(downloads.concurrentDownloads, 1, 8, "downloads.concurrentDownloads");
-    RequireOneOf(downloads.speedUnits, {"MBps", "Mbps"}, "downloads.speedUnits");
+    RequireOneOf(downloads.speedUnits, {"KBps", "KiBps", "MBps", "MiBps", "GBps", "GiBps", "Mbps"},
+                 "downloads.speedUnits");
 
     RequireInRange(processing.concurrentJobs, 1, 16, "processing.concurrentJobs");
     RequireOneOf(processing.defaultCompressionQuality, {"low", "medium", "high"},
