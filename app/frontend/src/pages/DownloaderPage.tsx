@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import PresetBar from "../components/PresetBar";
 import { useJobs } from "../hooks/useJobs";
 import { useNavigation } from "../navigation/NavigationContext";
@@ -200,6 +200,23 @@ export default function DownloaderPage() {
     setCreateError(null);
   }, []);
 
+  // Deliberate focus management (issue #32): the Download button is replaced by Cancel
+  // (or the whole controls row disappears once a job exists), so without this, focus
+  // silently falls back to <body> at exactly the moment something important happens --
+  // the job starting, failing, or completing.
+  const jobSectionRef = useRef<HTMLElement>(null);
+  const failureRef = useRef<HTMLDivElement>(null);
+  const openFolderButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (activeJobId) jobSectionRef.current?.focus();
+  }, [activeJobId]);
+
+  useEffect(() => {
+    if (activeJob?.state === "FAILED") failureRef.current?.focus();
+    if (activeJob?.state === "COMPLETED") openFolderButtonRef.current?.focus();
+  }, [activeJob?.state]);
+
   return (
     <div style={styles.page}>
       <h1 style={styles.h1}>Download</h1>
@@ -222,6 +239,19 @@ export default function DownloaderPage() {
             {inspecting ? "Inspecting..." : "Inspect"}
           </button>
         </div>
+        {/* A bare input with no context otherwise -- issue #33 item 7. Checked against
+            build_metadata_payload() (downloader.py) before writing this: a link to one
+            video that also happens to be part of a playlist (e.g. "&list=..." in the URL)
+            still downloads just that video, but a link to the playlist itself is rejected
+            outright (E_PLAYLIST_NOT_SUPPORTED) -- #41 is the open question of whether to
+            support playlists at all, not promised here. */}
+        {!metadata && !inspecting && !inspectError ? (
+          <p style={styles.muted}>
+            Works with YouTube and most other sites yt-dlp supports. Paste a single video link
+            above and click Inspect to preview it before downloading. Playlist links aren&apos;t
+            supported yet.
+          </p>
+        ) : null}
         <ErrorBanner error={inspectError} />
 
         {metadata ? (
@@ -353,7 +383,9 @@ export default function DownloaderPage() {
       ) : null}
 
       {activeJob ? (
-        <section style={styles.section}>
+        // tabIndex=-1: focusable via script (see the activeJobId effect above) without
+        // joining the normal Tab order.
+        <section style={styles.section} ref={jobSectionRef} tabIndex={-1}>
           {/* The raw job id ("Job job-3f2a8c1d-...") read as developer output, not a
               product heading -- issue #33 item 5. metadata is still in scope here (kept
               across a retry, only cleared by Start Over), so the video's own title is
@@ -389,7 +421,9 @@ export default function DownloaderPage() {
                   <div style={{ ...styles.muted, ...styles.overflowSafe }}>{activeJob.result.outputPath}</div>
                 ) : null}
                 <div style={styles.row}>
-                  <button onClick={() => void handleOpenFolder()}>Open folder</button>
+                  <button ref={openFolderButtonRef} onClick={() => void handleOpenFolder()}>
+                    Open folder
+                  </button>
                   <button onClick={handleStartOver}>Download another</button>
                 </div>
                 <ErrorBanner error={openFolderError} />
@@ -397,7 +431,7 @@ export default function DownloaderPage() {
             ) : null}
 
             {activeJob.state === "FAILED" && activeJob.error ? (
-              <div>
+              <div ref={failureRef} tabIndex={-1}>
                 <ErrorBanner error={activeJob.error} />
                 <button onClick={handleRetry}>Try again</button>
               </div>
