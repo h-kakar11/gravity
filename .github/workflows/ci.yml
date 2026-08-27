@@ -5,15 +5,31 @@ name: CI
 # benefit. Mirrors docs/development.md's documented dev setup exactly (MinGW-w64 GCC, no
 # MSVC; the GNU Rust host toolchain; CMake presets) so CI can never silently drift from
 # what a contributor's machine actually does.
+#
+# Philosophy (see docs/local-ci.md): scripts/ci-local.ps1 is now the primary per-commit
+# validation path -- it runs the same 4 fast jobs below directly on a developer/agent
+# machine, with no GitHub Actions runner required. This workflow remains a merge-time
+# safety net (runs on PRs into master, and on pushes to master itself) and hosts the
+# installer smoke test, rather than something every feature-branch commit has to wait on.
 
 on:
   push:
-    branches: ["**"]
+    # Narrowed from every branch to just master (this repo's only long-lived branch --
+    # confirmed via `git remote show origin`, no `main`). Feature/agent branches validate
+    # locally via scripts/ci-local.ps1 instead of firing a full CI run on every commit;
+    # master pushes (merges) still get the full remote check.
+    branches: [master]
   pull_request:
   workflow_dispatch:
-  schedule:
-    # Nightly full-installer smoke test only -- see the installer-smoke-test job below.
-    - cron: "0 3 * * *"
+  # Nightly installer-smoke-test cron is commented out, not deleted: GitHub Actions on
+  # this repo/account is currently billing/runner-capacity restricted (discovered when 5
+  # consecutive pushes all failed within seconds with no runner ever assigned), so an
+  # unattended nightly run would just fail and burn quota with nobody watching. Re-enable
+  # by uncommenting the two lines below once Actions capacity/billing is sorted; the job
+  # itself (installer-smoke-test) is untouched and still runs fine via workflow_dispatch
+  # in the meantime.
+  # schedule:
+  #   - cron: "0 3 * * *"
 
 jobs:
   cpp:

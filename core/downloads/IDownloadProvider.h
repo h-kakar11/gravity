@@ -28,7 +28,11 @@ struct DownloadOptions {
     // filesystem::DeduplicateBaseName) -- must NOT include an extension, since the final
     // container is chosen by yt-dlp itself once the merge (if any) is complete.
     std::string filenameBase;
-    nlohmann::json extra;  // provider-specific escape hatch, e.g. future format overrides
+    // Explicit yt-dlp format id (or id combo, e.g. "137+140") from Inspect()'s own
+    // DownloadFormat list (issue #31). When set, this overrides `quality` entirely -- the
+    // caller picked an exact stream, so there's no preset to derive a selector from.
+    std::optional<std::string> formatId;
+    nlohmann::json extra;  // provider-specific escape hatch
 };
 
 // One selectable stream as reported by the provider during Inspect() (spec section 7).

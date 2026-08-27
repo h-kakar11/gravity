@@ -135,10 +135,25 @@ so `resources/` not existing yet is a non-issue for everyday development.
 
 ## Testing
 
+The recommended single entry point is `scripts/ci-local.ps1` — it runs every suite below
+(plus Rust `cargo test`/`clippy`, and the frontend `tsc`/`vite build`/`vitest`) with the
+same commands `.github/workflows/ci.yml` runs, so a passing local run means CI would pass
+too. See `docs/local-ci.md` for full usage, per-stage flags, and prerequisites.
+
+```powershell
+.\scripts\ci-local.ps1              # everything
+.\scripts\ci-local.ps1 -Cpp -Python # just these two, for example
+```
+
+For granular debugging, the individual commands it wraps:
+
 | Suite | Command |
 |---|---|
 | C++ (GoogleTest) | `ctest --preset windows-mingw-debug --output-on-failure` |
 | Python (`unittest`) | `python -m unittest discover -s tests/python` (deliberately run under the **ambient** interpreter, not the venv — see the module docstring in `tests/python/test_downloader_protocol.py`) |
+| Rust (`cargo test`, in `app/desktop/src-tauri`) | `cargo test` |
+| Rust lint | `cargo clippy --all-targets -- -D warnings` |
+| Frontend (in `app/frontend`) | `npm run build` (tsc + vite build), `npm run test` (vitest) |
 
 Manual (non-automated, real network) downloader integration test:
 `docs/protocols/downloader.md`'s "Manual integration test" section.

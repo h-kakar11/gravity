@@ -237,6 +237,30 @@ void PublishJobProgress(AppContext& app, const jobs::JobId& id, const jobs::Prog
 
 // --- command handlers --------------------------------------------------------------------
 
+// A missing or wrong-typed field used to surface as a raw nlohmann `json::out_of_range`/
+// `json::type_error` -- caught generically by RunIpcLoop and reported as
+// E_UNHANDLED_EXCEPTION with the library's own exception text as the message. That's not
+// actionable for a caller and leaks an implementation detail. Handlers that take a single
+// required string field (every jobId-keyed command) route through this instead for a
+// specific, documented error code (issue #21). Not attempting the full per-handler
+// validation the issue describes for every field of every command in one pass -- this
+// covers the mechanical, highest-traffic case (jobId) without touching handlers whose
+// param shapes are more involved (createJob, updateSettings, presets).
+std::string RequireString(const json& params, const char* field) {
+    if (!params.contains(field)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_MISSING_PARAM", errors::ErrorCategory::Unknown,
+            std::string(field) + " is required.", "field=" + std::string(field)));
+    }
+    const json& value = params.at(field);
+    if (!value.is_string()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PARAM_TYPE", errors::ErrorCategory::Unknown,
+            std::string(field) + " must be a string.", "field=" + std::string(field)));
+    }
+    return value.get<std::string>();
+}
+
 filesystem::FileInfo InspectFileEnriched(AppContext& app, const std::string& path) {
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
 
@@ -355,10 +379,23 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
         }
     }
 
+    // Explicit format id from Inspect()'s format list (issue #31) overrides `quality`
+    // entirely -- see downloads::DownloadOptions::formatId.
+    std::optional<std::string> formatId;
+    if (jobParams.contains("formatId") && !jobParams.at("formatId").is_null()) {
+        std::string value = jobParams.at("formatId").get<std::string>();
+        if (value.empty()) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_MEDIA_OPTIONS", errors::ErrorCategory::Unknown, "formatId must not be empty."));
+        }
+        formatId = std::move(value);
+    }
+
     jobs::DownloadJob::Options options;
     options.url = url;
     options.outputDirectory = outputDirectory;
     options.quality = quality;
+    options.formatId = formatId;
 
     auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
                                                     &app.ffmpegEngine, app.reservationRegistry);
@@ -458,7 +495,7 @@ json HandleCreateJob(AppContext& app, const json& params) {
 }
 
 json HandleGetJob(AppContext& app, const json& params) {
-    return {{"job", app.jobManager.GetJob(params.at("jobId").get<std::string>()).ToJson()}};
+    return {{"job", app.jobManager.GetJob(RequireString(params, "jobId")).ToJson()}};
 }
 
 json HandleListJobs(AppContext& app, const json&) {
@@ -479,22 +516,22 @@ json HandleListJobHistory(AppContext& app, const json& params) {
 }
 
 json HandleCancelJob(AppContext& app, const json& params) {
-    app.jobManager.CancelJob(params.at("jobId").get<std::string>());
+    app.jobManager.CancelJob(RequireString(params, "jobId"));
     return json::object();
 }
 
 json HandlePauseJob(AppContext& app, const json& params) {
-    app.jobManager.PauseJob(params.at("jobId").get<std::string>());
+    app.jobManager.PauseJob(RequireString(params, "jobId"));
     return json::object();
 }
 
 json HandleResumeJob(AppContext& app, const json& params) {
-    app.jobManager.ResumeJob(params.at("jobId").get<std::string>());
+    app.jobManager.ResumeJob(RequireString(params, "jobId"));
     return json::object();
 }
 
 json HandleRetryJob(AppContext& app, const json& params) {
-    app.jobManager.RetryJob(params.at("jobId").get<std::string>());
+    app.jobManager.RetryJob(RequireString(params, "jobId"));
     return json::object();
 }
 
@@ -504,7 +541,7 @@ json HandleRetryJob(AppContext& app, const json& params) {
 // forever in JobManager::jobs_, AppContext::previousState, and the frontend's job list
 // (issue #29).
 json HandleRemoveJob(AppContext& app, const json& params) {
-    const std::string jobId = params.at("jobId").get<std::string>();
+    const std::string jobId = RequireString(params, "jobId");
     app.jobManager.RemoveJob(jobId);
     // JobManager::RemoveJob() already rejects a non-terminal job, so by the time this
     // erase runs no further transition will ever be published for this id -- safe to drop
@@ -717,7 +754,13 @@ void RunIpcLoop(AppContext& app) {
 
         try {
             const std::string command = request.at("command").get<std::string>();
-            const json params = request.value("params", json::object());
+            // .value()'s default only applies when the key is absent -- a request that
+            // sends "params": null keeps that null right through, which every handler
+            // that indexes into params (i.e. all but the no-param ones like listJobs)
+            // then throws on. Explicit JSON null and "key absent" should behave the same
+            // way here: no params supplied (issue #21).
+            json params = request.value("params", json::object());
+            if (params.is_null()) params = json::object();
 
             const auto& table = CommandTable();
             const auto it = table.find(command);

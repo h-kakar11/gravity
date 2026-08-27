@@ -85,6 +85,7 @@ void DownloadJob::Execute() {
     downloadOptions.url = options_.url;
     downloadOptions.outputDirectory = options_.outputDirectory;
     downloadOptions.quality = options_.quality;
+    downloadOptions.formatId = options_.formatId;
     downloadOptions.filenameBase = filenameBase;
 
     std::string outputPath;

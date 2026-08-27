@@ -308,20 +308,16 @@ def run_download(params: dict) -> int:
         return 1
 
     try:
-        with yt_dlp.YoutubeDL(dict(_SINGLE_VIDEO_PROBE_OPTS)) as probe:
-            info = probe.extract_info(url, download=False)
-
-        title = info.get("title") or "download"
-        duration = info.get("duration")
-        playlist_index = info.get("playlist_index")
-        playlist_count = info.get("n_entries") or info.get("playlist_count")
-        emit("metadata", {
-            "title": title,
-            "duration": duration,
-            "playlistIndex": playlist_index,
-            "playlistCount": playlist_count,
-        })
-
+        # No separate metadata probe here (issue #35): this used to run its own
+        # extract_info(download=False) -- a full extra network round-trip to yt-dlp's
+        # extractor on every single download -- purely to emit a "metadata" event that
+        # DownloadJob::Execute() (the only real caller of this command) always discards
+        # with a no-op onMetadata callback, since it already fetched metadata itself via
+        # its own mandatory Inspect() call moments earlier (that's also what rejects a
+        # playlist URL before a "download" command is ever sent -- see
+        # DownloadJob.PlaylistUrlSurfacesAsUnsupportedFormat -- so `noplaylist` below on
+        # the real download is enough; there is no path that reaches this function without
+        # already having passed that gate).
         os.makedirs(output_dir, exist_ok=True)
         outtmpl = os.path.join(output_dir, filename_base + ".%(ext)s")
 

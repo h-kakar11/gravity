@@ -7,6 +7,7 @@
 // IDownloadProvider and IFileSystem only, never to YtDlpProvider/Python or
 // std::filesystem directly, so it's fully testable against the Mock* implementations.
 
+#include <optional>
 #include <string>
 
 #include "core/downloads/IDownloadProvider.h"
@@ -24,6 +25,9 @@ public:
         std::string url;
         std::string outputDirectory;
         downloads::QualityPreset quality = downloads::QualityPreset::Best;
+        // Explicit format id from Inspect()'s format list (issue #31); overrides `quality`
+        // when set. See downloads::DownloadOptions::formatId.
+        std::optional<std::string> formatId;
     };
 
     // `provider`, `fileSystem` and `reservationRegistry` must outlive this job.

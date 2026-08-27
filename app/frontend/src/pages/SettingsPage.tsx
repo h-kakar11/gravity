@@ -3,7 +3,7 @@ import GlassCard from "../components/GlassCard";
 import WatchFoldersSection from "../components/WatchFoldersSection";
 import * as coreClient from "../services/coreClient";
 import type { CommandResult } from "../types/ipc";
-import type { Settings } from "../types/settings";
+import type { Settings, SpeedUnit } from "../types/settings";
 import { asErrorInfo } from "../utils/errors";
 import styles from "./SettingsPage.module.css";
 
@@ -199,12 +199,12 @@ export default function SettingsPage() {
             onChange={(e) => update("downloads", { filenameTemplate: e.target.value })}
           />
         </Field>
-        <Field label="Concurrent downloads" hint="1-8">
+        <Field label="Concurrent downloads" hint="1-10">
           <input
             className={styles.numberInput}
             type="number"
             min={1}
-            max={8}
+            max={10}
             value={settings.downloads.concurrentDownloads}
             onChange={(e) => update("downloads", { concurrentDownloads: Number(e.target.value) })}
           />
@@ -213,10 +213,15 @@ export default function SettingsPage() {
           <select
             className={styles.selectInput}
             value={settings.downloads.speedUnits}
-            onChange={(e) => update("downloads", { speedUnits: e.target.value as "MBps" | "Mbps" })}
+            onChange={(e) => update("downloads", { speedUnits: e.target.value as SpeedUnit })}
           >
-            <option value="MBps">MB/s</option>
-            <option value="Mbps">Mb/s</option>
+            <option value="KBps">Kilobytes/sec (KB/s)</option>
+            <option value="KiBps">Kibibytes/sec (KiB/s)</option>
+            <option value="MBps">Megabytes/sec (MB/s)</option>
+            <option value="MiBps">Mebibytes/sec (MiB/s)</option>
+            <option value="GBps">Gigabytes/sec (GB/s)</option>
+            <option value="GiBps">Gibibytes/sec (GiB/s)</option>
+            <option value="Mbps">Megabits/sec (Mb/s)</option>
           </select>
         </Field>
       </GlassCard>
@@ -246,13 +251,13 @@ export default function SettingsPage() {
         </Field>
         <Field
           label="Concurrent jobs"
-          hint="1-16. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
+          hint="1-25. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
         >
           <input
             className={styles.numberInput}
             type="number"
             min={1}
-            max={16}
+            max={25}
             value={settings.processing.concurrentJobs}
             onChange={(e) => update("processing", { concurrentJobs: Number(e.target.value) })}
           />

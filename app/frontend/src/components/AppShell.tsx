@@ -13,14 +13,21 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const [coreUnavailable, setCoreUnavailable] = useState(false);
   useEffect(() => coreClient.subscribeToCoreUnavailable(() => setCoreUnavailable(true)), []);
 
-  const navItem = (kind: "queue" | "scheduledTasks" | "settings", label: string) => (
-    <button
-      className={`${styles.navButton} ${screen.kind === kind ? styles.navButtonActive : ""}`}
-      onClick={() => navigate({ kind })}
-    >
-      {label}
-    </button>
-  );
+  const navItem = (kind: "queue" | "scheduledTasks" | "settings", label: string) => {
+    const isActive = screen.kind === kind;
+    return (
+      <button
+        className={`${styles.navButton} ${isActive ? styles.navButtonActive : ""}`}
+        onClick={() => navigate({ kind })}
+        // The active tab was previously indicated by CSS class alone -- invisible to
+        // assistive tech, which is exactly what issue #32 flagged (its example used
+        // `disabled` on an older nav; this one just had no ARIA signal at all).
+        aria-current={isActive ? "page" : undefined}
+      >
+        {label}
+      </button>
+    );
+  };
 
   return (
     <div className={styles.shell}>

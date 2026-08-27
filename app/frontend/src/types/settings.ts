@@ -13,12 +13,14 @@ export interface GeneralSettings {
   hotkeyFocusQueue: string;
 }
 
+export type SpeedUnit = "KBps" | "KiBps" | "MBps" | "MiBps" | "GBps" | "GiBps" | "Mbps";
+
 export interface DownloadSettings {
   defaultQuality: string;
   downloadDirectory: string;
   filenameTemplate: string;
   concurrentDownloads: number;
-  speedUnits: "MBps" | "Mbps";
+  speedUnits: SpeedUnit;
 }
 
 export interface ProcessingSettings {
