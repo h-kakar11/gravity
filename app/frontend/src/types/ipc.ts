@@ -20,6 +20,7 @@ export type CoreCommand =
   | "pauseJob"
   | "resumeJob"
   | "retryJob"
+  | "removeJob"
   | "inspectFile"
   | "inspectDownloadUrl"
   | "getCapabilities"
@@ -50,6 +51,9 @@ export interface CommandParams {
   pauseJob: { jobId: string };
   resumeJob: { jobId: string };
   retryJob: { jobId: string };
+  // Only a terminal (Completed/Failed/Cancelled) job can be removed -- the core rejects
+  // anything else with E_INVALID_OPERATION.
+  removeJob: { jobId: string };
   inspectFile: { path: string };
   inspectDownloadUrl: { url: string };
   getCapabilities: { path: string };
@@ -73,6 +77,7 @@ export interface CommandResult {
   pauseJob: Record<string, never>;
   resumeJob: Record<string, never>;
   retryJob: Record<string, never>;
+  removeJob: Record<string, never>;
   inspectFile: { fileInfo: FileInfo };
   inspectDownloadUrl: { metadata: DownloadMetadata };
   getCapabilities: { capabilities: string[] };

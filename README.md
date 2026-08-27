@@ -9,9 +9,16 @@ Repository: [github.com/h-kakar11/gravity](https://github.com/h-kakar11/gravity)
 discovery, Python downloader scaffold). **Phase 2** turned the download side into a real,
 working vertical slice: URL → metadata inspection → quality selection → real download →
 live progress → cancellation → verified output → completed job, end-to-end through the
-real architecture (no simulated progress, no bypassed layers). It is still not the final,
-polished application — see "Status" below for exactly what's real vs. scaffolded,
-`docs/phase-2.md` for the full Phase 2 report, and `docs/roadmap.md` for what's planned.
+real architecture (no simulated progress, no bypassed layers). Phases 3 through 5.4 (see
+git history) built out the rest of the product on top of that foundation: a real
+Convert/Compress engine, a dark-themed multi-screen UI (Home, Download, Convert, Queue,
+Settings, Scheduled Tasks), system tray, global hotkeys, multi-profile presets, watch
+folders, scheduled tasks, hardware-accelerated encoding, Windows Explorer context-menu
+integration, CI, and installer packaging. It is still not feature-complete against the
+full product vision — see "Status" below for exactly what's real vs. scaffolded,
+`docs/phase-2.md` for the Phase 2 report, and `docs/roadmap.md` for what's still planned
+(note: `docs/roadmap.md` itself predates Phases 3-5 and is stale in the same way this file
+was until this pass — treat "planned" items there as needing a fresh look, not gospel).
 
 ## Architecture at a glance
 
@@ -54,7 +61,8 @@ wrong for how your Tauri CLI version invokes `cargo run` (see `docs/development.
 
 ```
 app/
-  frontend/     React + TypeScript developer console (not the final UI yet)
+  frontend/     React + TypeScript dark-themed multi-screen UI (Home, Download, Convert,
+                Queue, Settings, Scheduled Tasks) -- see "Status" below
   desktop/      Tauri (Rust) shell -- bridges frontend <-> mediatool-core
   core/         The mediatool-core sidecar executable's entry point (main.cpp)
 core/           C++ abstractions: jobs, events, filesystem, process, hardware, settings, logging, errors
@@ -77,16 +85,19 @@ real YouTube videos with real network access — see `docs/phase-2.md` for the e
 | Job abstraction, `JobStateMachine`, `JobManager` | **Working.** Configurable concurrency (not hardcoded to 1), pause/resume/cancel/retry all implemented and tested. |
 | `TestJob` | **Working.** The Phase 1 proof job — verified running to completion through `JobManager` and via `--selftest`. |
 | `DownloadJob` | **Working.** Real end-to-end downloads verified against live YouTube videos (audio-only and a 480p video+audio merge), including cancellation mid-download and output verification via `ffprobe`. Pause is not supported (spec doesn't require it for downloads). Playlist URLs are deliberately rejected, not partially supported. |
-| `ConversionJob` / `CompressionJob` / `BatchJob` / `WorkflowJob` | **Scaffolded only.** Named in the type system (`JobType`); `createJob` returns an honest "not implemented yet" error for these. |
+| `MediaProcessingJob` (Convert and Compress) | **Working**, added in Phase 2.6. One job class/code path for both — Compress is Convert with different default option values (`docs/decisions.md`), not a separate implementation. Backed by `FFmpegEngine::Convert`/`Compress`. |
+| `BatchJob` / `WorkflowJob` | **Not implemented.** `JobType::Batch`/`Workflow` exist as enum values (`core/jobs/JobTypes.h`) but there's no corresponding `Job` subclass — `createJob` rejects both at creation. A bigger architectural item (audit issue #17). |
 | Event system (`EventBus`, `Event`) | **Working.** Synchronous pub/sub, wired to the IPC layer and the logger. |
 | Universal `Progress` model | **Working.** |
 | Structured `ErrorInfo` | **Working.** |
-| Filesystem abstraction (`LocalFileSystem`, `FilenameSanitizer`, `TempDirectory`, `AtomicWriter`) | **Working.** Verified against real files/directories in tests. |
+| Filesystem abstraction (`LocalFileSystem`, `FilenameSanitizer`) | **Working.** Verified against real files/directories in tests. |
+| `TempDirectory`, `AtomicWriter` | **Implemented and unit-tested, but not wired into any job's production path** (`DownloadJob`, `MediaProcessingJob`) — see `docs/architecture.md`'s "Filesystem, temp files, and atomic output" section for what that means for crash safety today. Tracked under issue #10. |
 | Hardware detection (`WindowsHardwareDetector`) | **Working.** Verified against real hardware via `--selftest` (correctly detected the dev machine's actual CPU and GPU without any hardcoding). NVENC/QSV/AMF encoder capability listing is a documented Phase 2 TODO — `availableEncoders` is currently always empty. |
 | Settings (`JsonFileSettingsStore`) | **Working.** File-backed, atomic writes, defaults-on-missing-file. |
 | Logging | **Working.** Rotating file sink + a **stderr** color sink via spdlog (fixed in Phase 2 — it originally wrote to stdout, which is reserved for the NDJSON protocol; see `docs/decisions.md`/`docs/phase-2.md` known issues), routed through one facade. |
 | FFmpeg engine — discovery, version, `Probe()` | **Working.** Verified with a real ffmpeg/ffprobe install via `--selftest` (generates a test clip and probes it). |
-| FFmpeg engine — `Convert`/`Compress`/`ExtractAudio`/`ExtractFrames` | **Scaffolded only.** Declared on `IMediaEngine`; each throws an honest "not implemented in Phase 1" error. |
+| FFmpeg engine — `Convert`/`Compress` | **Working**, added in Phase 2.6. Backs `MediaProcessingJob`; `getCapabilities` reflects real availability. |
+| FFmpeg engine — `ExtractAudio`/`ExtractFrames` | **Scaffolded only.** Still declared on `IMediaEngine`, still throws `E_NOT_IMPLEMENTED`. |
 | Image engine (`IImageEngine`) | **Interface only**, no implementation (deliberately, per spec section 2). |
 | Document engine (`IDocumentConverter`) | **Interface only**, no implementation (deliberately, per spec section 2). |
 | Python downloader (`downloader.py`) | **Working.** Both `inspect` and `download` commands verified against real, live YouTube videos with real network access — rich metadata with full format lists, real progress, real yt-dlp+ffmpeg merge, real error classification. `--selftest` mode still covers the no-network case for automated tests. |
@@ -98,9 +109,8 @@ real YouTube videos with real network access — see `docs/phase-2.md` for the e
 | Filesystem abstraction, incl. `ListDirectory` and `MockFileSystem` | **Working.** `MockFileSystem` added in Phase 2 to round out spec section 39's three named mocks (process runner, filesystem, downloader provider). |
 | `MockDownloadProvider` | **Working.** Added in Phase 2; used by `DownloadJobTest` so no test needs real yt-dlp or network access. |
 | IPC boundary (`mediatool-core` NDJSON loop, Tauri Rust bridge, `coreClient.ts`) | **Working.** 13 commands from `docs/ipc-contract.md` (12 from Phase 1 + `inspectDownloadUrl`) implemented and reachable. Verified two ways: a real Tauri window + sidecar launch (both processes running simultaneously), and a direct NDJSON session driving real downloads through the same `mediatool-core.exe` binary the Tauri shell spawns. |
-| Frontend: Download page (`DownloaderPage.tsx`) | **Working** as a build (`tsc --noEmit && vite build` pass) and wired to real backend events end-to-end — no simulated progress. The live click-through in a running Tauri window wasn't captured by this session's screen-automation tooling (an environment/tooling limitation, not a code issue — see `docs/phase-2.md` known issues); the same backend calls it makes were separately verified for real via a direct NDJSON session. |
-| Frontend: Dev console | **Working** as a build. Deliberately minimal — proves IPC, is not the final UI (spec section 34). |
-| Final polished UI (dark mode, two-card home screen) | **Not started**, by design. Requirements recorded in `docs/roadmap.md` for when that phase begins. |
+| Frontend: dark-themed multi-screen UI | **Working**, built across Phases 2.2-5.4. Home (idealist.md's two-card layout), Download, Convert & Compress, unified Queue (active + history), Settings, and Scheduled Tasks, behind a shared `AppShell` nav shell — not the Phase 1/2 two-tab dev console this row used to describe. `DownloaderPage.tsx` specifically retains some Phase-2-era inline light styling rather than the shared dark theme (tracked, not yet ported). |
+| Frontend: Dev console (`DevConsole.tsx`) | **Working**, but no longer a product surface -- a dev-only diagnostic reachable via `?devConsole=1` in `npm run dev`, kept for proving raw IPC without the real UI in the way. |
 
 ## Tests
 

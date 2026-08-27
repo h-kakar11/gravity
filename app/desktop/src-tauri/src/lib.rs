@@ -70,8 +70,15 @@ fn open_containing_folder(path: String) -> Result<(), String> {
     if !Path::new(&path).exists() {
         return Err(format!("cannot open containing folder: path does not exist: {path}"));
     }
+    // `/select,<path>` is one argv entry (no shell interpretation), but explorer.exe still
+    // parses that string with its own undocumented comma/quote rules, independent of
+    // standard argv parsing -- an unquoted path containing a comma could select the wrong
+    // item (issue #38). Quoting the path portion is explorer.exe's own documented escape
+    // for this; safe unconditionally here because `"` is illegal in a Windows filename (see
+    // FilenameSanitizer's reserved-character set), so a real path can never need escaping
+    // itself.
     Command::new("explorer")
-        .arg(format!("/select,{path}"))
+        .arg(format!("/select,\"{path}\""))
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to launch explorer.exe: {e}"))

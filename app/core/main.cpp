@@ -498,6 +498,22 @@ json HandleRetryJob(AppContext& app, const json& params) {
     return json::object();
 }
 
+// JobManager::RemoveJob already existed (throws ThrowInvalidOperation for a non-terminal
+// job, ThrowNotFound for an unknown id -- both surface as the usual structured error), it
+// was just never reachable from any IPC command. Completed jobs otherwise accumulate
+// forever in JobManager::jobs_, AppContext::previousState, and the frontend's job list
+// (issue #29).
+json HandleRemoveJob(AppContext& app, const json& params) {
+    const std::string jobId = params.at("jobId").get<std::string>();
+    app.jobManager.RemoveJob(jobId);
+    // JobManager::RemoveJob() already rejects a non-terminal job, so by the time this
+    // erase runs no further transition will ever be published for this id -- safe to drop
+    // its previousState entry too, for the same "stop accumulating forever" reason.
+    std::lock_guard<std::mutex> lock(app.previousStateMutex);
+    app.previousState.erase(jobId);
+    return json::object();
+}
+
 json HandleInspectFile(AppContext& app, const json& params) {
     const std::string path = params.at("path").get<std::string>();
     // #11: same traversal/UNC gate as HandleCreateDownloadJob's output directory --
@@ -649,6 +665,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"pauseJob", HandlePauseJob},
         {"resumeJob", HandleResumeJob},
         {"retryJob", HandleRetryJob},
+        {"removeJob", HandleRemoveJob},
         {"inspectFile", HandleInspectFile},
         {"inspectDownloadUrl", HandleInspectDownloadUrl},
         {"getCapabilities", HandleGetCapabilities},

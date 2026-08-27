@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Frontend (React/Vite) -- addresses the vite/esbuild advisories issue #40 flagged as
+  # having no update process, not just no active advisory today.
+  - package-ecosystem: npm
+    directory: /app/frontend
+    schedule:
+      interval: weekly
+
+  # Tauri desktop shell (Rust).
+  - package-ecosystem: cargo
+    directory: /app/desktop/src-tauri
+    schedule:
+      interval: weekly
+
+  # yt-dlp bridge -- deliberately unpinned in requirements.txt (yt-dlp needs to track
+  # upstream frequently as sites change), so this mainly surfaces security advisories
+  # rather than routine version bumps.
+  - package-ecosystem: pip
+    directory: /python/downloader
+    schedule:
+      interval: weekly
+
+  # CI workflow action versions.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

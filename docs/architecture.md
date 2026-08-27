@@ -49,11 +49,13 @@ Everything the application does is eventually a `Job` (spec section 4):
 
 ```
 Job (core/jobs/Job.h)
- +-- DownloadJob        Phase 2 — real, see "The download pipeline" below
- +-- ConversionJob      (Phase 3+)
- +-- CompressionJob     (Phase 3+)
- +-- BatchJob           (Phase 3+)
- +-- WorkflowJob        (Phase 3+)
+ +-- DownloadJob         real, see "The download pipeline" below
+ +-- MediaProcessingJob  real -- Convert and Compress are the same job type/code path with
+ |                        different default option values (docs/decisions.md), not two
+ |                        separate classes; FFmpegEngine::Convert/Compress back it
+ +-- BatchJob            not implemented -- JobType::Batch exists as an enum value
+ |                        (core/jobs/JobTypes.h) but has no Job subclass; createJob rejects it
+ +-- WorkflowJob         not implemented -- same as BatchJob, JobType::Workflow only
  \-- TestJob             Phase 1 — synthetic, proves the pipeline end-to-end
 ```
 
@@ -171,12 +173,20 @@ network-failure detection).
 ## Filesystem, temp files, and atomic output
 
 `core/filesystem/LocalFileSystem` implements `IFileSystem` on top of `std::filesystem`
-(never manual path string concatenation, spec section 11). `TempDirectory` gives each job
-an isolated working directory under `%LOCALAPPDATA%\Gravity\temp\job-<id>\`; `AtomicOutput`
-implements the "write to a `.processing` file, rename over the real path only on success"
-pattern (spec section 13) so a crash mid-operation never destroys or corrupts a user's
-file. `FilenameSanitizer` is the one place Windows-illegal-filename handling lives — the
-UI never sanitizes filenames itself (spec section 21).
+(never manual path string concatenation, spec section 11). `FilenameSanitizer` is the one
+place Windows-illegal-filename handling lives — the UI never sanitizes filenames itself
+(spec section 21).
+
+**Not currently true, despite reading like it should be**: `TempDirectory` (an isolated
+per-job working directory under `%LOCALAPPDATA%\Gravity\temp\job-<id>\`) and `AtomicWriter`
+(the "write to a temp file, rename over the real path only on success" pattern, spec
+section 13) both exist, are unit-tested, and are never called from `DownloadJob` or
+`MediaProcessingJob` — confirmed via a repo-wide grep outside their own definition/test
+files. Neither primitive is wired into the actual job-execution path, so a crash mid-write
+today is not protected against the way this section previously implied. Flagged by the
+independent audit (`docs/final-audit.md` #10, #34, #39) as exactly the kind of gap between
+"exists in the codebase" and "actually runs" this document should not paper over. Wiring
+them in is tracked as part of issue #10 (queue persistence/crash recovery).
 
 ## Hardware detection
 
@@ -199,7 +209,9 @@ test needs a real ffmpeg, a real network connection, or the real `%LOCALAPPDATA%
 
 ## What's scaffolded vs. working
 
-See the root `README.md`'s "Phase 1 status" table for the authoritative, per-component
-breakdown — do not assume a class exists just because its header does; several interfaces
-in this document (`IImageEngine`, `IDocumentConverter`, `Convert`/`Compress` on
-`IMediaEngine`) are declared but intentionally not implemented yet.
+See the root `README.md`'s "Status" table for the authoritative, per-component breakdown —
+do not assume a class exists just because its header does. As of this writing,
+`Convert`/`Compress` on `IMediaEngine` are implemented (`FFmpegEngine`, backing
+`MediaProcessingJob`); `IImageEngine` and `IDocumentConverter` are still interface-only
+with no implementation, and `ExtractFrames` on `IMediaEngine` still throws
+`E_NOT_IMPLEMENTED`.

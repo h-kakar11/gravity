@@ -142,5 +142,13 @@ export function useJobs() {
     [refreshJob],
   );
 
-  return { jobs, connectionError, createTestJob, cancelJob, pauseJob, resumeJob, retryJob };
+  // Unlike cancel/pause/resume/retry, a removed job no longer exists on the core side --
+  // refreshJob's getJob would just fail. Drop it from local state directly instead.
+  // Powers the Queue screen's "clear completed" (issue #29).
+  const removeJob = useCallback(async (jobId: string): Promise<void> => {
+    await coreClient.removeJob(jobId);
+    setJobs((prev) => prev.filter((j) => j.id !== jobId));
+  }, []);
+
+  return { jobs, connectionError, createTestJob, cancelJob, pauseJob, resumeJob, retryJob, removeJob };
 }
