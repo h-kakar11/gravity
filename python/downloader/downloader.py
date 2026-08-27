@@ -122,19 +122,38 @@ def emit_error(exc: BaseException) -> None:
 
 
 class _StderrLogger:
-    """Routes yt-dlp's own log chatter to stderr so stdout stays pure NDJSON."""
+    """Routes yt-dlp's own log chatter to stderr so stdout stays pure NDJSON.
+
+    Every method swallows its own write failure instead of letting it propagate: a video
+    title can contain characters a Windows console/pipe rejects outright with a raw
+    OSError (not the more common UnicodeEncodeError) rather than transliterating or
+    replacing them, and a logging call failing must never take down the whole job with it
+    -- see issue #56 (a second retry attempt failed with a traceback originating from this
+    exact print() call).
+    """
+
+    def _safe_print(self, msg):
+        try:
+            print(msg, file=sys.stderr)
+        except (OSError, UnicodeError):
+            try:
+                encoding = sys.stderr.encoding or "utf-8"
+                sys.stderr.buffer.write(str(msg).encode(encoding, errors="replace") + b"\n")
+                sys.stderr.buffer.flush()
+            except Exception:
+                pass  # best-effort diagnostic logging; never let it fail the job
 
     def debug(self, msg):
-        print(msg, file=sys.stderr)
+        self._safe_print(msg)
 
     def info(self, msg):
-        print(msg, file=sys.stderr)
+        self._safe_print(msg)
 
     def warning(self, msg):
-        print(msg, file=sys.stderr)
+        self._safe_print(msg)
 
     def error(self, msg):
-        print(msg, file=sys.stderr)
+        self._safe_print(msg)
 
 
 def format_entry(f: dict) -> dict:
@@ -236,6 +255,13 @@ _SINGLE_VIDEO_PROBE_OPTS = {
     "skip_download": True,
     "noplaylist": True,
     "extract_flat": "in_playlist",
+    # Bounds how long a single stalled network call can block -- without this, a
+    # unresponsive host leaves inspect() hanging indefinitely, and since it runs
+    # synchronously on the C++ core's single IPC thread (issue #8), that freezes the whole
+    # backend, not just this request. This is a partial mitigation (retries still add up,
+    # and the C++ side has no independent deadline of its own yet) rather than the full
+    # fix issue #8 describes.
+    "socket_timeout": 15,
 }
 
 
@@ -252,6 +278,22 @@ def run_inspect(url: str) -> int:
     except Exception as exc:
         emit_error(exc)
         return 1
+
+
+def _resolve_output_path(downloader: "yt_dlp.YoutubeDL", result_info: dict) -> str:
+    """`prepare_filename()` is a template renderer, not a report of what yt-dlp actually
+    wrote to disk -- it doesn't reflect post-processing (e.g. yt-dlp forcing a different
+    container on an incompatible video+audio merge, the common case for anything but the
+    lowest-quality formats). The real path is on `requested_downloads[0]['filepath']` once
+    download/merge has actually happened; fall back to `prepare_filename()` only if that's
+    somehow absent. See issue #25 -- a wrong path here used to trigger the destructive
+    cleanup issue #3 fixed, and independently explains issue #56's "completed job reports
+    the wrong/intermediate file" symptom.
+    """
+    requested = result_info.get("requested_downloads") or []
+    if requested and requested[0].get("filepath"):
+        return requested[0]["filepath"]
+    return downloader.prepare_filename(result_info)
 
 
 def run_download(params: dict) -> int:
@@ -314,6 +356,10 @@ def run_download(params: dict) -> int:
             # Inspect() call before ever reaching here, but a video+playlist combo URL
             # should still resolve to just the one video if this is ever invoked directly.
             "noplaylist": True,
+            # Per-socket-operation bound, not a total-download deadline -- only fires if a
+            # single connect/read stalls, so it doesn't cut off a legitimately slow but
+            # progressing large download. See issue #8.
+            "socket_timeout": 15,
         }
         # Points yt-dlp's own internal merge step (when the selector picks separate
         # video+audio streams) at the SAME ffmpeg the C++ core already resolved, instead
@@ -324,7 +370,7 @@ def run_download(params: dict) -> int:
 
         with yt_dlp.YoutubeDL(download_opts) as downloader:
             result_info = downloader.extract_info(url, download=True)
-            output_path = downloader.prepare_filename(result_info)
+            output_path = _resolve_output_path(downloader, result_info)
 
         emit("completed", {"outputPath": output_path})
         return 0

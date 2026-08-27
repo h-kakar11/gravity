@@ -147,6 +147,14 @@ export default function DownloaderPage() {
     setCreateError(null);
   }, []);
 
+  // Distinct from handleStartOver: retrying a FAILED job should not drop the user back to
+  // a blank paste screen, or make them re-inspect a URL that was already successfully
+  // resolved -- only the download itself failed. See issue #56.
+  const handleRetry = useCallback(() => {
+    setActiveJobId(null);
+    setCreateError(null);
+  }, []);
+
   return (
     <div style={styles.page}>
       <h1 style={styles.h1}>Download</h1>
@@ -163,6 +171,9 @@ export default function DownloaderPage() {
             placeholder="https://..."
             value={url}
             onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !inspecting && url.trim() && !canCancel) void handleInspect();
+            }}
             disabled={canCancel}
           />
           <button onClick={() => void handleInspect()} disabled={inspecting || !url.trim() || canCancel}>
@@ -285,7 +296,7 @@ export default function DownloaderPage() {
             {activeJob.state === "FAILED" && activeJob.error ? (
               <div>
                 <ErrorBanner error={activeJob.error} />
-                <button onClick={handleStartOver}>Try again</button>
+                <button onClick={handleRetry}>Try again</button>
               </div>
             ) : null}
 
