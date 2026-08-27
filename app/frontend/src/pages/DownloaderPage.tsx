@@ -42,13 +42,30 @@ function formatDuration(seconds: number | undefined): string {
   return formatEta(seconds);
 }
 
+// A dedicated, plain-language treatment for connectivity failures (issue #55) instead of
+// the generic banner's raw category/code -- these are the one error class a user can
+// usually just retry once whatever's interrupting their connection clears up.
+function NetworkErrorBanner() {
+  return (
+    <div style={styles.errorBanner} role="alert">
+      Can&apos;t reach the network. Check your internet connection and try again.
+    </div>
+  );
+}
+
 function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
   if (!error) return null;
+  if (error.category === "NETWORK_ERROR") return <NetworkErrorBanner />;
   return (
     <div style={styles.errorBanner} role="alert">
       <strong>{error.category}</strong> ({error.code}): {error.message}
       {error.details && error.details !== error.message ? (
-        <div style={styles.errorDetails}>{error.details}</div>
+        // Raw diagnostic text (can be a full Python traceback, per downloader.py's
+        // emit_error) collapsed behind a disclosure instead of always shown -- issue #33.
+        <details style={styles.errorDetails}>
+          <summary>Technical details</summary>
+          <div>{error.details}</div>
+        </details>
       ) : null}
     </div>
   );
@@ -177,10 +194,7 @@ export default function DownloaderPage() {
   return (
     <div style={styles.page}>
       <h1 style={styles.h1}>Download</h1>
-      <p style={styles.subtitle}>
-        Phase 2 vertical slice: URL -&gt; metadata -&gt; quality selection -&gt; real download -&gt;
-        progress -&gt; verified completion. Not the final UI (spec section 34).
-      </p>
+      <p style={styles.subtitle}>Paste a link to download it.</p>
 
       <section style={styles.section}>
         <div style={styles.row}>

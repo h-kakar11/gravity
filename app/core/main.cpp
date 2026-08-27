@@ -696,10 +696,26 @@ void RunIpcLoop(AppContext& app) {
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
 
+        // A missing or non-string "id" can't be recovered from by writing a response --
+        // the Rust bridge (core_bridge.rs) matches responses to pending requests purely by
+        // id, and no pending request will ever be waiting on an empty/garbage one (real
+        // ids are always "req-<n>"). Writing one anyway used to just waste a line and leave
+        // the actual caller (whatever sent the malformed line) hanging for the full 30s
+        // timeout with no faster failure available -- log and skip instead (issue #21).
+        json request;
         std::string id;
         try {
-            json request = json::parse(line);
+            request = json::parse(line);
             id = request.at("id").get<std::string>();
+        } catch (const std::exception& e) {
+            logging::Log::Warning("mediatool-core",
+                                   "rejecting request with missing/malformed id, no response "
+                                   "possible: " +
+                                       std::string(e.what()));
+            continue;
+        }
+
+        try {
             const std::string command = request.at("command").get<std::string>();
             const json params = request.value("params", json::object());
 
