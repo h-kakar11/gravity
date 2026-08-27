@@ -237,7 +237,10 @@ export default function DownloaderPage() {
                   }}
                 />
               ) : null}
-              <div>
+              {/* minWidth: 0 overrides the flex item's default min-width: auto, which
+                  would otherwise let a long title push this column wider than the flex
+                  container instead of actually wrapping (issue #33 item 2). */}
+              <div style={{ minWidth: 0 }}>
                 <div style={styles.title}>{metadata.title}</div>
                 {metadata.uploader ? <div style={styles.muted}>{metadata.uploader}</div> : null}
                 <div style={styles.muted}>Duration: {formatDuration(metadata.durationSeconds)}</div>
@@ -351,7 +354,11 @@ export default function DownloaderPage() {
 
       {activeJob ? (
         <section style={styles.section}>
-          <h2 style={styles.h2}>Job {activeJob.id}</h2>
+          {/* The raw job id ("Job job-3f2a8c1d-...") read as developer output, not a
+              product heading -- issue #33 item 5. metadata is still in scope here (kept
+              across a retry, only cleared by Start Over), so the video's own title is
+              almost always available; the id is a last-resort fallback, not the norm. */}
+          <h2 style={{ ...styles.h2, ...styles.overflowSafe }}>{metadata?.title ?? `Job ${activeJob.id}`}</h2>
           <div style={styles.card}>
             <div aria-live="polite">
               state: <strong>{activeJob.state}</strong>
@@ -379,7 +386,7 @@ export default function DownloaderPage() {
               <div style={styles.okBanner} role="status">
                 Download complete.
                 {typeof activeJob.result?.outputPath === "string" ? (
-                  <div style={styles.muted}>{activeJob.result.outputPath}</div>
+                  <div style={{ ...styles.muted, ...styles.overflowSafe }}>{activeJob.result.outputPath}</div>
                 ) : null}
                 <div style={styles.row}>
                   <button onClick={() => void handleOpenFolder()}>Open folder</button>
@@ -422,6 +429,10 @@ const styles: Record<string, CSSProperties> = {
   h1: { fontSize: "1.5rem", margin: 0 },
   h2: { fontSize: "1.1rem", margin: "0 0 0.5rem 0" },
   subtitle: { color: "#555", marginTop: 0 },
+  // Long video titles (the sanitizer allows up to 200 codepoints) and deep Windows output
+  // paths would otherwise force horizontal scrolling or overflow the fixed-width page --
+  // issue #33 item 2.
+  overflowSafe: { overflowWrap: "break-word", wordBreak: "break-word" },
   section: {
     border: "1px solid #ddd",
     borderRadius: 8,
@@ -470,7 +481,7 @@ const styles: Record<string, CSSProperties> = {
     border: "1px solid #3b82f6",
     background: "#eff6ff",
   },
-  title: { fontWeight: 600, color: "#1a1a1a" },
+  title: { fontWeight: 600, color: "#1a1a1a", overflowWrap: "break-word", wordBreak: "break-word" },
   progressTrack: { background: "#e5e5e5", borderRadius: 4, height: 8, overflow: "hidden" },
   progressFill: { background: "#3b82f6", height: "100%" },
   errorBanner: {
