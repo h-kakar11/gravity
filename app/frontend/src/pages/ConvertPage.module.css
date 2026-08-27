@@ -72,11 +72,6 @@
   color: var(--color-text-secondary);
 }
 
-.dropzoneActive {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-}
-
 .batchStub {
   color: var(--color-text-disabled);
   font-size: 12px;

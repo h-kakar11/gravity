@@ -16,12 +16,8 @@ export default function HomePage() {
     navigate({ kind: "download" });
   };
 
-  const handleConvertDrop = (files: FileList) => {
-    const first = files[0];
-    // Electron/Tauri file drops expose a real filesystem path via `.path` in Tauri's
-    // webview; fall back to just navigating with nothing prefilled if that's absent.
-    const path = (first as File & { path?: string }).path;
-    navigate({ kind: "convert", prefillFilePath: path, mode: "convert" });
+  const handleConvertDrop = (paths: string[]) => {
+    navigate({ kind: "convert", prefillFilePath: paths[0], mode: "convert" });
   };
 
   return (
