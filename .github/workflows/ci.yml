@@ -187,7 +187,7 @@ jobs:
         working-directory: app/desktop
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gravity-installer
           path: app/desktop/src-tauri/target/release/bundle/nsis/*.exe
