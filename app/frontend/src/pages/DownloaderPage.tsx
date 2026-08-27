@@ -232,9 +232,35 @@ export default function DownloaderPage() {
                 <div style={styles.title}>{metadata.title}</div>
                 {metadata.uploader ? <div style={styles.muted}>{metadata.uploader}</div> : null}
                 <div style={styles.muted}>Duration: {formatDuration(metadata.durationSeconds)}</div>
-                <div style={styles.muted}>{metadata.formats.length} available format(s)</div>
               </div>
             </div>
+            {metadata.formats.length > 0 ? (
+              // Backend already returns full per-format detail (codec, resolution, fps,
+              // bitrate, size) -- this used to be discarded down to a bare count. Read-only
+              // for now: picking one of these to actually drive the download needs a
+              // formatId param on createDownloadJob, a backend change left for later
+              // (issue #31).
+              <details style={styles.formatsDisclosure}>
+                <summary>{metadata.formats.length} available format(s)</summary>
+                <ul style={styles.formatsList}>
+                  {metadata.formats.map((format) => (
+                    <li key={format.formatId}>
+                      {format.formatId}
+                      {format.resolution ? ` · ${format.resolution}` : ""}
+                      {format.fps ? ` · ${format.fps}fps` : ""}
+                      {format.hasVideo && format.videoCodec ? ` · ${format.videoCodec}` : ""}
+                      {format.hasAudio && format.audioCodec ? ` · ${format.audioCodec}` : ""}
+                      {!format.hasVideo && !format.hasAudio ? " · unknown" : ""}
+                      {!format.hasVideo ? " · audio only" : !format.hasAudio ? " · video only" : ""}
+                      {format.extension ? ` · .${format.extension}` : ""}
+                      {formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes) !== "?"
+                        ? ` · ${formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes)}`
+                        : ""}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
           </div>
         ) : null}
       </section>
@@ -388,6 +414,15 @@ const styles: Record<string, CSSProperties> = {
   },
   metadataRow: { display: "flex", gap: "0.75rem", alignItems: "flex-start" },
   thumbnail: { width: 120, borderRadius: 4 },
+  formatsDisclosure: { marginTop: "0.5rem", fontSize: "0.85rem", color: "#666" },
+  formatsList: {
+    margin: "0.4rem 0 0",
+    paddingLeft: "1.2rem",
+    fontSize: "0.8rem",
+    color: "#444",
+    maxHeight: 220,
+    overflowY: "auto",
+  },
   title: { fontWeight: 600, color: "#1a1a1a" },
   progressTrack: { background: "#e5e5e5", borderRadius: 4, height: 8, overflow: "hidden" },
   progressFill: { background: "#3b82f6", height: "100%" },

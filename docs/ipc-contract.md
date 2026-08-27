@@ -121,14 +121,24 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
 ## Events (core -> ... -> React)
 
-`jobCreated`, `jobQueued`, `jobStarted`, `jobProgress`, `jobPaused`, `jobResumed`,
-`jobCompleted`, `jobFailed`, `jobCancelled` — all carry `jobId` and a `data` object
-that is at minimum `{state: JobState}` and, for `jobProgress`, the full `Progress` object.
+**Actually emitted today:**
 
-`fileDetected` — `data: {fileInfo: FileInfo}`
-`hardwareDetected` — `data: {hardwareInfo: HardwareInfo}`
-`downloadMetadataReceived` — `data: {jobId, title, durationSeconds, playlistIndex?, playlistCount?}`
-`logEvent` — `data: {level: "DEBUG"|"INFO"|"WARNING"|"ERROR", message: string, subsystem: string}`
+`jobCreated`, `jobStarted`, `jobProgress`, `jobPaused`, `jobResumed`, `jobCompleted`,
+`jobFailed`, `jobCancelled` — all carry `jobId` and a `data` object that is at minimum
+`{state: JobState}` and, for `jobProgress`, the full `Progress` object.
+
+`logEvent` — `data: {level: "DEBUG"|"INFO"|"WARNING"|"ERROR", message: string, subsystem: string}`,
+forwarded from `Logger::SetEventSink` (`app/core/main.cpp`).
+
+**Declared in `EventType`/`CoreEventName` (both sides), never actually published anywhere
+in the codebase** (confirmed via a repo-wide grep for each event's construction site, not
+just its name string in `Event.cpp`'s `ToWireString` — issue #22). Treat these as reserved,
+not implemented; a frontend listener for any of them will simply never fire:
+
+- `jobQueued` — `data: {state: "QUEUED"}`
+- `fileDetected` — `data: {fileInfo: FileInfo}`
+- `hardwareDetected` — `data: {hardwareInfo: HardwareInfo}`
+- `downloadMetadataReceived` — `data: {jobId, title, durationSeconds, playlistIndex?, playlistCount?}`
 
 ## Rust-only Tauri commands & events (Phase 4, not through the C++ core)
 

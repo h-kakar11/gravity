@@ -58,6 +58,13 @@ private:
     std::optional<std::string> overrideFfmpegPath_;
     std::optional<std::string> overrideFfprobePath_;
     mutable std::optional<std::set<std::string>> availableEncodersCache_;
+    // Outer optional = "not yet resolved this process lifetime"; inner optional = the
+    // resolved path itself (DiscoverFfmpegPath/DiscoverFfprobePath's own "not found" case).
+    // Same "one discovery path, one lifetime" principle FFmpegDiscovery.h already documents
+    // for DiscoverAvailableEncoders -- resolution previously re-ran (and re-spawned `where`)
+    // on every single call (issue #20).
+    mutable std::optional<std::optional<std::string>> ffmpegPathCache_;
+    mutable std::optional<std::optional<std::string>> ffprobePathCache_;
 
     std::optional<std::string> ResolveFfmpegPath() const;
     std::optional<std::string> ResolveFfprobePath() const;
