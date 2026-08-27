@@ -76,6 +76,25 @@ export default function DownloaderPage() {
   const [quality, setQuality] = useState<QualityPreset>("BEST");
   const [outputDirectory, setOutputDirectory] = useState("");
 
+  // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
+  // started blank regardless of the user's configured default (issue #54), and the quality
+  // selector always started at "BEST" regardless of downloads.defaultQuality (part of
+  // issue #18). The backend stores defaultQuality lowercase ("best"); validate + uppercase
+  // before trusting it as a QualityPreset rather than assuming the stored value is already
+  // one of the known presets. The user can still override either per download.
+  useEffect(() => {
+    coreClient
+      .getSettings()
+      .then(({ settings }) => {
+        setOutputDirectory(settings.general.defaultOutputDirectory);
+        const upper = settings.downloads.defaultQuality.toUpperCase() as QualityPreset;
+        if (QUALITY_OPTIONS.includes(upper)) setQuality(upper);
+      })
+      .catch(() => {
+        // Non-fatal -- the fields just start at their existing defaults.
+      });
+  }, []);
+
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<ErrorInfo | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);

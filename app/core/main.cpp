@@ -827,11 +827,21 @@ void RunSelfTest(AppContext& app) {
     std::cout << "\nSelf-test complete.\n";
 }
 
+// advanced.logLevel is one of Settings::Validate()'s validated enum strings
+// ("DEBUG"|"INFO"|"WARNING"|"ERROR") -- unrecognized input can't reach here, but this
+// still defends with the same INFO fallback Logger::Init used unconditionally before this
+// was wired up (issue #18).
+logging::LogLevel ResolveLogLevel(const settings::Settings& settings) {
+    const std::string& level = settings.advanced.logLevel;
+    if (level == "DEBUG") return logging::LogLevel::Debug;
+    if (level == "WARNING") return logging::LogLevel::Warning;
+    if (level == "ERROR") return logging::LogLevel::Error;
+    return logging::LogLevel::Info;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    logging::Logger::Init(logging::DefaultLogDirectory() + "/application.log", logging::LogLevel::Info);
-
     // Belt-and-suspenders around the whole startup sequence (#5): JsonFileSettingsStore::Load()
     // already falls back to Settings::Defaults() rather than throwing on a corrupt/invalid
     // settings file, so this should never actually fire for that specific case -- but
@@ -840,7 +850,14 @@ int main(int argc, char** argv) {
     try {
         settings::JsonFileSettingsStore bootstrapStore(settings::DefaultSettingsFilePath(),
                                                         settings::LegacySettingsFilePath());
-        AppContext app(bootstrapStore.Load());
+        const settings::Settings settings = bootstrapStore.Load();
+
+        // Loaded before Logger::Init (rather than the previous hardcoded LogLevel::Info)
+        // so advanced.logLevel actually takes effect from the first line logged -- see
+        // issue #18, which found this setting persisted and validated but never read.
+        logging::Logger::Init(logging::DefaultLogDirectory() + "/application.log", ResolveLogLevel(settings));
+
+        AppContext app(settings);
 
         const bool selfTest = argc > 1 && std::string(argv[1]) == "--selftest";
         if (selfTest) {

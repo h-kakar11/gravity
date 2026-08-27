@@ -31,6 +31,19 @@ function describeHardwareEncoders(capabilities: MediaEngineCapabilities | null):
   return `Detected: ${detected.map((key) => HW_ENCODER_LABELS[key]).join(", ")}`;
 }
 
+// Purely cosmetic: tauri-plugin-global-shortcut's accelerator syntax
+// ("CommandOrControl+Shift+D") is what's actually stored and registered, and the input
+// below keeps editing that raw form -- this only renders a friendlier preview next to it,
+// e.g. "Ctrl+Shift+D". Gravity is Windows-only in practice, so CommandOrControl always
+// resolves to Ctrl there; no per-platform branching needed. See issue #59.
+function formatHotkeyForDisplay(accelerator: string): string {
+  if (!accelerator.trim()) return "Disabled";
+  return accelerator
+    .split("+")
+    .map((part) => (part === "CommandOrControl" || part === "CmdOrCtrl" ? "Ctrl" : part))
+    .join("+");
+}
+
 function Field({
   label,
   hint,
@@ -144,7 +157,10 @@ export default function SettingsPage() {
             onChange={(e) => update("general", { minimizeToTrayOnClose: e.target.checked })}
           />
         </Field>
-        <Field label="Paste link and download" hint="Global hotkey, e.g. CommandOrControl+Shift+D. Leave empty to disable.">
+        <Field
+          label="Paste link and download"
+          hint={`Global hotkey, e.g. CommandOrControl+Shift+D. Leave empty to disable. Currently: ${formatHotkeyForDisplay(settings.general.hotkeyPasteAndDownload)}`}
+        >
           <input
             className={styles.textInput}
             type="text"
@@ -152,7 +168,10 @@ export default function SettingsPage() {
             onChange={(e) => update("general", { hotkeyPasteAndDownload: e.target.value })}
           />
         </Field>
-        <Field label="Focus queue" hint="Global hotkey, e.g. CommandOrControl+Shift+Q. Leave empty to disable.">
+        <Field
+          label="Focus queue"
+          hint={`Global hotkey, e.g. CommandOrControl+Shift+Q. Leave empty to disable. Currently: ${formatHotkeyForDisplay(settings.general.hotkeyFocusQueue)}`}
+        >
           <input
             className={styles.textInput}
             type="text"
@@ -164,15 +183,15 @@ export default function SettingsPage() {
 
       <GlassCard className={styles.section}>
         <h2 className={styles.sectionTitle}>Downloads</h2>
-        <Field label="Download directory">
-          <input
-            className={styles.textInput}
-            type="text"
-            value={settings.downloads.downloadDirectory}
-            onChange={(e) => update("downloads", { downloadDirectory: e.target.value })}
-          />
-        </Field>
-        <Field label="Filename template">
+        {/* No separate "download directory" field here on purpose: General's "Default
+            output directory" above is the one both the Download and Convert pages actually
+            read (issue #54). A second directory field here was never wired to anything and
+            just meant two settings claiming to control the same thing -- part of #18/#59's
+            "which of these actually does something" confusion. */}
+        <Field
+          label="Filename template"
+          hint="Not yet applied to downloads (tracked separately) -- saved here for when it is."
+        >
           <input
             className={styles.textInput}
             type="text"
