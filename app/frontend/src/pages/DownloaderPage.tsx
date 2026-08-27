@@ -337,7 +337,7 @@ const styles: Record<string, CSSProperties> = {
   },
   metadataRow: { display: "flex", gap: "0.75rem", alignItems: "flex-start" },
   thumbnail: { width: 120, borderRadius: 4 },
-  title: { fontWeight: 600 },
+  title: { fontWeight: 600, color: "#1a1a1a" },
   progressTrack: { background: "#e5e5e5", borderRadius: 4, height: 8, overflow: "hidden" },
   progressFill: { background: "#3b82f6", height: "100%" },
   errorBanner: {

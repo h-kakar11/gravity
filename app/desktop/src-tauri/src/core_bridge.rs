@@ -49,6 +49,19 @@ impl CoreState {
         let mut command = Command::new(&path);
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
+        // mediatool-core.exe is a console-subsystem binary; plain std::process::Command
+        // shows its console window on Windows unless told not to (unlike reproc, which
+        // RealProcessRunner.cpp uses for ffmpeg/yt-dlp/where and which already hides its
+        // children's windows internally via STARTF_USESHOWWINDOW/SW_HIDE -- this is the
+        // one spawn site in the app that needs the flag explicitly). CREATE_NO_WINDOW =
+        // 0x08000000. See issue #37.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
         // Only set for a packaged build where these bundled resources actually exist
         // (Phase 5.2) -- in dev mode none of these paths exist, so main.cpp's existing
         // MEDIATOOL_*-env-var-with-relative-path-fallback / PATH-search behavior is

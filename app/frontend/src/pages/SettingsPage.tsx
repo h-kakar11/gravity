@@ -246,10 +246,7 @@ export default function SettingsPage() {
       </GlassCard>
 
       <GlassCard className={styles.section}>
-        <h2 className={styles.sectionTitle}>Privacy</h2>
-        <Field label="Analytics">
-          <span className={styles.disabledText}>Disabled — no telemetry backend exists</span>
-        </Field>
+        <h2 className={styles.sectionTitle}>Advanced</h2>
         <Field label="Crash reporting">
           <input
             className={styles.checkbox}
@@ -258,10 +255,6 @@ export default function SettingsPage() {
             onChange={(e) => update("privacy", { crashReportingEnabled: e.target.checked })}
           />
         </Field>
-      </GlassCard>
-
-      <GlassCard className={styles.section}>
-        <h2 className={styles.sectionTitle}>Advanced</h2>
         <Field label="ffmpeg path" hint="Leave empty to auto-discover">
           <input
             className={styles.textInput}
