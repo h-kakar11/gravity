@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { JobSnapshot } from "../types/job";
-import type { CoreEvent, CoreEventName } from "../types/ipc";
+import type { CoreEvent, CoreEventData, CoreEventName } from "../types/ipc";
 import type { ErrorInfo } from "../types/error";
 import * as coreClient from "../services/coreClient";
 
@@ -25,10 +25,11 @@ function describeError(err: unknown): string {
   return String(err);
 }
 
-// Keeps a live JobSnapshot[] in sync with the core process. Rather than hand-merging the
-// partial `data` payload each lifecycle event carries, it re-fetches the full snapshot via
-// getJob on every relevant event -- simpler and can't drift from what the core considers
-// truth, at the cost of one extra round trip per event (acceptable for a Phase-1 dev console).
+// Keeps a live JobSnapshot[] in sync with the core process. Most lifecycle events still
+// re-fetch the full snapshot via getJob -- simpler and can't drift from what the core
+// considers truth. jobProgress is the one deliberate exception (see applyProgressEvent
+// below): it fires many times a second, and getJob's async round trips can resolve out of
+// order, which used to visibly rewind the progress bar (issue #19).
 export function useJobs() {
   const [jobs, setJobs] = useState<JobSnapshot[]>([]);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -56,6 +57,24 @@ export function useJobs() {
     [upsertJob],
   );
 
+  // Applies a jobProgress event's payload directly onto the matching job already in
+  // state, synchronously -- no IPC round trip, so there's nothing async to arrive out of
+  // order and rewind the bar. Returns false (caller should fall back to refreshJob) if the
+  // job isn't in local state yet, since the event doesn't carry a full JobSnapshot.
+  const applyProgressEvent = useCallback((jobId: string, data: CoreEventData["jobProgress"]): boolean => {
+    let applied = false;
+    setJobs((prev) => {
+      const idx = prev.findIndex((j) => j.id === jobId);
+      if (idx === -1) return prev;
+      applied = true;
+      const { state, ...progress } = data;
+      const next = [...prev];
+      next[idx] = { ...next[idx], state, progress };
+      return next;
+    });
+    return applied;
+  }, []);
+
   useEffect(() => {
     let active = true;
 
@@ -72,16 +91,18 @@ export function useJobs() {
       });
 
     const unsubscribe = coreClient.subscribeToJobEvents((event: CoreEvent) => {
-      if (event.jobId && JOB_LIFECYCLE_EVENTS.has(event.event)) {
-        void refreshJob(event.jobId);
+      if (!event.jobId || !JOB_LIFECYCLE_EVENTS.has(event.event)) return;
+      if (event.event === "jobProgress" && applyProgressEvent(event.jobId, event.data as CoreEventData["jobProgress"])) {
+        return;
       }
+      void refreshJob(event.jobId);
     });
 
     return () => {
       active = false;
       unsubscribe();
     };
-  }, [refreshJob]);
+  }, [refreshJob, applyProgressEvent]);
 
   const createTestJob = useCallback(async (): Promise<string> => {
     const { jobId } = await coreClient.createJob({ type: "TEST", params: {} });
