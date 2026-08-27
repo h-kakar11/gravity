@@ -20,7 +20,7 @@ jobs:
     name: C++ (build + ctest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install MinGW-w64 GCC
         # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
@@ -55,7 +55,7 @@ jobs:
     name: Python (unittest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -73,7 +73,7 @@ jobs:
       run:
         working-directory: app/desktop/src-tauri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install MinGW-w64 GCC
         # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
@@ -109,7 +109,7 @@ jobs:
       run:
         working-directory: app/frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -128,7 +128,7 @@ jobs:
     needs: [cpp, rust, frontend]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install MinGW-w64 GCC
         # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
