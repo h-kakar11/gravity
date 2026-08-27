@@ -35,6 +35,22 @@ public:
         if (size > 0) {
             pending_.append(reinterpret_cast<const char*>(buffer), size);
         }
+        // A child that never writes a newline (or writes one enormous line) would
+        // otherwise let pending_ grow without bound for as long as the process runs --
+        // issue #24. This doesn't change behavior for any real line-oriented protocol
+        // this codebase actually parses (NDJSON, ffmpeg -progress, yt-dlp progress hooks
+        // all write frequent newlines well under this size); it only stops a pathological
+        // producer from growing this buffer forever. Emits what's accumulated so far as a
+        // synthetic "line" and starts over, rather than silently dropping bytes.
+        static constexpr std::size_t kMaxPendingBytes = 1 * 1024 * 1024;
+        if (pending_.size() > kMaxPendingBytes) {
+            std::string truncated = std::move(pending_);
+            pending_.clear();
+            if (callback_) {
+                callback_(truncated + "...[truncated, no newline within " +
+                           std::to_string(kMaxPendingBytes) + " bytes]");
+            }
+        }
         size_t newlinePos;
         while ((newlinePos = pending_.find('\n')) != std::string::npos) {
             std::string line = pending_.substr(0, newlinePos);
