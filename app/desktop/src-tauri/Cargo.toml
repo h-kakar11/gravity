@@ -37,7 +37,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "io-util"] }
 log = "0.4"
 notify = "6"
-cron = "0.12"
+cron = "0.17"
 chrono = "0.4"
 
 [profile.release]
