@@ -199,12 +199,12 @@ export default function SettingsPage() {
             onChange={(e) => update("downloads", { filenameTemplate: e.target.value })}
           />
         </Field>
-        <Field label="Concurrent downloads" hint="1-8">
+        <Field label="Concurrent downloads" hint="1-10">
           <input
             className={styles.numberInput}
             type="number"
             min={1}
-            max={8}
+            max={10}
             value={settings.downloads.concurrentDownloads}
             onChange={(e) => update("downloads", { concurrentDownloads: Number(e.target.value) })}
           />
@@ -251,13 +251,13 @@ export default function SettingsPage() {
         </Field>
         <Field
           label="Concurrent jobs"
-          hint="1-16. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
+          hint="1-25. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
         >
           <input
             className={styles.numberInput}
             type="number"
             min={1}
-            max={16}
+            max={25}
             value={settings.processing.concurrentJobs}
             onChange={(e) => update("processing", { concurrentJobs: Number(e.target.value) })}
           />

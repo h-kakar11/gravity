@@ -173,6 +173,26 @@ TEST(YtDlpProvider, StartsPythonWithCommandStdinFlagAndWritesCommandJson) {
         << "no ffmpeg location was injected into this provider -- the key should be omitted entirely";
 }
 
+TEST(YtDlpProvider, UsesExplicitFormatIdInsteadOfQualityPresetWhenSet) {
+    FakeProcessRunner runner({
+        R"({"event":"completed","data":{"outputPath":"C:\\out\\v.mp4"}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "C:\\py\\python.exe", "C:\\src\\downloader.py");
+
+    // Issue #31: a formatId from Inspect()'s format list must override the quality
+    // preset entirely, reaching yt-dlp verbatim as the -f selector string.
+    auto options = MakeOptions();
+    options.formatId = "137+140";
+
+    provider.Download(
+        options, [](const auto&) {}, [](const auto&) {}, [](const std::string&) {}, [] { return false; });
+
+    ASSERT_NE(runner.lastProcessState, nullptr);
+    ASSERT_EQ(runner.lastProcessState->writtenLines.size(), 1u);
+    const auto sentCommand = nlohmann::json::parse(runner.lastProcessState->writtenLines[0]);
+    EXPECT_EQ(sentCommand.at("params").at("formatSelector"), "137+140");
+}
+
 TEST(YtDlpProvider, ForwardsFfmpegLocationWhenConfigured) {
     FakeProcessRunner runner({
         R"({"event":"completed","data":{"outputPath":"C:\\out\\v.mp4"}})",

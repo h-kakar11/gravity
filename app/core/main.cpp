@@ -355,10 +355,23 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
         }
     }
 
+    // Explicit format id from Inspect()'s format list (issue #31) overrides `quality`
+    // entirely -- see downloads::DownloadOptions::formatId.
+    std::optional<std::string> formatId;
+    if (jobParams.contains("formatId") && !jobParams.at("formatId").is_null()) {
+        std::string value = jobParams.at("formatId").get<std::string>();
+        if (value.empty()) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_MEDIA_OPTIONS", errors::ErrorCategory::Unknown, "formatId must not be empty."));
+        }
+        formatId = std::move(value);
+    }
+
     jobs::DownloadJob::Options options;
     options.url = url;
     options.outputDirectory = outputDirectory;
     options.quality = quality;
+    options.formatId = formatId;
 
     auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
                                                     &app.ffmpegEngine, app.reservationRegistry);

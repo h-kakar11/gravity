@@ -34,11 +34,14 @@ export type CoreCommand =
 
 // Params a DOWNLOAD-type createJob call takes, nested under CommandParams["createJob"].params
 // (see docs/ipc-contract.md "createJob params by type"). `quality` defaults to "BEST" on
-// the C++ side when omitted.
+// the C++ side when omitted. `formatId` (an exact stream id from InspectDownloadUrl's
+// DownloadFormat list, or an "id1+id2" combo) overrides `quality` entirely when set --
+// issue #31.
 export interface DownloadJobParams {
   url: string;
   outputDirectory: string;
   quality?: QualityPreset;
+  formatId?: string;
 }
 
 // Params for each command, keyed by command name.

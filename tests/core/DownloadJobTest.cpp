@@ -69,6 +69,39 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
     EXPECT_EQ(metadata.at("title"), "My Video");
 }
 
+TEST(DownloadJob, PassesFormatIdThroughToProviderWhenSet) {
+    MockDownloadProvider provider;
+    provider.inspectResult.title = "My Video";
+    provider.completedOutputPath = "C:\\out\\My Video.mp4";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\out");
+    provider.onDownloadStart = [&fs](const mediatool::downloads::DownloadOptions&) {
+        FileInfo outputInfo;
+        outputInfo.path = "C:\\out\\My Video.mp4";
+        outputInfo.filename = "My Video.mp4";
+        outputInfo.extension = "mp4";
+        outputInfo.sizeBytes = 12345;
+        fs.AddFile(outputInfo);
+    };
+
+    // Issue #31: picking an exact stream from Inspect()'s format list must reach the
+    // provider as-is, not get silently dropped in favor of the quality preset.
+    DownloadJob::Options options = MakeOptions();
+    options.formatId = "137+140";
+
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(options, provider, fs, /*mediaEngine=*/nullptr, registry);
+    job.MarkStarting();
+    job.MarkRunning();
+    job.Execute();
+    job.MarkCompleted();
+
+    ASSERT_TRUE(provider.lastDownloadOptions.has_value());
+    ASSERT_TRUE(provider.lastDownloadOptions->formatId.has_value());
+    EXPECT_EQ(*provider.lastDownloadOptions->formatId, "137+140");
+}
+
 TEST(DownloadJob, DeduplicatesFilenameWhenBaseNameAlreadyExists) {
     MockDownloadProvider provider;
     provider.inspectResult.title = "My Video";

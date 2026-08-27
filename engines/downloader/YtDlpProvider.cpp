@@ -236,7 +236,12 @@ void YtDlpProvider::Download(const downloads::DownloadOptions& options,
     nlohmann::json params;
     params["url"] = options.url;
     params["outputDir"] = options.outputDirectory;
-    params["formatSelector"] = FormatSelectorForQuality(options.quality);
+    // An explicit formatId (the user picked an exact stream from Inspect()'s format list,
+    // issue #31) always wins over the quality preset -- yt-dlp's -f selector accepts a raw
+    // format id (or "id1+id2" combo) verbatim, same as any other selector string, so no
+    // downloader.py change is needed here.
+    params["formatSelector"] =
+        options.formatId.has_value() ? *options.formatId : FormatSelectorForQuality(options.quality);
     params["filenameBase"] = options.filenameBase;
     if (!ffmpegLocation_.empty()) {
         params["ffmpegLocation"] = ffmpegLocation_;

@@ -86,6 +86,10 @@ export default function DownloaderPage() {
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState<ErrorInfo | null>(null);
   const [metadata, setMetadata] = useState<DownloadMetadata | null>(null);
+  // Picking a specific stream from the format list overrides the quality preset for that
+  // download (issue #31) -- null means "use the quality preset instead", same as leaving
+  // it unset always did.
+  const [selectedFormatId, setSelectedFormatId] = useState<string | null>(null);
 
   const [quality, setQuality] = useState<QualityPreset>("BEST");
   const [outputDirectory, setOutputDirectory] = useState("");
@@ -128,6 +132,7 @@ export default function DownloaderPage() {
     setInspecting(true);
     setInspectError(null);
     setMetadata(null);
+    setSelectedFormatId(null);
     try {
       const { metadata: result } = await coreClient.inspectDownloadUrl(url.trim());
       setMetadata(result);
@@ -146,6 +151,7 @@ export default function DownloaderPage() {
         url: url.trim(),
         outputDirectory: outputDirectory.trim(),
         quality,
+        ...(selectedFormatId ? { formatId: selectedFormatId } : {}),
       });
       setActiveJobId(jobId);
     } catch (err) {
@@ -153,7 +159,7 @@ export default function DownloaderPage() {
     } finally {
       setCreating(false);
     }
-  }, [url, outputDirectory, quality]);
+  }, [url, outputDirectory, quality, selectedFormatId]);
 
   const handleCancel = useCallback(async () => {
     if (!activeJobId) return;
@@ -181,6 +187,7 @@ export default function DownloaderPage() {
   const handleStartOver = useCallback(() => {
     setActiveJobId(null);
     setMetadata(null);
+    setSelectedFormatId(null);
     setUrl("");
     setCreateError(null);
   }, []);
@@ -238,28 +245,40 @@ export default function DownloaderPage() {
             </div>
             {metadata.formats.length > 0 ? (
               // Backend already returns full per-format detail (codec, resolution, fps,
-              // bitrate, size) -- this used to be discarded down to a bare count. Read-only
-              // for now: picking one of these to actually drive the download needs a
-              // formatId param on createDownloadJob, a backend change left for later
-              // (issue #31).
+              // bitrate, size) -- this used to be discarded down to a bare count and shown
+              // read-only. Clicking a row now picks that exact stream via formatId,
+              // overriding the quality preset below for this download (issue #31).
               <details style={styles.formatsDisclosure}>
-                <summary>{metadata.formats.length} available format(s)</summary>
+                <summary>
+                  {metadata.formats.length} available format(s)
+                  {selectedFormatId ? ` -- using ${selectedFormatId}` : ""}
+                </summary>
                 <ul style={styles.formatsList}>
-                  {metadata.formats.map((format) => (
-                    <li key={format.formatId}>
-                      {format.formatId}
-                      {format.resolution ? ` · ${format.resolution}` : ""}
-                      {format.fps ? ` · ${format.fps}fps` : ""}
-                      {format.hasVideo && format.videoCodec ? ` · ${format.videoCodec}` : ""}
-                      {format.hasAudio && format.audioCodec ? ` · ${format.audioCodec}` : ""}
-                      {!format.hasVideo && !format.hasAudio ? " · unknown" : ""}
-                      {!format.hasVideo ? " · audio only" : !format.hasAudio ? " · video only" : ""}
-                      {format.extension ? ` · .${format.extension}` : ""}
-                      {formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes) !== "?"
-                        ? ` · ${formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes)}`
-                        : ""}
-                    </li>
-                  ))}
+                  {metadata.formats.map((format) => {
+                    const isSelected = format.formatId === selectedFormatId;
+                    return (
+                      <li key={format.formatId}>
+                        <button
+                          type="button"
+                          style={{ ...styles.formatOption, ...(isSelected ? styles.formatOptionSelected : {}) }}
+                          aria-pressed={isSelected}
+                          onClick={() => setSelectedFormatId(isSelected ? null : format.formatId)}
+                        >
+                          {format.formatId}
+                          {format.resolution ? ` · ${format.resolution}` : ""}
+                          {format.fps ? ` · ${format.fps}fps` : ""}
+                          {format.hasVideo && format.videoCodec ? ` · ${format.videoCodec}` : ""}
+                          {format.hasAudio && format.audioCodec ? ` · ${format.audioCodec}` : ""}
+                          {!format.hasVideo && !format.hasAudio ? " · unknown" : ""}
+                          {!format.hasVideo ? " · audio only" : !format.hasAudio ? " · video only" : ""}
+                          {format.extension ? ` · .${format.extension}` : ""}
+                          {formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes) !== "?"
+                            ? ` · ${formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes)}`
+                            : ""}
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
               </details>
             ) : null}
@@ -284,7 +303,7 @@ export default function DownloaderPage() {
               <select
                 value={quality}
                 onChange={(e) => setQuality(e.target.value as QualityPreset)}
-                disabled={canCancel}
+                disabled={canCancel || selectedFormatId !== null}
               >
                 {QUALITY_OPTIONS.map((preset) => (
                   <option key={preset} value={preset}>
@@ -293,6 +312,15 @@ export default function DownloaderPage() {
                 ))}
               </select>
             </label>
+            {selectedFormatId ? (
+              <span style={styles.muted}>
+                {" "}
+                Overridden by format {selectedFormatId} --{" "}
+                <button type="button" onClick={() => setSelectedFormatId(null)}>
+                  use quality preset instead
+                </button>
+              </span>
+            ) : null}
           </div>
           <div style={styles.row}>
             <label style={styles.label}>
@@ -419,11 +447,28 @@ const styles: Record<string, CSSProperties> = {
   formatsDisclosure: { marginTop: "0.5rem", fontSize: "0.85rem", color: "#666" },
   formatsList: {
     margin: "0.4rem 0 0",
-    paddingLeft: "1.2rem",
+    paddingLeft: 0,
+    listStyle: "none",
     fontSize: "0.8rem",
     color: "#444",
     maxHeight: 220,
     overflowY: "auto",
+  },
+  formatOption: {
+    display: "block",
+    width: "100%",
+    textAlign: "left",
+    padding: "0.3rem 0.4rem",
+    border: "1px solid transparent",
+    borderRadius: 4,
+    background: "none",
+    font: "inherit",
+    color: "inherit",
+    cursor: "pointer",
+  },
+  formatOptionSelected: {
+    border: "1px solid #3b82f6",
+    background: "#eff6ff",
   },
   title: { fontWeight: 600, color: "#1a1a1a" },
   progressTrack: { background: "#e5e5e5", borderRadius: 4, height: 8, overflow: "hidden" },
