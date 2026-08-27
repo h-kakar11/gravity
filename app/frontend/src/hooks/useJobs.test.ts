@@ -16,6 +16,7 @@ vi.mock("../services/coreClient", () => ({
   pauseJob: vi.fn(),
   resumeJob: vi.fn(),
   retryJob: vi.fn(),
+  removeJob: vi.fn(),
 }));
 
 function makeJob(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
@@ -110,5 +111,73 @@ describe("useJobs", () => {
 
     expect(coreClient.cancelJob).toHaveBeenCalledWith("job-1");
     expect(result.current.jobs[0].state).toBe("CANCELLED");
+  });
+
+  // Issue #19: jobProgress used to trigger a full getJob() round-trip like every other
+  // event, whose async responses could resolve out of order and visibly rewind the
+  // progress bar. applyProgressEvent's whole point is applying the event's own payload
+  // synchronously instead -- this asserts that path is actually taken (no getJob call).
+  it("applies a jobProgress event directly without calling getJob", async () => {
+    vi.mocked(coreClient.listJobs).mockResolvedValue({
+      jobs: [makeJob({ state: "RUNNING", progress: { statusMessage: "Working", percentage: 10 } })],
+    });
+
+    const { result } = renderHook(() => useJobs());
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+    act(() => {
+      eventCallback?.({
+        event: "jobProgress",
+        jobId: "job-1",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        data: { state: "RUNNING", statusMessage: "Working", percentage: 55 },
+      });
+    });
+
+    await waitFor(() => expect(result.current.jobs[0].progress.percentage).toBe(55));
+    expect(result.current.jobs[0].state).toBe("RUNNING");
+    expect(coreClient.getJob).not.toHaveBeenCalled();
+  });
+
+  // A progress event for a job not yet in local state can't be applied directly (it
+  // doesn't carry a full JobSnapshot) -- must fall back to the normal getJob path.
+  it("falls back to getJob for a jobProgress event on an unknown job", async () => {
+    vi.mocked(coreClient.listJobs).mockResolvedValue({ jobs: [] });
+    vi.mocked(coreClient.getJob).mockResolvedValue({
+      job: makeJob({ id: "job-2", progress: { statusMessage: "Working", percentage: 20 } }),
+    });
+
+    renderHook(() => useJobs());
+    await waitFor(() => expect(coreClient.listJobs).toHaveBeenCalled());
+
+    act(() => {
+      eventCallback?.({
+        event: "jobProgress",
+        jobId: "job-2",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        data: { state: "RUNNING", statusMessage: "Working", percentage: 20 },
+      });
+    });
+
+    await waitFor(() => expect(coreClient.getJob).toHaveBeenCalledWith("job-2"));
+  });
+
+  // Issue #29: removeJob deletes the job on the core side, so (unlike cancel/pause/
+  // resume/retry) refetching via getJob afterwards would just fail -- it must drop the
+  // job from local state directly instead.
+  it("removeJob calls coreClient.removeJob and drops the job from local state", async () => {
+    vi.mocked(coreClient.listJobs).mockResolvedValue({ jobs: [makeJob({ state: "COMPLETED" })] });
+    vi.mocked(coreClient.removeJob).mockResolvedValue({});
+
+    const { result } = renderHook(() => useJobs());
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+    await act(async () => {
+      await result.current.removeJob("job-1");
+    });
+
+    expect(coreClient.removeJob).toHaveBeenCalledWith("job-1");
+    expect(result.current.jobs).toHaveLength(0);
+    expect(coreClient.getJob).not.toHaveBeenCalled();
   });
 });

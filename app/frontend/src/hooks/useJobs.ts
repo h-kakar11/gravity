@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { JobSnapshot } from "../types/job";
 import type { CoreEvent, CoreEventData, CoreEventName } from "../types/ipc";
 import type { ErrorInfo } from "../types/error";
@@ -34,6 +34,18 @@ export function useJobs() {
   const [jobs, setJobs] = useState<JobSnapshot[]>([]);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
+  // Mirrors `jobs` for applyProgressEvent's synchronous membership check below. A
+  // React state setter's functional-updater form (setJobs(prev => ...)) does not run
+  // synchronously -- it's queued for the next render -- so a flag set inside that updater
+  // and read immediately after calling setJobs is not reliable (it was almost always
+  // still false, silently defeating the whole point of issue #19's fix: every progress
+  // event fell through to the getJob round-trip it was meant to avoid). A ref mutated in
+  // an effect is synchronously current by the time this callback can run.
+  const jobsRef = useRef<JobSnapshot[]>([]);
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
+
   const upsertJob = useCallback((job: JobSnapshot) => {
     setJobs((prev) => {
       const idx = prev.findIndex((j) => j.id === job.id);
@@ -62,17 +74,16 @@ export function useJobs() {
   // order and rewind the bar. Returns false (caller should fall back to refreshJob) if the
   // job isn't in local state yet, since the event doesn't carry a full JobSnapshot.
   const applyProgressEvent = useCallback((jobId: string, data: CoreEventData["jobProgress"]): boolean => {
-    let applied = false;
+    if (!jobsRef.current.some((j) => j.id === jobId)) return false;
+    const { state, ...progress } = data;
     setJobs((prev) => {
       const idx = prev.findIndex((j) => j.id === jobId);
       if (idx === -1) return prev;
-      applied = true;
-      const { state, ...progress } = data;
       const next = [...prev];
       next[idx] = { ...next[idx], state, progress };
       return next;
     });
-    return applied;
+    return true;
   }, []);
 
   useEffect(() => {
