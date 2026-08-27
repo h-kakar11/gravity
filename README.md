@@ -35,7 +35,9 @@ wire protocol every hop above uses.
 
 ## Quick start
 
-Prerequisites and full instructions: `docs/development.md`. Short version:
+Prerequisites and full instructions: `docs/development.md`. To validate a change, run
+`.\scripts\ci-local.ps1` (see `docs/local-ci.md`) — it mirrors CI's checks locally, no
+GitHub Actions runner needed. Short version of building/running by hand:
 
 ```bash
 # C++ core
@@ -124,6 +126,7 @@ for the manual (non-automated) real-network integration test procedure.
 - `docs/ipc-contract.md` — the wire protocol (read this before touching any cross-process code)
 - `docs/protocols/downloader.md` — the Python downloader sub-protocol in full detail
 - `docs/development.md` — setup, build, test, and run instructions
+- `docs/local-ci.md` — running the full validation suite locally, no GitHub Actions needed
 - `docs/decisions.md` — architectural decisions and why they were made
 - `docs/roadmap.md` — what's planned for later phases
 - `docs/phase-2.md` — the Phase 2 engineering report
