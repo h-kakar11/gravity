@@ -45,7 +45,7 @@ function formatDuration(seconds: number | undefined): string {
 function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
   if (!error) return null;
   return (
-    <div style={styles.errorBanner}>
+    <div style={styles.errorBanner} role="alert">
       <strong>{error.category}</strong> ({error.code}): {error.message}
       {error.details && error.details !== error.message ? (
         <div style={styles.errorDetails}>{error.details}</div>
@@ -258,7 +258,7 @@ export default function DownloaderPage() {
               <input
                 style={styles.input}
                 type="text"
-                placeholder="D:\Videos"
+                placeholder="Choose an output folder"
                 value={outputDirectory}
                 onChange={(e) => setOutputDirectory(e.target.value)}
                 disabled={canCancel}
@@ -283,12 +283,19 @@ export default function DownloaderPage() {
         <section style={styles.section}>
           <h2 style={styles.h2}>Job {activeJob.id}</h2>
           <div style={styles.card}>
-            <div>
+            <div aria-live="polite">
               state: <strong>{activeJob.state}</strong>
             </div>
-            <div>{activeJob.progress.statusMessage}</div>
+            <div aria-live="polite">{activeJob.progress.statusMessage}</div>
             {activeJob.progress.percentage !== undefined ? (
-              <div style={styles.progressTrack}>
+              <div
+                style={styles.progressTrack}
+                role="progressbar"
+                aria-valuenow={Math.round(activeJob.progress.percentage)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Download progress"
+              >
                 <div style={{ ...styles.progressFill, width: `${activeJob.progress.percentage}%` }} />
               </div>
             ) : null}
@@ -299,7 +306,7 @@ export default function DownloaderPage() {
             </div>
 
             {activeJob.state === "COMPLETED" ? (
-              <div style={styles.okBanner}>
+              <div style={styles.okBanner} role="status">
                 Download complete.
                 {typeof activeJob.result?.outputPath === "string" ? (
                   <div style={styles.muted}>{activeJob.result.outputPath}</div>
@@ -390,5 +397,7 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: "column",
     gap: "0.4rem",
   },
-  muted: { color: "#888", fontSize: "0.85rem" },
+  // #888 on this page's #fafafa card background was ~2.9:1, below WCAG AA's 4.5:1 for
+  // normal text (issue #32). #666 gives ~5.4:1.
+  muted: { color: "#666", fontSize: "0.85rem" },
 };
