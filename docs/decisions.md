@@ -77,6 +77,28 @@ section 47. Newest entries at the bottom of each phase's section.
   change to an internal (C++<->Python only, never frontend-visible) protocol detail;
   documented in `docs/protocols/downloader.md`.
 
+### Playlist URLs: rejected with `E_PLAYLIST_NOT_SUPPORTED`, not implemented (issue #41)
+- **Context:** `downloader.py`'s single-video probe options (`noplaylist`, `extract_flat:
+  "in_playlist"`) and `WithPlaylistIndex`/playlist-count scaffolding already exist in the
+  data structures, but nothing above them ever decomposes a playlist into per-video jobs --
+  a bare playlist URL is rejected outright. `docs/roadmap.md` referenced this decision
+  without it actually being recorded anywhere, which is what issue #41 flagged.
+- **Options considered:** (a) implement full playlist support now -- decompose a playlist
+  URL into one queued DownloadJob per entry, using the existing `WithPlaylistIndex`
+  numbering; (b) keep rejecting playlist URLs and say so explicitly, leaving the
+  scaffolding in place for a later phase rather than ripping it out.
+- **Choice:** (b), for this pass.
+- **Reason:** decomposing a playlist into N jobs touches job creation, queue behavior
+  under #17's new priority ordering, per-item failure/retry UX, and progress reporting
+  across N jobs -- a real feature, not a bug fix, and one this audit pass has no product
+  sign-off to design unilaterally. The existing `WithPlaylistIndex`/playlist-count fields
+  are cheap to keep parked (they cost nothing unused) so the day playlist support does
+  ship, the numbering scheme doesn't need re-deriving from scratch.
+- **Consequences:** a playlist URL reliably fails fast today (`E_PLAYLIST_NOT_SUPPORTED`)
+  instead of silently downloading one entry or hanging on a full playlist walk. Playlist
+  support remains a scoped, trackable future feature (issue #41 stays open for that) rather
+  than a vague TODO.
+
 ### Video/audio merge strategy: yt-dlp's own ffmpeg invocation, pointed at our resolved path
 - **Context:** "Best" quality and every resolution preset select separate video+audio
   streams that need merging into one container (spec section 16).
