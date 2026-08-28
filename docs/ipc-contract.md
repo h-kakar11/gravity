@@ -108,8 +108,8 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
 | `type` | `params` |
 |---|---|
-| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31) |
-| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31) |
+| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
 | `"TEST"` | `{}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
 
@@ -316,6 +316,9 @@ Grouped exactly as in the product spec: `general`, `downloads`, `processing`, `p
   id: string;
   type: JobType;
   state: JobState;
+  // Scheduling priority (issue #17): higher runs before lower among jobs still Queued;
+  // FIFO among equal priorities. Defaults to 0 if not set at createJob time.
+  priority: number;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

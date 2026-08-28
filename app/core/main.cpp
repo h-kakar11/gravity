@@ -423,6 +423,11 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
 
     auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
                                                     &app.ffmpegEngine, app.reservationRegistry);
+    // Optional scheduling priority (issue #17): higher runs before lower among jobs still
+    // Queued. Absent/0 keeps today's plain-FIFO behavior.
+    if (jobParams.contains("priority") && !jobParams.at("priority").is_null()) {
+        job->SetPriority(jobParams.at("priority").get<int>());
+    }
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
@@ -484,6 +489,10 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
 
     auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
                                                           app.fileSystem, app.reservationRegistry);
+    // See HandleCreateDownloadJob above -- same optional scheduling priority (issue #17).
+    if (jobParams.contains("priority") && !jobParams.at("priority").is_null()) {
+        job->SetPriority(jobParams.at("priority").get<int>());
+    }
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));

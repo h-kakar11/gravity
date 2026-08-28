@@ -24,6 +24,7 @@ function makeJob(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
     id: "job-1",
     type: "CONVERSION",
     state: "RUNNING",
+    priority: 0,
     createdAt: "2026-01-01T00:00:00.000Z",
     progress: { statusMessage: "Working" },
     ...overrides,

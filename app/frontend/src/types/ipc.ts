@@ -42,6 +42,9 @@ export interface DownloadJobParams {
   outputDirectory: string;
   quality?: QualityPreset;
   formatId?: string;
+  // Scheduling priority (issue #17): higher runs before lower among jobs still Queued.
+  // Omitted/0 keeps plain-FIFO ordering.
+  priority?: number;
 }
 
 // Params for each command, keyed by command name.

@@ -46,6 +46,7 @@ public:
         JobId id;
         JobType type;
         JobState state;
+        int priority = 0;
         Progress progress;
         std::optional<errors::ErrorInfo> error;
         std::optional<nlohmann::json> result;
@@ -116,6 +117,10 @@ private:
     void WorkerLoop();
     void RunJob(const JobId& id);
     Job* LookupJobLocked(const JobId& id) const;
+    // Inserts `id` into queue_ ahead of the first entry with a strictly lower priority
+    // (issue #17), preserving FIFO order among entries of equal priority. Caller must
+    // hold mutex_.
+    void InsertIntoQueueLocked(const JobId& id, int priority);
     JobSnapshot SnapshotOf(const Job& job) const;
     void HandleJobStateChanged(const JobId& id, JobState state);
     void HandleJobProgress(const JobId& id, const Progress& progress);
