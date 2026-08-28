@@ -330,11 +330,35 @@ void ValidateDownloadUrl(AppContext& app, const std::string& url) {
     }
 }
 
+// Wall-clock bound for a single inspectDownloadUrl call (issue #8). yt-dlp's Inspect()
+// runs synchronously on the IPC thread with no independent timeout of its own -- a
+// network stall or an unresponsive upstream site used to block the whole backend
+// indefinitely. YtDlpProvider::RunPythonCommand already polls an isCancelled() callback
+// every 200ms and tears the subprocess down the moment it returns true (see
+// engines/downloader/YtDlpProvider.cpp), so a deadline-based callback here is enough to
+// turn "hangs forever" into "gives up after a fixed, bounded period" without needing a
+// second thread.
+constexpr auto kInspectDeadline = std::chrono::seconds(30);
+
 json HandleInspectDownloadUrl(AppContext& app, const json& params) {
-    const std::string url = params.at("url").get<std::string>();
+    const std::string url = RequireString(params, "url");
     ValidateDownloadUrl(app, url);
-    const downloads::DownloadMetadata metadata = app.ytDlpProvider.Inspect(url, [] { return false; });
-    return {{"metadata", DownloadMetadataToJson(metadata)}};
+
+    const auto deadline = std::chrono::steady_clock::now() + kInspectDeadline;
+    auto isCancelled = [deadline] { return std::chrono::steady_clock::now() >= deadline; };
+
+    try {
+        const downloads::DownloadMetadata metadata = app.ytDlpProvider.Inspect(url, isCancelled);
+        return {{"metadata", DownloadMetadataToJson(metadata)}};
+    } catch (const errors::MediaToolException& e) {
+        if (e.Info().code == "E_INSPECT_CANCELLED") {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INSPECT_TIMEOUT", errors::ErrorCategory::NetworkError,
+                "Inspecting this URL took too long and was cancelled.", "url=" + url,
+                /*recoverable=*/true));
+        }
+        throw;
+    }
 }
 
 json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {

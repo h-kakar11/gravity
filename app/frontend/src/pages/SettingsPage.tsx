@@ -241,12 +241,16 @@ export default function SettingsPage() {
             className={styles.selectInput}
             value={settings.processing.defaultCompressionQuality}
             onChange={(e) =>
-              update("processing", { defaultCompressionQuality: e.target.value as "low" | "medium" | "high" })
+              update("processing", {
+                defaultCompressionQuality: e.target.value as "lowest" | "low" | "medium" | "high" | "ultra",
+              })
             }
           >
+            <option value="lowest">Lowest (smallest file)</option>
             <option value="low">Low</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
+            <option value="ultra">Ultra high (largest file)</option>
           </select>
         </Field>
         <Field

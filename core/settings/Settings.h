@@ -43,7 +43,9 @@ struct DownloadSettings {
 
 struct ProcessingSettings {
     bool hardwareAccelerationEnabled = true;
-    std::string defaultCompressionQuality = "medium";  // "low" | "medium" | "high"
+    // "lowest" | "low" | "medium" | "high" | "ultra" (issue #59: wanted an explicit
+    // smallest/largest option at each end rather than just the three middle presets).
+    std::string defaultCompressionQuality = "medium";
     std::string defaultOutputFormat;
     int concurrentJobs = 1;
 };

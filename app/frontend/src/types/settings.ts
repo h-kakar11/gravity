@@ -25,7 +25,7 @@ export interface DownloadSettings {
 
 export interface ProcessingSettings {
   hardwareAccelerationEnabled: boolean;
-  defaultCompressionQuality: "low" | "medium" | "high";
+  defaultCompressionQuality: "lowest" | "low" | "medium" | "high" | "ultra";
   defaultOutputFormat: string;
   concurrentJobs: number;
 }

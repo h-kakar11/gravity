@@ -67,7 +67,15 @@
   !insertmacro GravityAddConvertEntry ".bmp"
 !macroend
 
+; issue #60: the base NSIS uninstaller only removes what it installed (program files,
+; shortcuts, registry keys) -- it never touches user data written by the running app
+; itself (%LOCALAPPDATA%\Gravity: settings.json, logs/, the bundled Python venv). Ask
+; once, up front, rather than silently keeping or silently deleting either way.
 !macro NSIS_HOOK_PREUNINSTALL
+  MessageBox MB_YESNO|MB_ICONQUESTION "Also remove your Gravity settings, logs, and cached data?$\n$\n$LOCALAPPDATA\Gravity" IDNO gravity_keep_userdata
+    RMDir /r "$LOCALAPPDATA\Gravity"
+  gravity_keep_userdata:
+
   !insertmacro GravityRemoveConvertEntry ".mp4"
   !insertmacro GravityRemoveCompressEntry ".mp4"
   !insertmacro GravityRemoveConvertEntry ".mov"
