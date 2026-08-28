@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import GlassCard from "../components/GlassCard";
 import PresetBar from "../components/PresetBar";
 import { ProLockedControl } from "../components/ProLockedBadge";
@@ -167,6 +168,16 @@ export default function ConvertPage() {
     setCreateError(null);
   }, []);
 
+  // File-picker fallback alongside drag-and-drop (issue #57: "should have a selection of
+  // what file to convert rather than relying on solely drag and drop").
+  const handleBrowseFile = useCallback(async () => {
+    const selected = await openFilePicker({
+      multiple: false,
+      title: "Choose a file to convert or compress",
+    });
+    if (typeof selected === "string") setInputPath(selected);
+  }, []);
+
   return (
     <div className={styles.wrap}>
       <div className={styles.header}>
@@ -200,6 +211,15 @@ export default function ConvertPage() {
           <div className={styles.dropzoneInner}>
             <div className={styles.dropIcon}>&#8646;</div>
             <p>Drop a file here to get started.</p>
+            <button
+              className={styles.linkButton}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleBrowseFile();
+              }}
+            >
+              or choose a file...
+            </button>
             <ProLockedControl label="Select multiple files for batch conversion">
               <span className={styles.batchStub}>Batch convert</span>
             </ProLockedControl>

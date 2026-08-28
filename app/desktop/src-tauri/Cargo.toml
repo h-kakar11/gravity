@@ -32,6 +32,11 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
+# File-picker fallback for Convert/Compress and Download (issue #57: dropping a file
+# didn't work at all under Tauri v2's native drag-drop interception, and even once fixed,
+# drag-and-drop alone with no picker was itself the ask -- "should have a selection of
+# what file to convert rather than relying on solely drag and drop").
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "io-util"] }

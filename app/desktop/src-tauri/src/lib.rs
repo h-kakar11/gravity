@@ -97,6 +97,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(cli::CliState::default());
             // Cold-start half of the Phase 5.3 CLI contract -- the frontend isn't mounted
