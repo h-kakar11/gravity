@@ -15,13 +15,13 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
-    "react": "^18.3.1",
+    "react": "^19.2.8",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",
     "@testing-library/react": "^16.0.1",
-    "@types/react": "^18.3.12",
+    "@types/react": "^19.2.18",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "jsdom": "^25.0.1",
