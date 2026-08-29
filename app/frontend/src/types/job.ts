@@ -27,6 +27,8 @@ export interface JobSnapshot {
   id: string;
   type: JobType;
   state: JobState;
+  // Scheduling priority (issue #17): higher runs before lower among jobs still Queued.
+  priority: number;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

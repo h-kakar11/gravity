@@ -128,20 +128,43 @@ export default function DownloaderPage() {
   const canCancel = activeJob !== null && ACTIVE_STATES.has(activeJob.state);
   const canStartDownload = metadata !== null && outputDirectory.trim().length > 0 && !creating && !canCancel;
 
-  const handleInspect = useCallback(async () => {
-    setInspecting(true);
-    setInspectError(null);
-    setMetadata(null);
-    setSelectedFormatId(null);
-    try {
-      const { metadata: result } = await coreClient.inspectDownloadUrl(url.trim());
-      setMetadata(result);
-    } catch (err) {
-      setInspectError(asErrorInfo(err));
-    } finally {
-      setInspecting(false);
-    }
-  }, [url]);
+  // `urlOverride` lets a paste handler kick off inspection with the just-pasted text
+  // immediately, without waiting for a `setUrl` re-render to land in the `url` state this
+  // callback otherwise closes over (issue #62).
+  const handleInspect = useCallback(
+    async (urlOverride?: string) => {
+      const target = (urlOverride ?? url).trim();
+      if (!target) return;
+      setInspecting(true);
+      setInspectError(null);
+      setMetadata(null);
+      setSelectedFormatId(null);
+      try {
+        const { metadata: result } = await coreClient.inspectDownloadUrl(target);
+        setMetadata(result);
+      } catch (err) {
+        setInspectError(asErrorInfo(err));
+      } finally {
+        setInspecting(false);
+      }
+    },
+    [url],
+  );
+
+  // Auto-detect a pasted link and inspect it immediately instead of requiring a separate
+  // click on Inspect (issue #62). Only fires for something that already looks like an
+  // http(s) URL -- ValidateDownloadUrl/CanHandle on the core side is the real gate, this
+  // is just "don't try to auto-inspect someone pasting arbitrary text."
+  const handlePasteUrl = useCallback(
+    (e: React.ClipboardEvent<HTMLInputElement>) => {
+      if (canCancel || inspecting) return;
+      const pasted = e.clipboardData.getData("text").trim();
+      if (!/^https?:\/\/\S+$/i.test(pasted)) return;
+      setUrl(pasted);
+      void handleInspect(pasted);
+    },
+    [canCancel, inspecting, handleInspect],
+  );
 
   const handleDownload = useCallback(async () => {
     setCreating(true);
@@ -230,6 +253,7 @@ export default function DownloaderPage() {
             placeholder="https://..."
             value={url}
             onChange={(e) => setUrl(e.target.value)}
+            onPaste={handlePasteUrl}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !inspecting && url.trim() && !canCancel) void handleInspect();
             }}

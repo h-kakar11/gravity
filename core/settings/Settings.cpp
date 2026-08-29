@@ -188,7 +188,7 @@ void Settings::Validate() const {
                  "downloads.speedUnits");
 
     RequireInRange(processing.concurrentJobs, 1, 25, "processing.concurrentJobs");
-    RequireOneOf(processing.defaultCompressionQuality, {"low", "medium", "high"},
+    RequireOneOf(processing.defaultCompressionQuality, {"lowest", "low", "medium", "high", "ultra"},
                  "processing.defaultCompressionQuality");
 
     RequireOneOf(advanced.logLevel, {"DEBUG", "INFO", "WARNING", "ERROR"}, "advanced.logLevel");

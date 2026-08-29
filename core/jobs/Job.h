@@ -53,6 +53,13 @@ public:
     const JobId& Id() const { return id_; }
     JobType Type() const { return type_; }
 
+    // Scheduling priority (issue #17): higher runs before lower when both are Queued.
+    // Set once by the caller before SubmitJob() -- JobManager reads it only to decide
+    // queue order, never mutates it, so a plain atomic (no mutex_ involvement) is enough.
+    // Ties keep FIFO order among jobs of equal priority.
+    int Priority() const { return priority_; }
+    void SetPriority(int priority) { priority_ = priority; }
+
     // --- Thread-safe snapshots -----------------------------------------------------
     JobState State() const;
     Progress GetProgress() const;
@@ -146,6 +153,7 @@ private:
     std::optional<std::string> completedAt_;
 
     std::atomic<bool> cancellationRequested_{false};
+    std::atomic<int> priority_{0};
 
     StateChangedCallback onStateChanged_;
     ProgressCallback onProgress_;

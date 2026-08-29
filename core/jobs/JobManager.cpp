@@ -51,6 +51,7 @@ void JobManager::Shutdown() {
 
 JobId JobManager::SubmitJob(std::unique_ptr<Job> job) {
     const JobId id = job->Id();
+    const int priority = job->Priority();
     job->SetCallbacks(
         [this, id](JobState state) { HandleJobStateChanged(id, state); },
         [this, id](const Progress& progress) { HandleJobProgress(id, progress); });
@@ -58,7 +59,7 @@ JobId JobManager::SubmitJob(std::unique_ptr<Job> job) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         jobs_.emplace(id, std::move(job));
-        queue_.push_back(id);
+        InsertIntoQueueLocked(id, priority);
     }
     queueCv_.notify_one();
     return id;
@@ -67,6 +68,15 @@ JobId JobManager::SubmitJob(std::unique_ptr<Job> job) {
 Job* JobManager::LookupJobLocked(const JobId& id) const {
     auto it = jobs_.find(id);
     return it == jobs_.end() ? nullptr : it->second.get();
+}
+
+void JobManager::InsertIntoQueueLocked(const JobId& id, int priority) {
+    auto it = queue_.begin();
+    for (; it != queue_.end(); ++it) {
+        const Job* queued = LookupJobLocked(*it);
+        if (queued && queued->Priority() < priority) break;
+    }
+    queue_.insert(it, id);
 }
 
 void JobManager::ThrowNotFound(const JobId& id) const {
@@ -86,6 +96,7 @@ JobManager::JobSnapshot JobManager::SnapshotOf(const Job& job) const {
     snapshot.id = job.Id();
     snapshot.type = job.Type();
     snapshot.state = job.State();
+    snapshot.priority = job.Priority();
     snapshot.progress = job.GetProgress();
     snapshot.error = job.GetError();
     snapshot.result = job.GetResult();
@@ -101,6 +112,7 @@ nlohmann::json JobManager::JobSnapshot::ToJson() const {
     json["id"] = id;
     json["type"] = ToWireString(type);
     json["state"] = ToWireString(state);
+    json["priority"] = priority;
     json["createdAt"] = createdAt;
     if (startedAt) json["startedAt"] = *startedAt;
     if (completedAt) json["completedAt"] = *completedAt;
@@ -172,12 +184,13 @@ void JobManager::RetryJob(const JobId& id) {
     }
     if (job->State() != JobState::Failed)
         ThrowInvalidOperation(id, "Only a Failed job can be retried");
+    const int priority = job->Priority();
     // MarkRetrying() fires the state-changed callback, which re-enters JobManager (see
     // HandleJobStateChanged) and must not be called while mutex_ is held.
     job->MarkRetrying();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push_back(id);
+        InsertIntoQueueLocked(id, priority);
     }
     queueCv_.notify_one();
 }
