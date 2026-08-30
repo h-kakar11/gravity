@@ -166,7 +166,7 @@ TEST(SettingsTest, FromJsonRejectsOutOfRangeAndUnrecognizedValues) {
         {"concurrentDownloadsTooHigh", [](Settings& s) { s.downloads.concurrentDownloads = 50; }},
         {"speedUnitsBogus", [](Settings& s) { s.downloads.speedUnits = "lightyears"; }},
         {"compressionQualityBogus",
-         [](Settings& s) { s.processing.defaultCompressionQuality = "ultra"; }},
+         [](Settings& s) { s.processing.defaultCompressionQuality = "super"; }},
         {"logLevelBogus", [](Settings& s) { s.advanced.logLevel = "VERBOSE"; }},
         {"ffmpegPathRelative", [](Settings& s) { s.advanced.ffmpegPath = "..\\..\\ffmpeg.exe"; }},
         {"downloadDirectoryRelative", [](Settings& s) { s.downloads.downloadDirectory = "Downloads"; }},
