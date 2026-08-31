@@ -572,3 +572,34 @@ fix blind, which risks a second wasted round-trip if the guess is wrong.
   not after a second launch"). Confirming this needs live reproduction with logging
   added to the `CloseRequested` branch to see whether it's reached at all on the second
   close; not something to guess at further from source alone.
+
+### Test coverage (#27) -- one well-scoped addition, the rest deferred
+The issue lists six gaps in descending value order: IPC-loop subprocess tests, JobManager
+stress/concurrency tests, a real-dependency integration tier, Rust bridge tests, frontend
+tests, and making `MockFileSystem` model reality faithfully.
+
+- **`MockFileSystem::Delete` was already fixed.** Checked before doing anything else --
+  it already mirrors `LocalFileSystem::Delete`'s recursive `remove_all` semantics (own
+  comment confirms this), contrary to the issue's claim. No longer a gap.
+- **Delivered this pass: `coreClient.test.ts`.** `toErrorInfo` (the four-to-five-branch
+  error-normalization function the earlier frontend survey flagged as untested) isn't
+  exported, so the new suite exercises it through the public `sendCommand` API instead --
+  mocking `@tauri-apps/api/core`'s `invoke` to reject with each shape `toErrorInfo` has to
+  handle (already-`ErrorInfo`-shaped, JSON-encoded `ErrorInfo`, JSON but wrong shape, a
+  plain non-JSON string, and a non-string/non-`ErrorInfo` value like a raw `Error`), plus
+  one happy-path resolution. Chosen over the issue's higher-listed items specifically
+  because frontend CI has been reliably green and executing real assertions all session,
+  giving genuine pass/fail confidence -- unlike C++ (compile-only confidence in this
+  environment) or Rust (currently blocked by the unrelated, still-open
+  `STATUS_ENTRYPOINT_NOT_FOUND` CI investigation, so a new Rust test could be confirmed to
+  *compile* via CI but not confirmed to *pass*, since the whole test binary crashes on
+  launch before any test body runs).
+- **Deferred:** IPC-loop subprocess tests (needs a harness that spawns
+  `mediatool-core.exe` for real and speaks NDJSON to it -- doesn't exist yet, real
+  infrastructure work, not an incremental addition), JobManager stress/concurrency tests
+  (submit/cancel races, concurrency > 1, shutdown-with-queue -- genuinely valuable but each
+  needs careful hand-tracing against `JobManager`'s actual threading model to write
+  correctly, the same category of risk Phase D's `SchedulerCore` work was deferred for),
+  Rust bridge tests for `core_bridge.rs` (zero today; blocked on the same CI-execution
+  problem above for confirming they'd actually pass, not just compile), and the
+  real-dependency integration tier (explicitly the issue's own lowest-priority item).
