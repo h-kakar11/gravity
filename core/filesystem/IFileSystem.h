@@ -25,8 +25,12 @@ public:
     // is available; leaves them std::nullopt otherwise (never throws for that reason).
     virtual FileInfo Inspect(const std::string& path) const = 0;
 
-    virtual void Copy(const std::string& from, const std::string& to) = 0;
-    virtual void Move(const std::string& from, const std::string& to) = 0;
+    // Renames `path` to `newName` (a bare filename, joined onto `path`'s own parent
+    // directory -- not an arbitrary destination path). Copy() and Move() were removed
+    // here (#39, dead-code cleanup): neither had a production caller once
+    // DownloadJob/MediaProcessingJob's crash-safe promotion step (#10) settled on Rename
+    // as the one file-relocation primitive it actually needs, and a narrower interface is
+    // easier to mock faithfully -- see docs/decisions.md.
     virtual void Rename(const std::string& path, const std::string& newName) = 0;
 
     // Recursive: removes `path` and, if it is a directory, everything inside it.
@@ -41,8 +45,6 @@ public:
     virtual void DeleteFile(const std::string& path) = 0;
 
     virtual void CreateDirectory(const std::string& path) = 0;
-
-    virtual std::uint64_t CalculateSize(const std::string& path) const = 0;  // recursive for directories
 
     virtual std::string GetExtension(const std::string& path) const = 0;   // no leading dot, lowercase
     virtual std::string GetFilename(const std::string& path) const = 0;    // with extension, no directory

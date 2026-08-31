@@ -98,35 +98,6 @@ FileInfo LocalFileSystem::Inspect(const std::string& path) const {
     return info;
 }
 
-void LocalFileSystem::Copy(const std::string& from, const std::string& to) {
-    std::error_code ec;
-    stdfs::copy(from, to, ec);
-    if (ec) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_COPY_FAILED", errors::ErrorCategory::EngineFailure,
-            "Could not copy file.", "from=" + from + " to=" + to + " error=" + ec.message()));
-    }
-}
-
-void LocalFileSystem::Move(const std::string& from, const std::string& to) {
-    std::error_code ec;
-    stdfs::rename(from, to, ec);
-    if (!ec) {
-        return;
-    }
-    // rename() fails with EXDEV across volumes; fall back to copy + delete rather than
-    // surfacing that as an error, since "move" is the operation the caller actually asked for.
-    std::error_code copyEc;
-    stdfs::copy(from, to, stdfs::copy_options::overwrite_existing, copyEc);
-    if (copyEc) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_MOVE_FAILED", errors::ErrorCategory::EngineFailure,
-            "Could not move file.", "from=" + from + " to=" + to + " error=" + copyEc.message()));
-    }
-    std::error_code removeEc;
-    stdfs::remove(from, removeEc);  // best-effort; destination already has the data
-}
-
 void LocalFileSystem::Rename(const std::string& path, const std::string& newName) {
     const stdfs::path target = stdfs::path(path).parent_path() / newName;
     std::error_code ec;
@@ -172,41 +143,6 @@ void LocalFileSystem::CreateDirectory(const std::string& path) {
             "E_CREATE_DIR_FAILED", errors::ErrorCategory::PermissionError,
             "Could not create directory.", "path=" + path + " error=" + ec.message()));
     }
-}
-
-std::uint64_t LocalFileSystem::CalculateSize(const std::string& path) const {
-    std::error_code existsEc;
-    if (!stdfs::exists(path, existsEc)) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_FILE_NOT_FOUND", errors::ErrorCategory::FileNotFound,
-            "Path not found: " + path, existsEc.message()));
-    }
-
-    std::error_code isDirEc;
-    if (!stdfs::is_directory(path, isDirEc)) {
-        std::error_code sizeEc;
-        const auto size = stdfs::file_size(path, sizeEc);
-        return sizeEc ? 0 : static_cast<std::uint64_t>(size);
-    }
-
-    std::uint64_t total = 0;
-    std::error_code iterEc;
-    for (auto it = stdfs::recursive_directory_iterator(
-             path, stdfs::directory_options::skip_permission_denied, iterEc);
-         it != stdfs::recursive_directory_iterator(); it.increment(iterEc)) {
-        if (iterEc) {
-            break;
-        }
-        std::error_code fileTypeEc;
-        if (it->is_regular_file(fileTypeEc) && !fileTypeEc) {
-            std::error_code sizeEc;
-            const auto size = it->file_size(sizeEc);
-            if (!sizeEc) {
-                total += static_cast<std::uint64_t>(size);
-            }
-        }
-    }
-    return total;
 }
 
 std::string LocalFileSystem::GetExtension(const std::string& path) const {

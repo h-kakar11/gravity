@@ -10,7 +10,6 @@
 
 namespace stdfs = std::filesystem;
 using mediatool::filesystem::DeduplicateBaseName;
-using mediatool::filesystem::DeduplicateFilename;
 using mediatool::filesystem::IsJobArtifactOf;
 using mediatool::filesystem::LocalFileSystem;
 using mediatool::filesystem::SanitizeWindowsFilename;
@@ -158,34 +157,14 @@ protected:
 
 }  // namespace
 
-TEST_F(FilenameDedupTest, ReturnsDesiredPathWhenFree) {
-    const std::string desired = (stdfs::path(dir_) / "video.mp4").string();
-    EXPECT_EQ(DeduplicateFilename(desired, fs_), desired);
-}
-
-TEST_F(FilenameDedupTest, NumbersSequentiallyOnCollision) {
-    Touch("video.mp4");
-    const std::string desired = (stdfs::path(dir_) / "video.mp4").string();
-    const std::string expected1 = (stdfs::path(dir_) / "video (1).mp4").string();
-    EXPECT_EQ(DeduplicateFilename(desired, fs_), expected1);
-
-    Touch("video (1).mp4");
-    const std::string expected2 = (stdfs::path(dir_) / "video (2).mp4").string();
-    EXPECT_EQ(DeduplicateFilename(desired, fs_), expected2);
-
-    Touch("video (2).mp4");
-    const std::string expected3 = (stdfs::path(dir_) / "video (3).mp4").string();
-    EXPECT_EQ(DeduplicateFilename(desired, fs_), expected3);
-}
-
 TEST_F(FilenameDedupTest, DeduplicateBaseNameReturnsDesiredNameWhenFree) {
     EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video");
 }
 
 TEST_F(FilenameDedupTest, DeduplicateBaseNameNumbersSequentiallyRegardlessOfExtension) {
-    // Unlike DeduplicateFilename, the caller doesn't know the final extension yet (spec
-    // section 29 -- e.g. yt-dlp only decides the merge container after downloading), so
-    // collisions must be detected against ANY extension sharing the base name.
+    // The caller doesn't know the final extension yet (spec section 29 -- e.g. yt-dlp
+    // only decides the merge container after downloading), so collisions must be
+    // detected against ANY extension sharing the base name.
     Touch("video.mp4");
     EXPECT_EQ(DeduplicateBaseName(dir_, "video", fs_), "video (1)");
 

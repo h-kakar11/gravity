@@ -488,3 +488,48 @@ section 47. Newest entries at the bottom of each phase's section.
   `MockProcessRunner`'s existing `MockProcess` always completes synchronously on the first
   `WaitFor()` call, so it can't represent "still running" long enough to reach either
   branch of the cancel path.
+
+### Dead-code cleanup (#39): delete orphaned, don't relabel everything as scaffolding
+Per the issue's own three-way categorization -- category 1 (deliberate scaffolding:
+`IImageEngine`, `IDocumentConverter`, unimplemented `JobType` values) is untouched, exactly
+as the issue itself recommends.
+
+- **`AtomicWriter` -- deleted, not kept as category 2.** The issue filed this as "written
+  for a feature that's genuinely next" (#10's crash-safety work). That feature has now
+  actually landed (this pass, Phases B/C above) and deliberately does NOT use
+  `AtomicWriter`: its `Commit()` calls `std::filesystem::rename` directly, bypassing the
+  `IFileSystem` abstraction this codebase's job/test layer is built on, which breaks every
+  `MockFileSystem`-based test the moment anything tries to use it (the temp file it expects
+  genuinely never exists on the real filesystem under a mock). `IFileSystem::Rename` does
+  the same job and stays mockable. Rather than leave a class around whose own design turned
+  out to be the wrong shape for how this codebase actually does file operations, it's
+  deleted -- recoverable from git history if a future need for real, non-mockable atomic
+  writes ever arises (e.g. outside the job-execution path this pass didn't touch).
+- **`TempDirectory` -- kept, still category 2.** Genuinely deferred (not abandoned) as part
+  of #10's remaining artifact-reconciliation work -- see that entry above.
+- **`RemoveJob` -- graduated out of category 2 entirely.** Now reachable from the frontend
+  (Phase D's "Clear completed" button) -- no longer dead code, nothing further to do.
+- **`FFmpegProgressParser` -- the issue's own claim was already stale.** It said "nothing
+  calls it, because no encode exists to report progress for (#15)" -- Convert/Compress
+  were already implemented and already call it (`FFmpegEngine.cpp`) well before this pass;
+  confirmed via grep, no code change needed here.
+- **`DeduplicateFilename` -- deleted (category 3, exactly as the issue recommends).**
+  Confirmed via grep: no production caller anywhere, fully superseded by
+  `DeduplicateBaseName`. Removed the function, its declaration, and its two dedicated
+  tests from `FilenameSanitizerTest.cpp`; `kMaxDeduplicationAttempts` (the shared
+  iteration-cap constant) stays, since `DeduplicateBaseName` still uses it.
+- **`WithPlaylistIndex` -- NOT deleted, contrary to the issue's suggestion.** Already the
+  subject of an explicit, prior decision recorded earlier in this file ("Playlist URLs:
+  rejected... issue #41"): kept parked deliberately so playlist support doesn't need to
+  re-derive its numbering scheme from scratch. This pass respects that standing decision
+  rather than re-litigating it under a different issue number.
+- **`IFileSystem::Copy`/`Move`/`CalculateSize` -- removed from the interface.** Confirmed
+  via grep: no caller anywhere outside their own `LocalFileSystem`/`MockFileSystem`
+  implementations and one `LocalFileSystemTest.cpp` test (updated, not deleted --
+  `RenameDelete` now covers what `CopyMoveRenameDelete` used to, minus the two removed
+  operations). `MockFileSystem::Rename` no longer delegates through a private `Move`/`Copy`
+  pair; its logic is now inlined directly, since those were the interface's own
+  implementation detail, not something anything else called. Matches the issue's own
+  stated reasoning: a narrower interface is easier to mock faithfully, which is the
+  concrete lesson `MockFileSystem`/`LocalFileSystem`'s prior `Delete` semantics divergence
+  (#3) already taught this codebase once.

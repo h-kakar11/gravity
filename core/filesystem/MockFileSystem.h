@@ -21,13 +21,10 @@ class MockFileSystem : public IFileSystem {
 public:
     bool Exists(const std::string& path) const override;
     FileInfo Inspect(const std::string& path) const override;
-    void Copy(const std::string& from, const std::string& to) override;
-    void Move(const std::string& from, const std::string& to) override;
     void Rename(const std::string& path, const std::string& newName) override;
     void Delete(const std::string& path) override;
     void DeleteFile(const std::string& path) override;
     void CreateDirectory(const std::string& path) override;
-    std::uint64_t CalculateSize(const std::string& path) const override;
     std::string GetExtension(const std::string& path) const override;
     std::string GetFilename(const std::string& path) const override;
     std::string GetParentDirectory(const std::string& path) const override;

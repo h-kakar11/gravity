@@ -177,15 +177,18 @@ network-failure detection).
 place Windows-illegal-filename handling lives — the UI never sanitizes filenames itself
 (spec section 21).
 
-**Partially true as of the #10/#39 hardening pass**: `AtomicWriter` (the "write to a temp
-file, rename over the real path only on success" pattern, spec section 13) is now wired
-into `MediaProcessingJob` -- ffmpeg writes to a `.processing` temp name in the output
-directory, and only a fully-verified result gets renamed to the real name.
-`DownloadJob` applies the same write-then-rename principle but not the `AtomicWriter`
-class itself (yt-dlp's own merge step means the final extension isn't known until the
-download completes, so there's no single path to construct an `AtomicWriter` around
-upfront) -- it downloads under a `.partial`-marked base name instead and renames to the
-clean name as the last step before success.
+**True as of the #10/#39 hardening pass, via a different mechanism than this section used
+to describe**: the "write to a temp name, rename over the real path only on success"
+pattern (spec section 13) is now real for both job types -- `MediaProcessingJob` writes to
+a `.processing` temp name in the output directory; `DownloadJob` downloads under a
+`.partial`-marked base name (yt-dlp's own merge step means the final extension isn't known
+until the download completes, so there's no single fixed path to build a temp name around
+upfront the way `MediaProcessingJob` can). Both promote to the clean name via
+`IFileSystem::Rename` only after every verification step passes. The dedicated
+`AtomicWriter` class this section previously pointed to for this was deleted (#39): its
+`Commit()` called `std::filesystem::rename` directly, bypassing `IFileSystem`, which broke
+every `MockFileSystem`-based test the moment it was actually wired in -- `IFileSystem::Rename`
+does the same job and stays mockable, see `docs/decisions.md`.
 
 `TempDirectory` (an isolated per-job working directory under
 `%LOCALAPPDATA%\Gravity\temp\job-<id>\`) is still not wired into either job type -- it

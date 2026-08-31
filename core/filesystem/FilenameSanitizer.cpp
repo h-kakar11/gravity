@@ -17,7 +17,7 @@ namespace mediatool::filesystem {
 namespace {
 
 constexpr std::size_t kMaxFilenameCodepoints = 200;
-// Sanity bound on how many "(N)" suffixes DeduplicateFilename will try before giving
+// Sanity bound on how many "(N)" suffixes DeduplicateBaseName will try before giving
 // up -- guards against an IFileSystem implementation that always reports Exists()==true
 // (a bug) turning into an infinite loop rather than a normal collision sequence.
 constexpr int kMaxDeduplicationAttempts = 10000;
@@ -143,30 +143,6 @@ std::string TruncateBaseNameForMaxPath(const std::string& directory, const std::
     std::string truncated = TruncateUtf8Bytes(baseName, allowed);
     TrimTrailingDotsAndSpaces(truncated);
     return truncated.empty() ? "untitled" : truncated;
-}
-
-std::string DeduplicateFilename(const std::string& desiredPath, const IFileSystem& fs) {
-    if (!fs.Exists(desiredPath)) {
-        return desiredPath;
-    }
-
-    const stdfs::path p(desiredPath);
-    const stdfs::path parent = p.parent_path();
-    const std::string stem = p.stem().string();
-    const std::string ext = p.extension().string();  // includes leading dot, or empty
-
-    for (int i = 1; i <= kMaxDeduplicationAttempts; ++i) {
-        const stdfs::path candidate = parent / (stem + " (" + std::to_string(i) + ")" + ext);
-        std::string candidateStr = candidate.string();
-        if (!fs.Exists(candidateStr)) {
-            return candidateStr;
-        }
-    }
-
-    throw errors::MediaToolException(errors::ErrorInfo::Make(
-        "E_DEDUP_EXHAUSTED", errors::ErrorCategory::Unknown,
-        "Could not find a free filename for " + desiredPath,
-        "Exceeded " + std::to_string(kMaxDeduplicationAttempts) + " numbered variants"));
 }
 
 namespace {

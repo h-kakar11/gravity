@@ -30,11 +30,9 @@ std::string SanitizeWindowsFilename(const std::string& rawTitle);
 // that case -- Windows will surface its own path-length error at write time).
 std::string TruncateBaseNameForMaxPath(const std::string& directory, const std::string& baseName);
 
-// Returns `desiredPath` unchanged if it doesn't already exist; otherwise finds the
-// first free "<name> (N).<ext>" variant by probing fs.Exists() with increasing N.
-std::string DeduplicateFilename(const std::string& desiredPath, const IFileSystem& fs);
-
-// Like DeduplicateFilename, but for callers who don't know the final extension yet
+// Like DeduplicateBaseName's sibling used to be (DeduplicateFilename, removed -- no
+// production caller remained once DeduplicateBaseName superseded it, see docs/decisions.md
+// "Dead code cleanup"), but for callers who don't know the final extension yet
 // (e.g. a downloader whose output container is chosen by an external tool after the
 // fact -- spec section 29). Returns `desiredBaseName` unchanged if no file in
 // `directory` starts with it; otherwise finds the first "<name> (N)" variant with no

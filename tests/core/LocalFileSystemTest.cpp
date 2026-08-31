@@ -95,33 +95,12 @@ TEST_F(LocalFileSystemTest, GetExtensionFilenameParentDirectory) {
     EXPECT_EQ(fs_.GetParentDirectory(path), root_);
 }
 
-TEST_F(LocalFileSystemTest, CalculateSizeForSingleFile) {
-    const std::string path = WriteFile("blob.bin", "0123456789");
-    EXPECT_EQ(fs_.CalculateSize(path), 10u);
-}
-
-TEST_F(LocalFileSystemTest, CalculateSizeRecursesIntoDirectories) {
-    WriteFile("a.txt", "12345");
-    stdfs::create_directories(stdfs::path(root_) / "sub");
-    WriteFile("sub/b.txt", "1234567890");
-    EXPECT_EQ(fs_.CalculateSize(root_), 15u);
-}
-
-TEST_F(LocalFileSystemTest, CopyMoveRenameDelete) {
+TEST_F(LocalFileSystemTest, RenameDelete) {
     const std::string original = WriteFile("original.txt", "hello");
-    const std::string copyDest = (stdfs::path(root_) / "copy.txt").string();
-    fs_.Copy(original, copyDest);
-    EXPECT_TRUE(fs_.Exists(original));
-    EXPECT_TRUE(fs_.Exists(copyDest));
 
-    const std::string moveDest = (stdfs::path(root_) / "moved.txt").string();
-    fs_.Move(copyDest, moveDest);
-    EXPECT_FALSE(fs_.Exists(copyDest));
-    EXPECT_TRUE(fs_.Exists(moveDest));
-
-    fs_.Rename(moveDest, "renamed.txt");
+    fs_.Rename(original, "renamed.txt");
     const std::string renamed = (stdfs::path(root_) / "renamed.txt").string();
-    EXPECT_FALSE(fs_.Exists(moveDest));
+    EXPECT_FALSE(fs_.Exists(original));
     EXPECT_TRUE(fs_.Exists(renamed));
 
     fs_.Delete(renamed);

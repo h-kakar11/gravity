@@ -18,26 +18,18 @@ FileInfo MockFileSystem::Inspect(const std::string& path) const {
     return it->second;
 }
 
-void MockFileSystem::Copy(const std::string& from, const std::string& to) {
-    const auto it = files_.find(from);
-    if (it == files_.end()) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_FILE_NOT_FOUND", errors::ErrorCategory::FileNotFound, "File not found: " + from));
-    }
-    FileInfo copy = it->second;
-    copy.path = to;
-    copy.filename = paths::GetFilename(to);
-    files_[to] = copy;
-}
-
-void MockFileSystem::Move(const std::string& from, const std::string& to) {
-    Copy(from, to);
-    files_.erase(from);
-}
-
 void MockFileSystem::Rename(const std::string& path, const std::string& newName) {
     const std::string target = paths::Join(paths::GetParentDirectory(path), newName);
-    Move(path, target);
+    const auto it = files_.find(path);
+    if (it == files_.end()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_FILE_NOT_FOUND", errors::ErrorCategory::FileNotFound, "File not found: " + path));
+    }
+    FileInfo renamed = it->second;
+    renamed.path = target;
+    renamed.filename = paths::GetFilename(target);
+    files_[target] = renamed;
+    files_.erase(path);
 }
 
 namespace {
@@ -81,11 +73,6 @@ void MockFileSystem::DeleteFile(const std::string& path) {
 void MockFileSystem::CreateDirectory(const std::string& path) {
     directories_.insert(path);
     createdDirectories_.push_back(path);
-}
-
-std::uint64_t MockFileSystem::CalculateSize(const std::string& path) const {
-    const auto it = files_.find(path);
-    return it == files_.end() ? 0 : it->second.sizeBytes;
 }
 
 std::string MockFileSystem::GetExtension(const std::string& path) const {
