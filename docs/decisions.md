@@ -533,3 +533,42 @@ as the issue itself recommends.
   stated reasoning: a narrower interface is easier to mock faithfully, which is the
   concrete lesson `MockFileSystem`/`LocalFileSystem`'s prior `Delete` semantics divergence
   (#3) already taught this codebase once.
+
+### User-reported bugs #52, #61 -- investigated, deferred to live Windows testing
+Both require reproducing real Windows Explorer/WebView2 shell behavior this environment
+has no way to run or observe -- documenting the investigation rather than guessing at a
+fix blind, which risks a second wasted round-trip if the guess is wrong.
+
+- **#52 -- mp4/mp3/wav context-menu buttons bring up "choose an app to open this file
+  in" instead of converting/compressing.** Reviewed `installer/hooks.nsh` (the
+  `NSIS_HOOK_POSTINSTALL` registry macros), `tauri.conf.json` (confirms
+  `installerHooks` is actually wired to that file, ruling out the hooks silently never
+  running at all), and `cli.rs`'s `--convert`/`--compress` argv parsing end to end --
+  all structurally correct on manual review: `productName` is `"Gravity"` matching the
+  `$INSTDIR\Gravity.exe` path the registry commands reference, the
+  `HKCU\...\SystemFileAssociations\<ext>\shell\GravityConvert\command` string is
+  correctly quoted, and `parse_cli_args`/`store_startup_action`/`handle_second_instance`
+  all handle the resulting argv correctly. "Choose an app to open this file in" is a
+  Windows Explorer fallback specifically for a shell command Explorer couldn't execute
+  (most commonly: the target executable path in the registry doesn't actually resolve at
+  click time) -- a live install-and-right-click test is needed to see the *actual*
+  registry values written on a real machine (`regedit` -> `HKCU\Software\Classes\
+  SystemFileAssociations\.mp4\shell\GravityConvert\command`) and compare against what
+  `hooks.nsh` intends, since nothing in the source itself explains the symptom.
+- **#61 -- close-to-tray unreliable after single-instance re-activation.** Traced the
+  full path: `lib.rs`'s `.setup()` registers `window.on_window_event(...)` exactly once
+  on the main window, intercepting `CloseRequested` and calling
+  `tray::should_minimize_to_tray()` before deciding to `hide()` instead of closing.
+  `cli::handle_second_instance()` (a second launch handed to the already-running
+  instance) calls `tray::show_main_window()`, which reuses the *same* window handle via
+  `app.get_webview_window("main")` -- it doesn't recreate one, so the originally
+  -registered `on_window_event` closure should still be attached to it. The one
+  concrete, testable hypothesis from reading the code: if Tauri/WebView2 ever
+  internally recreates the underlying native window on a hide-then-show cycle in some
+  configuration (rather than truly just hiding it), the closure registered once at
+  startup would silently stop firing on that recreated window, and the *second* close
+  would fall through to Tauri's default close-and-quit behavior instead of the
+  intercepted hide-to-tray path -- matching the exact reported symptom ("worked once,
+  not after a second launch"). Confirming this needs live reproduction with logging
+  added to the `CloseRequested` branch to see whether it's reached at all on the second
+  close; not something to guess at further from source alone.

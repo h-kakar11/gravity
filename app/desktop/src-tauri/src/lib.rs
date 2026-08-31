@@ -129,6 +129,11 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Diagnostic for issue #61 (close-to-tray unreliable after
+                        // single-instance re-activation): this line alone tells the next
+                        // live test whether this closure is even still reached on a
+                        // second close, which the code alone can't answer from here.
+                        log::info!("main window CloseRequested (minimizeToTrayOnClose check follows)");
                         if tray::should_minimize_to_tray(&app_handle) {
                             api.prevent_close();
                             if let Some(window) = app_handle.get_webview_window("main") {
