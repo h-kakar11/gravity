@@ -8,6 +8,7 @@
 // throw errors::MediaToolException{ErrorCategory::UnsupportedFormat, ...}; still out of
 // scope (spec section 16: "do NOT implement every operation now").
 
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -57,6 +58,16 @@ private:
     process::IProcessRunner& runner_;
     std::optional<std::string> overrideFfmpegPath_;
     std::optional<std::string> overrideFfprobePath_;
+    // The three caches below are filled lazily on first use, and "first use" can now come
+    // from several threads at once: MediaProcessingJob runs on JobManager's worker pool,
+    // and inspectFile runs on the IPC request executor. Two threads initializing the same
+    // cache is a data race, and for AvailableEncoders() -- which hands out a reference into
+    // its cache -- it is a reference to an object another thread is assigning to. One
+    // std::once_flag per cache makes each initialization happen exactly once, and every
+    // later reader sees a value that will never be written again.
+    mutable std::once_flag encodersOnce_;
+    mutable std::once_flag ffmpegPathOnce_;
+    mutable std::once_flag ffprobePathOnce_;
     mutable std::optional<std::set<std::string>> availableEncodersCache_;
     // Outer optional = "not yet resolved this process lifetime"; inner optional = the
     // resolved path itself (DiscoverFfmpegPath/DiscoverFfprobePath's own "not found" case).

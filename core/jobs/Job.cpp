@@ -1,6 +1,5 @@
 #include "core/jobs/Job.h"
 
-#include "core/errors/MediaToolException.h"
 #include "core/jobs/JobStateMachine.h"
 
 namespace mediatool::jobs {
@@ -66,6 +65,16 @@ std::optional<std::string> Job::CompletedAt() const {
     return completedAt_;
 }
 
+std::vector<JobId> Job::DependsOn() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dependsOn_;
+}
+
+void Job::SetDependsOn(std::vector<JobId> dependsOn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dependsOn_ = std::move(dependsOn);
+}
+
 void Job::SetCallbacks(StateChangedCallback onStateChanged, ProgressCallback onProgress) {
     std::lock_guard<std::mutex> lock(mutex_);
     onStateChanged_ = std::move(onStateChanged);
@@ -90,18 +99,17 @@ void Job::FireProgress(const Progress& progress) {
     if (callback) callback(progress);
 }
 
-void Job::ThrowInvalidTransition(JobState from, JobState to) const {
-    throw errors::MediaToolException(errors::ErrorInfo::Make(
-        "E_INVALID_JOB_TRANSITION", errors::ErrorCategory::Unknown,
-        "Internal error: invalid job state transition",
-        "Job " + id_ + " cannot transition from " + ToWireString(from) + " to " +
-            ToWireString(to)));
-}
-
-bool Job::TransitionLocked(JobState to) {
-    if (!CanTransition(state_, to)) return false;
+TransitionResult Job::TransitionLocked(JobState to) {
+    // Order matters: "already there" and "already finished elsewhere" are both normal
+    // outcomes under concurrency and must be distinguishable from a genuinely illegal
+    // request, which is the only one of the three that indicates a bug. CanTransition()
+    // rejects every self-transition, so these two cases have to be answered before
+    // consulting it.
+    if (state_ == to) return TransitionResult::AlreadyInState;
+    if (IsTerminalState(state_)) return TransitionResult::AlreadyTerminal;
+    if (!CanTransition(state_, to)) return TransitionResult::InvalidTransition;
     state_ = to;
-    return true;
+    return TransitionResult::Success;
 }
 
 void Job::ReportProgress(Progress progress) {
@@ -130,131 +138,139 @@ bool Job::WaitWhilePaused() {
     return !cancellationRequested_;
 }
 
-void Job::RequestCancel() {
+TransitionResult Job::RequestCancel() {
     bool transitionedHere = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (IsTerminalState(state_)) return;  // already done, nothing to do
+        // Already finished (including already cancelled): nothing to do, and saying so is
+        // not an error -- see TransitionResult::AlreadyTerminal.
+        if (IsTerminalState(state_)) return TransitionResult::AlreadyTerminal;
         cancellationRequested_ = true;
         if (state_ == JobState::Queued) {
             // No worker thread will ever run Execute() for a still-Queued job, so
             // nothing else will ever notice the flag -- finalize the transition here.
-            transitionedHere = TransitionLocked(JobState::Cancelled);
+            transitionedHere = TransitionLocked(JobState::Cancelled) == TransitionResult::Success;
             if (transitionedHere) completedAt_ = clock_.NowIso8601Utc();
         }
     }
     pauseCv_.notify_all();  // wake WaitWhilePaused() if a paused job is being cancelled
     OnCancel();
     if (transitionedHere) FireStateChanged(JobState::Cancelled);
+    // Either the job is now Cancelled, or a worker thread has been told to stop and will
+    // finalize it. Both are the caller's request being honored.
+    return TransitionResult::Success;
 }
 
-void Job::RequestPause() {
-    if (!SupportsPause()) return;
-    bool transitioned = false;
+TransitionResult Job::RequestPause() {
+    if (!SupportsPause()) return TransitionResult::InvalidTransition;
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == JobState::Running) transitioned = TransitionLocked(JobState::Paused);
+        result = TransitionLocked(JobState::Paused);
     }
-    if (transitioned) {
+    if (result == TransitionResult::Success) {
         OnPause();
         FireStateChanged(JobState::Paused);
     }
+    return result;
 }
 
-void Job::RequestResume() {
-    bool transitioned = false;
+TransitionResult Job::RequestResume() {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == JobState::Paused) transitioned = TransitionLocked(JobState::Running);
+        // Guarded explicitly rather than leaning on the transition table: RUNNING is also
+        // reachable from RETRYING, and a resumeJob call must never be able to drive a
+        // retrying job into Running behind the worker thread's back.
+        result = state_ == JobState::Paused ? TransitionLocked(JobState::Running)
+                                            : (state_ == JobState::Running
+                                                   ? TransitionResult::AlreadyInState
+                                                   : TransitionResult::InvalidTransition);
     }
-    if (transitioned) {
+    if (result == TransitionResult::Success) {
         pauseCv_.notify_all();
         OnResume();
         FireStateChanged(JobState::Running);
     }
+    return result;
 }
 
-void Job::MarkStarting() {
-    JobState previous;
-    bool transitioned;
+TransitionResult Job::MarkStarting() {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        previous = state_;
-        transitioned = TransitionLocked(JobState::Starting);
+        result = TransitionLocked(JobState::Starting);
     }
-    if (!transitioned) ThrowInvalidTransition(previous, JobState::Starting);
-    FireStateChanged(JobState::Starting);
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Starting);
+    return result;
 }
 
-void Job::MarkRunning() {
-    JobState previous;
-    bool transitioned;
+TransitionResult Job::MarkRunning() {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        previous = state_;
-        transitioned = TransitionLocked(JobState::Running);
-        if (transitioned && !startedAt_) startedAt_ = clock_.NowIso8601Utc();
+        result = TransitionLocked(JobState::Running);
+        if (result == TransitionResult::Success && !startedAt_) startedAt_ = clock_.NowIso8601Utc();
     }
-    if (!transitioned) ThrowInvalidTransition(previous, JobState::Running);
-    FireStateChanged(JobState::Running);
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Running);
+    return result;
 }
 
-void Job::MarkCompleted() {
-    JobState previous;
-    bool transitioned;
+TransitionResult Job::MarkCompleted() {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        previous = state_;
-        transitioned = TransitionLocked(JobState::Completed);
-        if (transitioned) completedAt_ = clock_.NowIso8601Utc();
+        result = TransitionLocked(JobState::Completed);
+        if (result == TransitionResult::Success) completedAt_ = clock_.NowIso8601Utc();
     }
-    if (!transitioned) ThrowInvalidTransition(previous, JobState::Completed);
-    FireStateChanged(JobState::Completed);
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Completed);
+    return result;
 }
 
-void Job::MarkFailed(errors::ErrorInfo error) {
-    JobState previous;
-    bool transitioned;
+TransitionResult Job::MarkFailed(errors::ErrorInfo error) {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        previous = state_;
-        transitioned = TransitionLocked(JobState::Failed);
-        if (transitioned) {
+        result = TransitionLocked(JobState::Failed);
+        if (result == TransitionResult::Success) {
             error_ = std::move(error);
             completedAt_ = clock_.NowIso8601Utc();
         }
     }
-    if (!transitioned) ThrowInvalidTransition(previous, JobState::Failed);
-    FireStateChanged(JobState::Failed);
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Failed);
+    return result;
 }
 
-void Job::MarkCancelled() {
-    JobState previous;
-    bool transitioned;
+TransitionResult Job::MarkCancelled() {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        previous = state_;
-        transitioned = TransitionLocked(JobState::Cancelled);
-        if (transitioned) completedAt_ = clock_.NowIso8601Utc();
+        result = TransitionLocked(JobState::Cancelled);
+        if (result == TransitionResult::Success) completedAt_ = clock_.NowIso8601Utc();
     }
-    if (!transitioned) ThrowInvalidTransition(previous, JobState::Cancelled);
-    FireStateChanged(JobState::Cancelled);
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Cancelled);
+    return result;
 }
 
-void Job::MarkRetrying() {
-    JobState previous;
-    bool transitioned;
+TransitionResult Job::MarkRetrying() {
+    TransitionResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        previous = state_;
-        transitioned = TransitionLocked(JobState::Retrying);
-        if (transitioned) {
+        // Retrying is the one legal way out of a terminal state, so it cannot go through
+        // TransitionLocked's AlreadyTerminal short-circuit -- consult the table directly.
+        if (state_ == JobState::Retrying) {
+            result = TransitionResult::AlreadyInState;
+        } else if (CanTransition(state_, JobState::Retrying)) {
+            state_ = JobState::Retrying;
             cancellationRequested_ = false;
             completedAt_.reset();
+            result = TransitionResult::Success;
+        } else {
+            result = TransitionResult::InvalidTransition;
         }
     }
-    if (!transitioned) ThrowInvalidTransition(previous, JobState::Retrying);
-    FireStateChanged(JobState::Retrying);
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Retrying);
+    return result;
 }
 
 }  // namespace mediatool::jobs

@@ -14,6 +14,11 @@ Three processes, two languages beyond TypeScript, one wire protocol. Every hop u
 same framing rules — see `docs/ipc-contract.md`, which is the authoritative naming/schema
 source and should be read before touching any of the code below.
 
+For what runs on which thread inside the C++ core — the job state machine's concurrency
+semantics, the scheduler, the filename reservation protocol, lock discipline and shutdown
+ordering — see `docs/concurrency-model.md`. Read it before changing anything under
+`core/jobs/`, `core/ipc/` or the request loop in `app/core/main.cpp`.
+
 ## Why a sidecar process instead of Rust↔C++ FFI
 
 The obvious alternative is compiling the C++ core as a static/shared library and linking

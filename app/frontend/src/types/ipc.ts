@@ -43,8 +43,12 @@ export interface DownloadJobParams {
   quality?: QualityPreset;
   formatId?: string;
   // Scheduling priority (issue #17): higher runs before lower among jobs still Queued.
-  // Omitted/0 keeps plain-FIFO ordering.
+  // Omitted/0 keeps plain-FIFO ordering. Must be within [-1000, 1000].
   priority?: number;
+  // Ids of jobs that must COMPLETE before this one starts (issue #17). Every id must be a
+  // job the core already knows about; a job whose dependency does not complete is
+  // cancelled. See docs/ipc-contract.md "Scheduling params" and docs/concurrency-model.md.
+  dependsOn?: string[];
 }
 
 // Params for each command, keyed by command name.

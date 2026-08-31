@@ -6,8 +6,11 @@
 
 #include "engines/ffmpeg/FFmpegEngine.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <thread>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -215,5 +218,67 @@ TEST(FFmpegEngineTest, ConvertPropagatesNonZeroFfmpegExitCodeAsFailure) {
         FAIL() << "expected MediaToolException";
     } catch (const MediaToolException& ex) {
         EXPECT_EQ(ex.Info().code, "E_FFMPEG_FAILED");
+    }
+}
+
+// FFmpegEngine's discovery and encoder-list caches are filled lazily on first use, and
+// first use is no longer single-threaded: MediaProcessingJob runs on JobManager's worker
+// pool while inspectFile runs on the IPC request executor. Two threads initializing the
+// same cache is a data race, and AvailableEncoders() hands out a *reference* into the
+// cache it initializes -- so the loser of that race could be reading a set another thread
+// is still assigning to. The observable contract is exactly-once initialization.
+namespace {
+
+// Counts Start() calls (atomically -- it is called from several threads here) and replays
+// a canned `ffmpeg -encoders` listing.
+class CountingProcessRunner final : public mediatool::process::IProcessRunner {
+public:
+    std::unique_ptr<mediatool::process::IProcess> Start(
+        const std::string& executable, const std::vector<std::string>& args,
+        const mediatool::process::ProcessOptions& options,
+        mediatool::process::OutputLineCallback onStdout,
+        mediatool::process::OutputLineCallback onStderr) override {
+        starts_.fetch_add(1);
+        return inner_.Start(executable, args, options, std::move(onStdout), std::move(onStderr));
+    }
+
+    int Starts() const { return starts_.load(); }
+
+private:
+    MockProcessRunner inner_{{" ------", "V....D h264_nvenc            NVIDIA NVENC H.264 encoder"},
+                              {},
+                              /*exitCode=*/0};
+    std::atomic<int> starts_{0};
+};
+
+}  // namespace
+
+TEST(FFmpegEngineTest, AvailableEncodersIsProbedExactlyOnceUnderConcurrentUse) {
+    CountingProcessRunner runner;
+    // Explicit overrides so path discovery never spawns anything -- the only subprocess
+    // this test can attribute a Start() to is the encoder probe itself.
+    FFmpegEngine engine(runner, std::string("C:\\tools\\ffmpeg.exe"), std::string("C:\\tools\\ffprobe.exe"));
+
+    constexpr int kThreads = 16;
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    std::vector<std::size_t> sizes(kThreads, 0);
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&engine, &go, &sizes, i] {
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            // Reading through the returned reference is the part that must not race with
+            // another thread's initialization.
+            sizes[static_cast<std::size_t>(i)] = engine.AvailableEncoders().size();
+        });
+    }
+    go.store(true, std::memory_order_release);
+    for (auto& thread : threads) thread.join();
+
+    EXPECT_EQ(runner.Starts(), 1) << "the encoder probe must run once, not once per thread";
+    for (const std::size_t size : sizes) {
+        EXPECT_EQ(size, engine.AvailableEncoders().size())
+            << "every thread must observe the same fully-initialized encoder set";
     }
 }

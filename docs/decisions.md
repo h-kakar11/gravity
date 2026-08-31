@@ -307,3 +307,78 @@ section 47. Newest entries at the bottom of each phase's section.
   file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
   mistaken for a deliberate "we chose all-rights-reserved" decision later. Revisit before
   any public source distribution.
+
+## Hardening pass (concurrency & IPC architecture)
+
+Context for the whole section: the audit's concurrency defects (#3, #4, #5, #6, #12) had
+each been fixed individually. This pass went after the shapes that let them exist at once
+— check-then-act on job state, one thread doing both I/O and request routing, scheduling
+policy tangled up in the thing that owns the threads. See `docs/concurrency-model.md`.
+
+### Job transitions return a result instead of throwing
+- **Context:** `MarkStarting()` threw `E_INVALID_JOB_TRANSITION` when it lost a race with a
+  concurrent cancel. The loser of that race is a worker thread, where an escaping exception
+  is `std::terminate` (audit #4). The first fix caught the exception in `RunJob` and
+  matched on its error *code* to decide whether it was a benign race.
+- **Options considered:** (a) keep throwing, keep catching; (b) return a `TransitionResult`
+  enum distinguishing Success / AlreadyInState / AlreadyTerminal / InvalidTransition.
+- **Choice:** (b). Every transition entry point on `Job` returns one and none of them throw.
+- **Reason:** "the transition didn't happen" is a normal outcome under concurrency, and
+  encoding a normal outcome as an exception across a thread boundary is what made a routine
+  race fatal. Matching on an error-code string to recover the distinction was a symptom of
+  the wrong return type. The enum also removes the check-then-act shape from callers:
+  `PauseJob`/`ResumeJob`/`RetryJob` now attempt the transition and report its result
+  instead of reading `State()` and acting on what it said a moment ago.
+- **Consequences:** callers must inspect the returned value; a `Mark*` call whose result is
+  ignored is a silent no-op if it loses a race. `JobManager` logs `InvalidTransition`
+  (a real bug) and quietly declines on `AlreadyTerminal` (a lost race).
+
+### Scheduling policy extracted into a threadless `SchedulerCore`
+- **Context:** issue #17 asked for priorities, dependencies and a retry policy. `JobManager`
+  *was* the scheduler: a `std::deque` its workers popped, with priority as an insertion
+  tweak. Every scheduling question could only be answered by starting threads.
+- **Options considered:** (a) add dependency tracking to `JobManager` alongside the threads;
+  (b) extract a pure class that decides what runs next and knows nothing about threads,
+  locks or `Job`.
+- **Choice:** (b). `JobManager` holds a `SchedulerCore` under its existing mutex.
+- **Reason:** the policy is where the interesting logic is and the threads are where the
+  risk is; keeping them in one class meant neither could be tested properly. The scheduler's
+  ~30 tests start no threads at all.
+- **Consequences:** `SchedulerCore` is not thread-safe by itself, on purpose — there is one
+  lock in this subsystem, not two that could be taken in two orders. Dependencies must name
+  an already-submitted job, which is also what makes cycles impossible rather than merely
+  detected. A job whose dependency fails is cancelled, not failed: `QUEUED -> FAILED` isn't
+  a legal transition and inventing one to carry a "your dependency failed" error would be a
+  bigger change to the state machine than the message is worth.
+
+### Blocking IPC commands run on a bounded executor, not the request loop
+- **Context:** `inspectDownloadUrl` blocks on a yt-dlp subprocess. Issue #8's fix bounded
+  that wait at 30 seconds, which bounds how long the *whole backend* stops reading stdin —
+  it doesn't stop it happening.
+- **Options considered:** (a) make inspect asynchronous at the protocol level (respond
+  `{status: "pending"}`, deliver the result as an event); (b) a timeout on the Rust side;
+  (c) keep the protocol identical and run the blocking handlers on a small pool.
+- **Choice:** (c).
+- **Reason:** responses are already correlated by `id` and the contract already says
+  requests may complete out of order, so (c) needs no change to the wire protocol, the Rust
+  bridge or the frontend — the loop simply stops waiting. (a) is the same behavior with a
+  new protocol surface and two more states for the frontend to model; (b) hides a hung core
+  rather than keeping it responsive.
+- **Consequences:** handlers that can run on an executor thread must be thread-safe, which
+  is why the settings and preset stores are now serialized. A saturated executor answers
+  `E_CORE_BUSY` rather than queueing without limit or blocking the loop.
+
+### The frontend orders snapshots by event sequence, not by arrival
+- **Context:** issue #19 removed the per-progress-event `getJob` round trip, which fixed the
+  visible progress rewind. The remaining lifecycle events still each fire their own async
+  `getJob`, and nothing ordered those responses.
+- **Choice:** stamp every handled event with a monotonically increasing sequence number,
+  carry it through whatever it causes to be applied, and drop an update if something newer
+  has already been applied to that job.
+- **Reason:** core events arrive over one stdout stream in one order; the client only ever
+  had to stop undoing it. A queue or a mutex in the UI layer would serialize round trips
+  that are fine to run concurrently — the problem was never concurrency, it was ordering.
+- **Consequences:** an update that loses the comparison is discarded, not retried. That is
+  correct (something strictly newer is already displayed) but it does mean a snapshot fetch
+  can be wasted work; the alternative is showing the user a state their app has already
+  moved past.

@@ -1,7 +1,11 @@
 #include "core/jobs/JobHistoryStore.h"
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <set>
+#include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -94,6 +98,44 @@ TEST_F(JobHistoryStoreTest, AppendSurvivesInvalidUtf8InTextFields) {
     const auto entries = store.Load();
     ASSERT_EQ(entries.size(), 1u);
     EXPECT_EQ(entries[0].at("id"), "job-1");
+}
+
+
+// Every terminal job is supposed to end up in the session history. Before the store was
+// serialized, Append() was a read-modify-write (load the file, push one entry, rename a
+// new file over it) called from JobManager's worker threads, so at concurrentJobs > 1 two
+// jobs completing together would both load the same history and the later rename would
+// drop the earlier job's entry -- silent, and invisible in any single-threaded test.
+TEST_F(JobHistoryStoreTest, ConcurrentAppendsFromManyThreadsLoseNoEntries) {
+    constexpr int kThreads = 8;
+    constexpr int kAppendsPerThread = 25;
+    constexpr int kTotal = kThreads * kAppendsPerThread;
+
+    JobHistoryStore store(historyPath_, /*maxEntries=*/kTotal);
+
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&store, &go, t] {
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            for (int i = 0; i < kAppendsPerThread; ++i) {
+                store.Append(MakeSnapshot("job-" + std::to_string(t) + "-" + std::to_string(i)));
+            }
+        });
+    }
+    go.store(true, std::memory_order_release);
+    for (auto& thread : threads) thread.join();
+
+    const std::vector<nlohmann::json> entries = store.Load();
+    ASSERT_EQ(entries.size(), static_cast<size_t>(kTotal));
+
+    // Not just the count: every distinct id must be present exactly once, which also
+    // proves no entry was written twice or corrupted by an interleaved write.
+    std::set<std::string> ids;
+    for (const auto& entry : entries) ids.insert(entry.at("id").get<std::string>());
+    EXPECT_EQ(ids.size(), static_cast<size_t>(kTotal));
 }
 
 }  // namespace

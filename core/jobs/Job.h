@@ -24,11 +24,13 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "core/common/IClock.h"
 #include "core/errors/ErrorInfo.h"
+#include "core/jobs/JobStateMachine.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/Progress.h"
 
@@ -59,6 +61,14 @@ public:
     // Ties keep FIFO order among jobs of equal priority.
     int Priority() const { return priority_; }
     void SetPriority(int priority) { priority_ = priority; }
+
+    // Ids of jobs that must COMPLETE before this one may start (issue #17). Like
+    // Priority(), set by the caller before SubmitJob() and never mutated afterwards --
+    // JobManager hands the list to SchedulerCore at submission and the scheduler owns the
+    // graph from then on. Guarded by mutex_ so a snapshot taken from an IPC thread while a
+    // worker runs the job is still well-defined.
+    std::vector<JobId> DependsOn() const;
+    void SetDependsOn(std::vector<JobId> dependsOn);
 
     // --- Thread-safe snapshots -----------------------------------------------------
     JobState State() const;
@@ -92,29 +102,47 @@ public:
 
     // --- Lifecycle, driven by JobManager --------------------------------------------
     // Requests cancellation. Safe to call from any thread, any number of times, in any
-    // state (a no-op once already terminal). If the job is still Queued -- meaning no
-    // worker thread will ever call Execute() to notice the flag -- transitions directly
-    // to Cancelled. Otherwise only sets the flag/wakes a paused wait; the worker thread
-    // finalizes the Cancelled transition once Execute() throws or returns.
-    void RequestCancel();
+    // state. If the job is still Queued -- meaning no worker thread will ever call
+    // Execute() to notice the flag -- transitions directly to Cancelled and returns
+    // Success. Otherwise only sets the flag/wakes a paused wait and returns Success: the
+    // worker thread finalizes the Cancelled transition once Execute() throws or returns.
+    // Returns AlreadyTerminal if the job had already finished (of which "already
+    // Cancelled" is the idempotent case callers normally ignore) -- cancelling twice, or
+    // cancelling a job that just completed, is a normal outcome, never an error.
+    TransitionResult RequestCancel();
 
-    // No-op unless SupportsPause() and currently Running.
-    void RequestPause();
-    // No-op unless currently Paused.
-    void RequestResume();
+    // Returns InvalidTransition (and does nothing) unless SupportsPause() and currently
+    // Running; AlreadyInState if already Paused.
+    TransitionResult RequestPause();
+    // Returns InvalidTransition (and does nothing) unless currently Paused;
+    // AlreadyInState if already Running.
+    TransitionResult RequestResume();
 
     bool IsCancellationRequested() const { return cancellationRequested_; }
 
-    // JobManager calls these around Execute() to drive the state machine; each throws
-    // errors::MediaToolException(ErrorCategory::Unknown) if the transition is invalid
-    // for the job's current state (a JobManager bug, not a user-facing condition).
-    void MarkStarting();
-    void MarkRunning();
-    void MarkCompleted();
-    void MarkFailed(errors::ErrorInfo error);
-    void MarkCancelled();
+    // JobManager calls these around Execute() to drive the state machine. None of them
+    // throws: a transition that cannot happen is reported through the returned
+    // TransitionResult (see core/jobs/JobStateMachine.h) so a routine race -- typically a
+    // cancellation landing between a worker thread's State() read and its next Mark* call
+    // -- is a value the caller inspects rather than an exception crossing a thread
+    // boundary. They are idempotent in the useful sense: calling MarkCancelled() on an
+    // already-Cancelled job returns AlreadyInState and changes nothing.
+    TransitionResult MarkStarting();
+    TransitionResult MarkRunning();
+    TransitionResult MarkCompleted();
+    // On Success the job's error is set to `error`; on any other result `error` is
+    // discarded and the existing terminal outcome stands.
+    TransitionResult MarkFailed(errors::ErrorInfo error);
+    TransitionResult MarkCancelled();
     // Only valid from Failed. Clears the cancellation flag so a fresh run starts clean.
-    void MarkRetrying();
+    TransitionResult MarkRetrying();
+
+    // There is deliberately no public "can this job transition to X?" query. Answering it
+    // and then acting on the answer is the check-then-act pattern the #4 race lived in --
+    // the state can change in between, and only the Mark* call that actually moves the job
+    // knows what really happened. Callers attempt the transition and inspect the result.
+    // The pure predicate over the transition table itself lives in
+    // core/jobs/JobStateMachine.h (CanTransition), where the table is defined.
 
 protected:
     // Replaces the stored progress with `progress` and notifies the progress callback.
@@ -129,11 +157,13 @@ protected:
     bool WaitWhilePaused();
 
 private:
-    // Returns true if the transition happened. Caller must hold mutex_.
-    bool TransitionLocked(JobState to);
+    // The single unchecked commit point every transition funnels through. Classifies the
+    // attempt (see TransitionResult) and, on Success only, applies `to`. Caller must hold
+    // mutex_; callbacks are deliberately NOT fired here, so the caller can release the
+    // lock first.
+    TransitionResult TransitionLocked(JobState to);
     void FireStateChanged(JobState state);
     void FireProgress(const Progress& progress);
-    [[noreturn]] void ThrowInvalidTransition(JobState from, JobState to) const;
 
     const JobId id_;
     const JobType type_;
@@ -154,6 +184,7 @@ private:
 
     std::atomic<bool> cancellationRequested_{false};
     std::atomic<int> priority_{0};
+    std::vector<JobId> dependsOn_;
 
     StateChangedCallback onStateChanged_;
     ProgressCallback onProgress_;

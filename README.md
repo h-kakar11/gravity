@@ -84,7 +84,7 @@ real YouTube videos with real network access — see `docs/phase-2.md` for the e
 
 | Component | Status |
 |---|---|
-| Job abstraction, `JobStateMachine`, `JobManager` | **Working.** Configurable concurrency (not hardcoded to 1), pause/resume/cancel/retry all implemented and tested. |
+| Job abstraction, `JobStateMachine`, `JobManager`, `SchedulerCore` | **Working.** Configurable concurrency (not hardcoded to 1), pause/resume/cancel/retry all implemented and tested. State transitions report their outcome instead of throwing, so a cancellation racing a start is a value the worker inspects rather than an exception that kills it. Scheduling (priority ordering, job dependencies with failure propagation) lives in a threadless `SchedulerCore` and is tested without threads. See `docs/concurrency-model.md`. |
 | `TestJob` | **Working.** The Phase 1 proof job — verified running to completion through `JobManager` and via `--selftest`. |
 | `DownloadJob` | **Working.** Real end-to-end downloads verified against live YouTube videos (audio-only and a 480p video+audio merge), including cancellation mid-download and output verification via `ffprobe`. Pause is not supported (spec doesn't require it for downloads). Playlist URLs are deliberately rejected, not partially supported. |
 | `MediaProcessingJob` (Convert and Compress) | **Working**, added in Phase 2.6. One job class/code path for both — Compress is Convert with different default option values (`docs/decisions.md`), not a separate implementation. Backed by `FFmpegEngine::Convert`/`Compress`. |

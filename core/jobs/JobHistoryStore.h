@@ -10,6 +10,7 @@
 // restart with active jobs loses them, same as before this store existed.
 
 #include <cstddef>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -38,8 +39,20 @@ public:
     void Append(nlohmann::json snapshotJson);
 
 private:
+    // Append() is a read-modify-write of a single file and it is called from JobManager's
+    // worker threads (via the job state-changed callback), so at concurrentJobs > 1 two
+    // jobs finishing at the same moment used to interleave: both read the same history,
+    // both append their own entry to it, and the second rename silently discarded the
+    // first job's entry. Serializing the whole read-modify-write is what makes "every
+    // terminal job is recorded" true rather than probable. Load() takes it too, so a
+    // reader never observes the file mid-rename.
+    mutable std::mutex mutex_;
     std::string filePath_;
     std::size_t maxEntries_;
+
+    // Load() without the lock, for Append()'s use once it already holds it (std::mutex is
+    // not recursive).
+    std::vector<nlohmann::json> LoadLocked() const;
 };
 
 }  // namespace mediatool::jobs

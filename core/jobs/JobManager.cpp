@@ -1,16 +1,51 @@
 #include "core/jobs/JobManager.h"
 
+#include <system_error>
+
 #include "core/errors/MediaToolException.h"
 #include "core/logging/Logger.h"
 
 namespace mediatool::jobs {
 
-JobManager::JobManager(std::size_t maxConcurrentJobs)
-    : maxConcurrentJobs_(maxConcurrentJobs == 0 ? 1 : maxConcurrentJobs) {
-    workers_.reserve(maxConcurrentJobs_);
-    for (std::size_t i = 0; i < maxConcurrentJobs_; ++i) {
-        workers_.emplace_back([this] { WorkerLoop(); });
+JobManager::JobManager(std::size_t requestedConcurrentJobs) {
+    const std::size_t requested = requestedConcurrentJobs == 0 ? 1 : requestedConcurrentJobs;
+    workers_.reserve(requested);
+    for (std::size_t i = 0; i < requested; ++i) {
+        try {
+            workers_.emplace_back([this] { WorkerLoop(); });
+        } catch (const std::system_error& e) {
+            // The OS refused to create a thread (EAGAIN: process/system thread limit, or
+            // address space for another stack). Two things must not happen here. First,
+            // letting this escape would destroy a half-built workers_ vector whose live
+            // threads are still joinable, and destroying a joinable std::thread calls
+            // std::terminate -- the same "one bad settings value aborts the process"
+            // failure mode as #5, just one layer down. Second, refusing to start at all
+            // would let an ambitious concurrentJobs value make the app unusable when a
+            // smaller pool would have run every job perfectly well, only slower.
+            // So: keep the workers that did start, and carry on with a smaller pool.
+            logging::Log::Warning("JobManager",
+                                   "Could only start " + std::to_string(workers_.size()) + " of " +
+                                       std::to_string(requested) +
+                                       " job worker threads; continuing with the smaller pool (" +
+                                       e.what() + ")");
+            break;
+        }
     }
+
+    if (workers_.empty()) {
+        // Not a single worker: nothing would ever run, and silently accepting jobs that
+        // can never start would be worse than failing loudly here. Nothing to unwind --
+        // workers_ is empty, so no joinable thread is destroyed by this throw.
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_WORKER_POOL_UNAVAILABLE", errors::ErrorCategory::EngineFailure,
+            "Could not start any background job workers.",
+            "std::thread creation failed for all " + std::to_string(requested) + " requested workers"));
+    }
+
+    // Reflects the pool that actually exists, not the one that was asked for: every
+    // concurrency decision downstream (and MaxConcurrentJobs() itself) must describe
+    // reality.
+    maxConcurrentJobs_ = workers_.size();
 }
 
 JobManager::~JobManager() { Shutdown(); }
@@ -22,13 +57,12 @@ void JobManager::Shutdown() {
         if (stopping_) return;  // already shut down
         stopping_ = true;
 
-        // Still-Queued jobs: cancel and drop from the queue now, so no worker ever picks
-        // them up and starts fresh work after shutdown has begun.
-        for (const auto& id : queue_) {
+        // Still-pending jobs: cancel and drop from the schedule now, so no worker ever
+        // picks them up and starts fresh work after shutdown has begun.
+        for (const auto& id : scheduler_.TakeAllPending()) {
             Job* job = LookupJobLocked(id);
             if (job) toCancel.push_back(job);
         }
-        queue_.clear();
 
         // Currently-Running jobs: request cancellation so a well-behaved Execute() that
         // polls IsCancellationRequested() exits promptly rather than running to natural
@@ -51,15 +85,24 @@ void JobManager::Shutdown() {
 
 JobId JobManager::SubmitJob(std::unique_ptr<Job> job) {
     const JobId id = job->Id();
-    const int priority = job->Priority();
+    SchedulerCore::Submission submission;
+    submission.id = id;
+    submission.priority = job->Priority();
+    submission.dependsOn = job->DependsOn();
+
     job->SetCallbacks(
         [this, id](JobState state) { HandleJobStateChanged(id, state); },
         [this, id](const Progress& progress) { HandleJobProgress(id, progress); });
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Scheduled first, registered second: if the scheduler rejects the submission (an
+        // impossible dependency) it throws from here, and a job the scheduler does not know
+        // about must not be sitting in jobs_ where getJob would report it as forever
+        // QUEUED. `job` is destroyed as the exception propagates, which is the correct
+        // outcome -- it was never accepted.
+        scheduler_.Submit(std::move(submission));
         jobs_.emplace(id, std::move(job));
-        InsertIntoQueueLocked(id, priority);
     }
     queueCv_.notify_one();
     return id;
@@ -70,13 +113,21 @@ Job* JobManager::LookupJobLocked(const JobId& id) const {
     return it == jobs_.end() ? nullptr : it->second.get();
 }
 
-void JobManager::InsertIntoQueueLocked(const JobId& id, int priority) {
-    auto it = queue_.begin();
-    for (; it != queue_.end(); ++it) {
-        const Job* queued = LookupJobLocked(*it);
-        if (queued && queued->Priority() < priority) break;
+void JobManager::CancelStrandedDependents(const std::vector<JobId>& ids, const JobId& because) {
+    for (const JobId& id : ids) {
+        Job* job = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            job = LookupJobLocked(id);
+        }
+        if (!job) continue;
+        logging::Log::Info("JobManager", "Cancelling job " + id + ": it depends on " + because +
+                                              ", which did not complete");
+        // Outside the lock: this fires the job's state-changed callback, which re-enters
+        // HandleJobStateChanged and takes mutex_ -- and, for a chain of dependents, does
+        // so recursively one link at a time.
+        job->RequestCancel();
     }
-    queue_.insert(it, id);
 }
 
 void JobManager::ThrowNotFound(const JobId& id) const {
@@ -158,9 +209,9 @@ void JobManager::PauseJob(const JobId& id) {
     }
     if (!job->SupportsPause())
         ThrowInvalidOperation(id, "This job type does not support pausing");
-    if (job->State() != JobState::Running)
+    // Same reasoning as RetryJob: the transition is the check.
+    if (job->RequestPause() != TransitionResult::Success)
         ThrowInvalidOperation(id, "Job must be Running to be paused");
-    job->RequestPause();
 }
 
 void JobManager::ResumeJob(const JobId& id) {
@@ -170,9 +221,8 @@ void JobManager::ResumeJob(const JobId& id) {
         job = LookupJobLocked(id);
         if (!job) ThrowNotFound(id);
     }
-    if (job->State() != JobState::Paused)
+    if (job->RequestResume() != TransitionResult::Success)
         ThrowInvalidOperation(id, "Job must be Paused to be resumed");
-    job->RequestResume();
 }
 
 void JobManager::RetryJob(const JobId& id) {
@@ -182,15 +232,19 @@ void JobManager::RetryJob(const JobId& id) {
         job = LookupJobLocked(id);
         if (!job) ThrowNotFound(id);
     }
-    if (job->State() != JobState::Failed)
-        ThrowInvalidOperation(id, "Only a Failed job can be retried");
     const int priority = job->Priority();
-    // MarkRetrying() fires the state-changed callback, which re-enters JobManager (see
-    // HandleJobStateChanged) and must not be called while mutex_ is held.
-    job->MarkRetrying();
+    // No State() == Failed pre-check: reading the state and then transitioning on the
+    // strength of that read is the same check-then-act shape that produced #4. The
+    // transition itself is the check -- MarkRetrying() only succeeds from Failed, and
+    // reports rather than throws when it doesn't, so a job that finished, was removed, or
+    // was retried by another caller in the meantime yields an honest error instead of a
+    // race. MarkRetrying() fires the state-changed callback, which re-enters JobManager
+    // (see HandleJobStateChanged) and must not be called while mutex_ is held.
+    if (job->MarkRetrying() != TransitionResult::Success)
+        ThrowInvalidOperation(id, "Only a Failed job can be retried");
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        InsertIntoQueueLocked(id, priority);
+        scheduler_.Requeue(id, priority);
     }
     queueCv_.notify_one();
 }
@@ -201,6 +255,9 @@ void JobManager::RemoveJob(const JobId& id) {
     if (!job) ThrowNotFound(id);
     if (!IsTerminalState(job->State()))
         ThrowInvalidOperation(id, "Only a terminal job (Completed/Failed/Cancelled) can be removed");
+    // Throws E_JOB_HAS_DEPENDENTS if something queued is still waiting on this job, in
+    // which case nothing is removed -- see SchedulerCore::Forget.
+    scheduler_.Forget(id);
     jobs_.erase(id);
 }
 
@@ -221,11 +278,25 @@ void JobManager::SetPreMarkStartingHookForTesting(std::function<void(const JobId
 
 void JobManager::HandleJobStateChanged(const JobId& id, JobState state) {
     JobStateChangedCallback callback;
+    std::vector<JobId> stranded;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         callback = stateChangedCallback_;
+        if (IsTerminalState(state)) {
+            // Tell the scheduler how this job ended, both to unblock anything waiting on it
+            // and to learn which pending jobs can now never run.
+            stranded = scheduler_.RecordTerminal(id, state);
+        }
     }
+
+    // A terminal job may have made a dependent eligible, and workers are asleep on a
+    // predicate that only the scheduler can answer -- wake them to re-ask.
+    if (IsTerminalState(state)) queueCv_.notify_all();
+
     if (callback) callback(id, state);
+    // After the subscriber has seen this job's own outcome, so an observer sees cause
+    // before consequence.
+    if (!stranded.empty()) CancelStrandedDependents(stranded, id);
 }
 
 void JobManager::HandleJobProgress(const JobId& id, const Progress& progress) {
@@ -242,10 +313,14 @@ void JobManager::WorkerLoop() {
         JobId id;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            queueCv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-            if (stopping_ && queue_.empty()) return;
-            id = queue_.front();
-            queue_.pop_front();
+            // Note the predicate: not "is anything queued" but "is anything *runnable*". A
+            // queue full of jobs waiting on a dependency must leave workers asleep rather
+            // than spinning on entries they cannot start.
+            queueCv_.wait(lock, [this] { return stopping_ || scheduler_.HasEligible(); });
+            if (stopping_) return;
+            const std::optional<JobId> next = scheduler_.TakeNextEligible();
+            if (!next) continue;  // lost the race to another worker
+            id = *next;
         }
         // Belt-and-suspenders: RunJob() is expected to convert every exception it can
         // anticipate into a job state transition (Failed/Cancelled) rather than letting
@@ -272,49 +347,76 @@ void JobManager::RunJob(const JobId& id) {
     }
     if (!job) return;  // removed before a worker got to it
 
-    try {
-        const JobState pickedUpState = job->State();
-        if (pickedUpState == JobState::Queued) {
-            std::function<void(const JobId&)> hook;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                hook = preMarkStartingHookForTesting_;
-            }
-            if (hook) hook(id);
-            job->MarkStarting();
-            job->MarkRunning();
-        } else if (pickedUpState == JobState::Retrying) {
-            job->MarkRunning();
-        } else {
-            // Cancelled (or otherwise moved on) while it was sitting in the queue.
-            return;
-        }
+    // Claiming the job is a transition attempt, not a state read followed by a
+    // transition: whatever State() says a nanosecond ago, only the Mark* call that
+    // actually moves the job is authoritative, and it reports losing the race rather than
+    // throwing across the worker-thread boundary (#4). Anything other than Success here
+    // means someone else finalized this job first -- overwhelmingly a cancellation -- and
+    // there is nothing left for this worker to run.
+    const JobState pickedUpState = job->State();
+    if (pickedUpState == JobState::Retrying) {
+        // A retried job is already past Starting; RETRYING -> RUNNING is its only path.
+        if (!ClaimedForExecution(*job, job->MarkRunning())) return;
+    } else {
+        if (!ClaimedForExecution(*job, RunPreMarkStartingHook(id), JobState::Starting)) return;
+        if (!ClaimedForExecution(*job, job->MarkRunning())) return;
+    }
 
+    try {
         job->Execute();
-        if (job->State() != JobState::Cancelled) job->MarkCompleted();
-    } catch (const errors::MediaToolException& e) {
-        if (job->State() == JobState::Cancelled) return;
-        if (e.Info().code == "E_INVALID_JOB_TRANSITION") {
-            // Benign race (#4): RequestCancel() moved the job to a terminal state (e.g.
-            // straight from Queued to Cancelled) between the State() read above and the
-            // MarkStarting()/MarkRunning() call that observed it, so that call threw.
-            // This is losing a race, not a bug -- treat it the same as any other
-            // already-terminal outcome instead of letting it escape and kill the worker.
-            if (IsTerminalState(job->State())) return;
-            throw;  // not the expected race shape: a genuine state-machine bug, surface it
+        // Execute() returning normally after a cancellation was requested is a job type
+        // not honoring the cancellation convention (see Job.h) -- finalize as Cancelled
+        // rather than reporting work that was cut short as successful.
+        if (job->IsCancellationRequested()) {
+            job->MarkCancelled();
+        } else {
+            job->MarkCompleted();
         }
+    } catch (const errors::MediaToolException& e) {
         if (e.Info().category == errors::ErrorCategory::Cancelled) {
             job->MarkCancelled();
         } else {
             job->MarkFailed(e.Info());
         }
     } catch (const std::exception& e) {
-        if (job->State() != JobState::Cancelled) {
-            job->MarkFailed(errors::ErrorInfo::Make(
-                "E_JOB_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
-                "Job failed unexpectedly", e.what()));
-        }
+        job->MarkFailed(errors::ErrorInfo::Make(
+            "E_JOB_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
+            "Job failed unexpectedly", e.what()));
     }
+    // Every path above ends in a Mark* whose result is deliberately unexamined: by then
+    // the only way it can fail is that a concurrent cancellation already finalized the
+    // job, which is precisely the outcome those calls were trying to record.
+}
+
+// Runs the testing-only interleaving hook (if any) and then attempts the Queued ->
+// Starting claim. Split out so RunJob reads as the three transition attempts it is.
+TransitionResult JobManager::RunPreMarkStartingHook(const JobId& id) {
+    std::function<void(const JobId&)> hook;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hook = preMarkStartingHookForTesting_;
+    }
+    if (hook) hook(id);
+    Job* job;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        job = LookupJobLocked(id);
+    }
+    return job ? job->MarkStarting() : TransitionResult::AlreadyTerminal;
+}
+
+bool JobManager::ClaimedForExecution(const Job& job, TransitionResult result, JobState attempted) {
+    if (result == TransitionResult::Success) return true;
+    if (result == TransitionResult::InvalidTransition) {
+        // Not a race: the job was in a non-terminal state this transition is illegal from,
+        // which means the scheduler and the state machine disagree about the lifecycle.
+        // Log it -- silently dropping the job would hide a real bug -- but still decline
+        // to run it, because forcing the transition is how you corrupt a state machine.
+        logging::Log::Error("JobManager", "Refusing to run job " + job.Id() + ": cannot enter " +
+                                               ToWireString(attempted) + " from " +
+                                               ToWireString(job.State()));
+    }
+    return false;
 }
 
 }  // namespace mediatool::jobs

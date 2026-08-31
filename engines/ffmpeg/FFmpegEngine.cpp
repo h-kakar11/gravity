@@ -86,16 +86,16 @@ FFmpegEngine::FFmpegEngine(process::IProcessRunner& runner,
       overrideFfprobePath_(std::move(overrideFfprobePath)) {}
 
 std::optional<std::string> FFmpegEngine::ResolveFfmpegPath() const {
-    if (!ffmpegPathCache_.has_value()) {
+    std::call_once(ffmpegPathOnce_, [this] {
         ffmpegPathCache_ = DiscoverFfmpegPath(runner_, overrideFfmpegPath_);
-    }
+    });
     return *ffmpegPathCache_;
 }
 
 std::optional<std::string> FFmpegEngine::ResolveFfprobePath() const {
-    if (!ffprobePathCache_.has_value()) {
+    std::call_once(ffprobePathOnce_, [this] {
         ffprobePathCache_ = DiscoverFfprobePath(runner_, overrideFfprobePath_);
-    }
+    });
     return *ffprobePathCache_;
 }
 
@@ -244,13 +244,16 @@ void FFmpegEngine::ThrowNotImplemented(const std::string& operation) const {
 }
 
 const std::set<std::string>& FFmpegEngine::AvailableEncoders() const {
-    if (!availableEncodersCache_.has_value()) {
-        // Computed once and cached, not per job -- mirrors the "one discovery path, one
-        // lifetime" principle FFmpegDiscovery::DiscoverFfmpegPath already documents.
+    // Computed once and cached, not per job -- mirrors the "one discovery path, one
+    // lifetime" principle FFmpegDiscovery::DiscoverFfmpegPath already documents. The
+    // returned reference stays valid because the cache is assigned exactly once, ever:
+    // handing out a reference to something a second thread might be mid-assignment on is
+    // precisely what the once_flag prevents.
+    std::call_once(encodersOnce_, [this] {
         auto ffmpegPath = ResolveFfmpegPath();
         availableEncodersCache_ =
             ffmpegPath.has_value() ? DiscoverAvailableEncoders(runner_, *ffmpegPath) : std::set<std::string>{};
-    }
+    });
     return *availableEncodersCache_;
 }
 

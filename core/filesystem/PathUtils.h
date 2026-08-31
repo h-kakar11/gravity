@@ -56,4 +56,13 @@ std::string GetFilename(const std::string& path);
 
 std::string GetParentDirectory(const std::string& path);
 
+// A scratch path next to `finalPath` for the write-then-rename pattern, unique per call:
+// "<finalPath>.tmp-<pid>-<n>". The uniqueness matters because a fixed "<finalPath>.tmp"
+// is shared mutable state -- two writers racing on it (two job-completion threads
+// appending history, or a second Gravity instance) interleave their bytes into one temp
+// file and then both rename it, so the survivor is a blend of two writes rather than
+// either one. Callers still need their own mutual exclusion to make read-modify-write
+// sequences atomic; this only guarantees no two writers share a temp file.
+std::string UniqueTemporarySibling(const std::string& finalPath);
+
 }  // namespace mediatool::filesystem::paths
