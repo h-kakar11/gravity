@@ -98,9 +98,10 @@ export default function DownloaderPage() {
   // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
   // started blank regardless of the user's configured default (issue #54), and the quality
   // selector always started at "BEST" regardless of downloads.defaultQuality (part of
-  // issue #18). The backend stores defaultQuality lowercase ("best"); validate + uppercase
-  // before trusting it as a QualityPreset rather than assuming the stored value is already
-  // one of the known presets. downloads.speedUnits was persisted and shown in Settings but
+  // issue #18). Uppercase defensively before trusting it as a QualityPreset rather than
+  // assuming the stored value is already one of the known presets -- harmless no-op now
+  // that the backend stores this uppercase too, but keeps this resilient to a stale
+  // settings.json written before that. downloads.speedUnits was persisted and shown in Settings but
   // never actually consumed anywhere -- the progress display always hardcoded MB/s
   // regardless (also part of #18/#59). The user can still override quality/output dir per
   // download; speed units stay a Settings-level choice, same as elsewhere in the app.

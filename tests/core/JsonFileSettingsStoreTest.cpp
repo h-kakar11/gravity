@@ -58,7 +58,6 @@ TEST_F(JsonFileSettingsStoreTest, SaveThenLoadRoundTripsExactly) {
     original.general.launchOnStartup = true;
     original.downloads.concurrentDownloads = 5;
     original.downloads.downloadDirectory = "E:\\Media\\Downloads";
-    original.processing.defaultOutputFormat = "mkv";
     original.privacy.crashReportingEnabled = true;
     original.advanced.logLevel = "WARNING";
     original.advanced.ffmpegPath = "E:\\tools\\ffmpeg.exe";
@@ -86,7 +85,7 @@ TEST_F(JsonFileSettingsStoreTest, SaveWritesFileWithExpectedStructure) {
     ASSERT_TRUE(parsed.contains("processing"));
     ASSERT_TRUE(parsed.contains("privacy"));
     ASSERT_TRUE(parsed.contains("advanced"));
-    EXPECT_EQ(parsed["downloads"]["defaultQuality"], "best");
+    EXPECT_EQ(parsed["downloads"]["defaultQuality"], "BEST");
 
     // No leftover temp file after a successful save.
     EXPECT_FALSE(fs::exists(settingsPath_ + ".tmp"));

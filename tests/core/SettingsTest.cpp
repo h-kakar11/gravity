@@ -22,7 +22,7 @@ Settings MakeDistinctSettings() {
     settings.general.hotkeyPasteAndDownload = "Alt+Shift+P";
     settings.general.hotkeyFocusQueue = "";
 
-    settings.downloads.defaultQuality = "1080p";
+    settings.downloads.defaultQuality = "1080P";
     settings.downloads.downloadDirectory = "D:\\Downloads\\MediaTool";
     settings.downloads.filenameTemplate = "%(id)s - %(title)s.%(ext)s";
     settings.downloads.concurrentDownloads = 4;
@@ -30,7 +30,6 @@ Settings MakeDistinctSettings() {
 
     settings.processing.hardwareAccelerationEnabled = false;
     settings.processing.defaultCompressionQuality = "high";
-    settings.processing.defaultOutputFormat = "mp4";
     settings.processing.concurrentJobs = 3;
 
     settings.privacy.analyticsEnabled = false;
@@ -86,7 +85,6 @@ TEST(SettingsTest, RoundTripPreservesEveryProcessingField) {
               original.processing.hardwareAccelerationEnabled);
     EXPECT_EQ(roundTripped.processing.defaultCompressionQuality,
               original.processing.defaultCompressionQuality);
-    EXPECT_EQ(roundTripped.processing.defaultOutputFormat, original.processing.defaultOutputFormat);
     EXPECT_EQ(roundTripped.processing.concurrentJobs, original.processing.concurrentJobs);
 }
 
@@ -123,7 +121,7 @@ TEST(SettingsTest, DefaultsHaveExpectedSentinelValues) {
     EXPECT_TRUE(defaults.general.minimizeToTrayOnClose);
     EXPECT_EQ(defaults.general.hotkeyPasteAndDownload, "CommandOrControl+Shift+D");
     EXPECT_EQ(defaults.general.hotkeyFocusQueue, "CommandOrControl+Shift+Q");
-    EXPECT_EQ(defaults.downloads.defaultQuality, "best");
+    EXPECT_EQ(defaults.downloads.defaultQuality, "BEST");
     EXPECT_EQ(defaults.downloads.filenameTemplate, "%(title)s.%(ext)s");
     EXPECT_EQ(defaults.downloads.concurrentDownloads, 1);
     EXPECT_EQ(defaults.downloads.speedUnits, "MBps");
@@ -165,6 +163,8 @@ TEST(SettingsTest, FromJsonRejectsOutOfRangeAndUnrecognizedValues) {
         {"concurrentJobsNegative", [](Settings& s) { s.processing.concurrentJobs = -1; }},
         {"concurrentDownloadsTooHigh", [](Settings& s) { s.downloads.concurrentDownloads = 50; }},
         {"speedUnitsBogus", [](Settings& s) { s.downloads.speedUnits = "lightyears"; }},
+        {"defaultQualityBogus", [](Settings& s) { s.downloads.defaultQuality = "best"; }},
+        {"analyticsEnabledTrue", [](Settings& s) { s.privacy.analyticsEnabled = true; }},
         {"compressionQualityBogus",
          [](Settings& s) { s.processing.defaultCompressionQuality = "super"; }},
         {"logLevelBogus", [](Settings& s) { s.advanced.logLevel = "VERBOSE"; }},

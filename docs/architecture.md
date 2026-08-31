@@ -177,16 +177,26 @@ network-failure detection).
 place Windows-illegal-filename handling lives — the UI never sanitizes filenames itself
 (spec section 21).
 
-**Not currently true, despite reading like it should be**: `TempDirectory` (an isolated
-per-job working directory under `%LOCALAPPDATA%\Gravity\temp\job-<id>\`) and `AtomicWriter`
-(the "write to a temp file, rename over the real path only on success" pattern, spec
-section 13) both exist, are unit-tested, and are never called from `DownloadJob` or
-`MediaProcessingJob` — confirmed via a repo-wide grep outside their own definition/test
-files. Neither primitive is wired into the actual job-execution path, so a crash mid-write
-today is not protected against the way this section previously implied. Flagged by the
-independent audit (`docs/final-audit.md` #10, #34, #39) as exactly the kind of gap between
-"exists in the codebase" and "actually runs" this document should not paper over. Wiring
-them in is tracked as part of issue #10 (queue persistence/crash recovery).
+**Partially true as of the #10/#39 hardening pass**: `AtomicWriter` (the "write to a temp
+file, rename over the real path only on success" pattern, spec section 13) is now wired
+into `MediaProcessingJob` -- ffmpeg writes to a `.processing` temp name in the output
+directory, and only a fully-verified result gets renamed to the real name.
+`DownloadJob` applies the same write-then-rename principle but not the `AtomicWriter`
+class itself (yt-dlp's own merge step means the final extension isn't known until the
+download completes, so there's no single path to construct an `AtomicWriter` around
+upfront) -- it downloads under a `.partial`-marked base name instead and renames to the
+clean name as the last step before success.
+
+`TempDirectory` (an isolated per-job working directory under
+`%LOCALAPPDATA%\Gravity\temp\job-<id>\`) is still not wired into either job type -- it
+exists, is unit-tested, and is not called from production code (confirmed via a
+repo-wide grep outside its own definition/test files). Both jobs still write directly
+into the user's real output directory (now via a temp-marked name, not the final one) --
+they don't yet get their own fully isolated scratch space the way this document
+previously implied `TempDirectory` provided. That's a larger change (redirecting yt-dlp's
+and ffmpeg's entire working directory, not just the final artifact's name) tracked as part
+of issue #10's queue-persistence/crash-recovery work, where a startup reconciliation pass
+needs a well-defined per-job directory to sweep anyway.
 
 ## Hardware detection
 

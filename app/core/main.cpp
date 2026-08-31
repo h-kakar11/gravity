@@ -416,9 +416,11 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
             "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
             "An output directory is required."));
     }
+    const settings::Settings settings = app.settingsStore.Load();
+
     // #11: reject traversal and (unless explicitly opted into) UNC output directories --
     // previously any string was accepted as-is.
-    const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
+    const bool allowNetworkPaths = settings.advanced.allowNetworkPaths;
     if (!filesystem::paths::IsSafeUserSuppliedPath(outputDirectory, allowNetworkPaths)) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
@@ -439,7 +441,13 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
             "available=" + std::to_string(*available) + " bytes"));
     }
 
-    downloads::QualityPreset quality = downloads::QualityPreset::Best;
+    // Falls back to Settings::downloads.defaultQuality (issue #59/dead-settings audit --
+    // this was previously always Best regardless of what the user configured) when the
+    // request doesn't specify its own quality; Settings::Validate() already guarantees
+    // this is one of QualityPresetFromWireString's recognized wire strings, so this
+    // specific call can't throw the way the request-supplied branch below can.
+    downloads::QualityPreset quality =
+        downloads::QualityPresetFromWireString(settings.downloads.defaultQuality);
     if (jobParams.contains("quality") && !jobParams.at("quality").is_null()) {
         try {
             quality = downloads::QualityPresetFromWireString(RequireString(jobParams, "quality"));
@@ -489,7 +497,8 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
     const std::string inputPath = RequireString(jobParams, "inputPath");
     const std::string outputDirectory = RequireString(jobParams, "outputDirectory");
 
-    const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
+    const settings::Settings settings = app.settingsStore.Load();
+    const bool allowNetworkPaths = settings.advanced.allowNetworkPaths;
     if (!filesystem::paths::IsSafeUserSuppliedPath(inputPath, allowNetworkPaths)) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_INVALID_INPUT_PATH", errors::ErrorCategory::Unknown,
@@ -529,11 +538,20 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
             "Lossless quality is a Pro feature and is not available yet."));
     }
 
+    // Global kill switch (issue #59/dead-settings audit: previously stored, validated,
+    // and shown in Settings, but never actually consulted -- per-job hardwareAcceleration
+    // choices were the only thing that ever mattered). This only ever narrows a job's own
+    // request down to "none"; it can't widen a job that explicitly asked for less.
+    json engineOptions = processingOptions;
+    if (!settings.processing.hardwareAccelerationEnabled) {
+        engineOptions["hardwareAcceleration"] = "none";
+    }
+
     jobs::MediaProcessingJob::Options options;
     options.inputPath = inputPath;
     options.outputDirectory = outputDirectory;
     options.outputFormat = outputFormat;
-    options.engineOptions = processingOptions;
+    options.engineOptions = std::move(engineOptions);
     options.isCompression = isCompression;
 
     auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,

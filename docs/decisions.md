@@ -334,3 +334,54 @@ section 47. Newest entries at the bottom of each phase's section.
   something specific to how the test harness binary links or initializes versus the real
   bin target. A diagnostic `objdump -p` step was added to the CI job's `cargo test` step to
   capture the crashing binary's actual imported DLL list before ruling out further causes.
+
+### Dead-Settings hardening pass -- wired some fields, deferred two others deliberately
+- **Context:** an audit found several `Settings` fields that were stored, round-tripped,
+  and validated, but never actually consulted by `app/core/main.cpp` when creating jobs --
+  a user changing them in the UI saw the change persist but nothing about job behavior
+  ever moved.
+- **Fixed this pass:** `downloads.defaultQuality` (also fixed a real bug: stored lowercase
+  `"best"` while `QualityPresetFromWireString` only accepts the uppercase wire vocabulary
+  `"BEST"`/`"1080P"`/etc. used everywhere else -- the frontend had already worked around
+  this with a defensive `.toUpperCase()`, `DownloaderPage.tsx`) now seeds
+  `HandleCreateDownloadJob`'s fallback when a request omits `quality`.
+  `processing.hardwareAccelerationEnabled` now acts as a global kill switch, forcing a
+  job's per-request `hardwareAcceleration` down to `"none"` regardless of what that job
+  asked for. `processing.defaultOutputFormat` had no frontend UI at all and no code path
+  that could plausibly consume it -- removed from `Settings.h`, `Settings.cpp`,
+  `types/settings.ts`, and its test fixtures rather than left as a silent no-op.
+  `privacy.analyticsEnabled`'s "always false" doc-comment promise is now enforced in
+  `Settings::Validate()`, not just documented.
+- **Deliberately deferred, not fixed:**
+  - `downloads.filenameTemplate` -- has a live `SettingsPage.tsx` UI control, but the
+    app's actual filename construction (`SanitizeWindowsFilename` + the TOCTOU-safe
+    `FilenameReservationRegistry` reservation/dedup pipeline) is architecturally
+    incompatible with a yt-dlp-style `%(title)s.%(ext)s` template string -- there is no
+    template-substitution step anywhere in that pipeline to plug one into. Wiring this in
+    for real is a genuine feature (letting users customize filename patterns), not a
+    mechanical fix, and is explicitly out of scope for a hardening-focused pass. Removing
+    the field and its UI instead was considered and rejected: that's a real user-facing
+    regression to make unilaterally rather than a mechanical dead-code removal like
+    `defaultOutputFormat` above.
+  - `downloads.concurrentDownloads` -- also has a live UI control and passes validation,
+    but `JobManager` sizes one shared thread pool across every job type via
+    `processing.concurrentJobs`; there is no per-job-type concurrency dimension to hang a
+    download-specific cap on today. Building one now risks conflicting with the
+    `SchedulerCore` extraction issue #17 already calls for (which explicitly needs
+    "eligibility under a concurrency cap" as part of its own design) -- a per-type cap
+    belongs there, as a natural extension of that work, not as a separate mechanism added
+    and then possibly reconciled with a second one shortly after.
+- **Crash-safety, same pass:** `DownloadJob` and `MediaProcessingJob` both now write under
+  a temp-marked name and promote (rename) to the clean final name only after every
+  verification step passes -- `MediaProcessingJob` computes its own temp/final leaf names
+  directly (a `.processing` marker) since its output extension is known upfront;
+  `DownloadJob` downloads under a `.partial`-marked base name since yt-dlp's merge step
+  means the extension isn't known until the download completes. Neither uses the
+  `AtomicWriter` class for the actual rename despite the naming-convention overlap with
+  it: `AtomicWriter::Commit()` calls `std::filesystem::rename` directly, bypassing the
+  `IFileSystem` abstraction the job/test layer is built on, which would have made every
+  `MockFileSystem`-based test for both job types fail (the temp file genuinely never
+  exists on the real filesystem when running under a mock). `IFileSystem::Rename` was
+  used instead -- same effect, stays mockable. `TempDirectory` (full working-directory
+  isolation, not just the final artifact's name) is still not wired in; that's queue
+  persistence's (#10) job, tracked separately in `docs/architecture.md`.

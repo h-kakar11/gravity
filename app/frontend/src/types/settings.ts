@@ -24,9 +24,11 @@ export interface DownloadSettings {
 }
 
 export interface ProcessingSettings {
+  // Global kill switch: forces every job's per-request hardwareAcceleration down to
+  // "none" when false, regardless of what that job asked for (never widens a job's own
+  // choice, only narrows it).
   hardwareAccelerationEnabled: boolean;
   defaultCompressionQuality: "lowest" | "low" | "medium" | "high" | "ultra";
-  defaultOutputFormat: string;
   concurrentJobs: number;
 }
 

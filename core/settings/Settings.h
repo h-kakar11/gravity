@@ -33,7 +33,12 @@ struct GeneralSettings {
 };
 
 struct DownloadSettings {
-    std::string defaultQuality = "best";
+    // "BEST" | "2160P" | "1440P" | "1080P" | "720P" | "480P" | "AUDIO_ONLY" -- the same
+    // wire vocabulary QualityPreset uses everywhere else (createJob's own `quality` field,
+    // docs/ipc-contract.md), not an independent casing. Used as HandleCreateDownloadJob's
+    // fallback when a createJob request omits `quality` entirely (issue #59/dead-settings
+    // audit: this field was stored and round-tripped but never actually consulted).
+    std::string defaultQuality = "BEST";
     std::string downloadDirectory;
     std::string filenameTemplate = "%(title)s.%(ext)s";
     int concurrentDownloads = 1;
@@ -42,11 +47,15 @@ struct DownloadSettings {
 };
 
 struct ProcessingSettings {
+    // Master kill switch: HandleCreateMediaProcessingJob forces a job's per-request
+    // hardwareAcceleration option down to "none" when this is false, regardless of what
+    // the request asked for. A per-job request can still choose weaker acceleration or
+    // none at all when this is true -- this only ever narrows, never widens, a job's own
+    // choice.
     bool hardwareAccelerationEnabled = true;
     // "lowest" | "low" | "medium" | "high" | "ultra" (issue #59: wanted an explicit
     // smallest/largest option at each end rather than just the three middle presets).
     std::string defaultCompressionQuality = "medium";
-    std::string defaultOutputFormat;
     int concurrentJobs = 1;
 };
 

@@ -35,7 +35,11 @@ DownloadJob::Options MakeOptions() {
 TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
     MockDownloadProvider provider;
     provider.inspectResult.title = "My Video";
-    provider.completedOutputPath = "C:\\out\\My Video.mp4";
+    // Downloads happen under a ".partial"-marked base name now (#10, crash-safety) --
+    // DownloadJob promotes it to the clean name as the last step on success, so the mock
+    // must simulate the provider writing under that marked name, same as real yt-dlp would
+    // given the filenameBase DownloadJob actually hands it.
+    provider.completedOutputPath = "C:\\out\\My Video.partial.mp4";
 
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
@@ -44,8 +48,8 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
     // for a pre-existing collision by that earlier check. See onDownloadStart's comment.
     provider.onDownloadStart = [&fs](const mediatool::downloads::DownloadOptions&) {
         FileInfo outputInfo;
-        outputInfo.path = "C:\\out\\My Video.mp4";
-        outputInfo.filename = "My Video.mp4";
+        outputInfo.path = "C:\\out\\My Video.partial.mp4";
+        outputInfo.filename = "My Video.partial.mp4";
         outputInfo.extension = "mp4";
         outputInfo.sizeBytes = 12345;
         fs.AddFile(outputInfo);
@@ -60,10 +64,12 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
 
     EXPECT_EQ(job.State(), JobState::Completed);
     ASSERT_TRUE(job.GetResult().has_value());
+    // Promoted to the clean name -- DownloadJob's final rename strips the ".partial"
+    // marker used during the download itself.
     EXPECT_EQ(job.GetResult()->at("outputPath"), "C:\\out\\My Video.mp4");
 
     ASSERT_TRUE(provider.lastDownloadOptions.has_value());
-    EXPECT_EQ(provider.lastDownloadOptions->filenameBase, "My Video");
+    EXPECT_EQ(provider.lastDownloadOptions->filenameBase, "My Video.partial");
 
     const auto metadata = job.GetMetadata();
     EXPECT_EQ(metadata.at("title"), "My Video");
@@ -125,7 +131,8 @@ TEST(DownloadJob, DeduplicatesFilenameWhenBaseNameAlreadyExists) {
     EXPECT_THROW(job.Execute(), MediaToolException);
 
     ASSERT_TRUE(provider.lastDownloadOptions.has_value());
-    EXPECT_EQ(provider.lastDownloadOptions->filenameBase, "My Video (1)");
+    // ".partial"-marked (#10) -- see CompletesAndVerifiesOutputWithoutMediaEngine.
+    EXPECT_EQ(provider.lastDownloadOptions->filenameBase, "My Video (1).partial");
 }
 
 TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
@@ -135,9 +142,11 @@ TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
 
     MockFileSystem fs;
     fs.AddDirectory("C:\\out");
+    // ".partial"-marked (#10) -- yt-dlp's own intermediate artifacts now land under the
+    // same temp-marked base name DownloadJob hands it as filenameBase, not the clean name.
     FileInfo partial;
-    partial.path = "C:\\out\\Broken Video.mp4.part";
-    partial.filename = "Broken Video.mp4.part";
+    partial.path = "C:\\out\\Broken Video.partial.mp4.part";
+    partial.filename = "Broken Video.partial.mp4.part";
     fs.AddFile(partial);
 
     mediatool::filesystem::FilenameReservationRegistry registry;
@@ -155,7 +164,8 @@ TEST(DownloadJob, DownloadFailureThrowsAndCleansUpArtifacts) {
     EXPECT_TRUE(threw);
 
     const auto& deleted = fs.DeletedPaths();
-    EXPECT_NE(std::find(deleted.begin(), deleted.end(), "C:\\out\\Broken Video.mp4.part"), deleted.end());
+    EXPECT_NE(std::find(deleted.begin(), deleted.end(), "C:\\out\\Broken Video.partial.mp4.part"),
+              deleted.end());
 }
 
 TEST(DownloadJob, DownloadFailureDoesNotDeleteUnrelatedPreExistingFilesOrDirectories) {
@@ -172,7 +182,8 @@ TEST(DownloadJob, DownloadFailureDoesNotDeleteUnrelatedPreExistingFilesOrDirecto
     const std::string backupDir = mediatool::filesystem::paths::Join(outDir, "Clip Backup");
     const std::string nestedPath = mediatool::filesystem::paths::Join(backupDir, "important.txt");
     const std::string unrelatedPath = mediatool::filesystem::paths::Join(outDir, "Clip Notes.txt");
-    const std::string partialPath = mediatool::filesystem::paths::Join(outDir, "Clip.mp4.part");
+    // ".partial"-marked (#10) -- see CompletesAndVerifiesOutputWithoutMediaEngine.
+    const std::string partialPath = mediatool::filesystem::paths::Join(outDir, "Clip.partial.mp4.part");
 
     MockFileSystem fs;
     fs.AddDirectory(outDir);
@@ -199,7 +210,7 @@ TEST(DownloadJob, DownloadFailureDoesNotDeleteUnrelatedPreExistingFilesOrDirecto
     // The job's own partial-download artifact, which cleanup *should* remove.
     FileInfo partial;
     partial.path = partialPath;
-    partial.filename = "Clip.mp4.part";
+    partial.filename = "Clip.partial.mp4.part";
     fs.AddFile(partial);
 
     mediatool::filesystem::FilenameReservationRegistry registry;

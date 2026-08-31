@@ -81,12 +81,23 @@ void DownloadJob::Execute() {
     starting.statusMessage = "Starting download";
     ReportProgress(starting);
 
+    // Download under a temp-marked base name, not the clean reserved one directly (#10):
+    // yt-dlp's own intermediate/partial artifacts (fragments, ".part", the pre-merge
+    // streams) would otherwise land at the exact name the user expects a *finished* file
+    // to have -- a crash or kill mid-download previously left a partial file sitting right
+    // there with nothing to distinguish it from a completed one. Every verification step
+    // below runs against the temp name; only a fully-verified file gets promoted to the
+    // clean name, in one rename, as the very last step before SetResult. The reservation
+    // itself still claims the CLEAN base name (so no other job can pick the same eventual
+    // title), independent of what marker the in-progress write uses.
+    const std::string tempFilenameBase = filenameBase + ".partial";
+
     downloads::DownloadOptions downloadOptions;
     downloadOptions.url = options_.url;
     downloadOptions.outputDirectory = options_.outputDirectory;
     downloadOptions.quality = options_.quality;
     downloadOptions.formatId = options_.formatId;
-    downloadOptions.filenameBase = filenameBase;
+    downloadOptions.filenameBase = tempFilenameBase;
 
     std::string outputPath;
     try {
@@ -96,12 +107,12 @@ void DownloadJob::Execute() {
             [&outputPath](const std::string& path) { outputPath = path; },
             [this] { return IsCancellationRequested(); });
     } catch (const errors::MediaToolException&) {
-        CleanupArtifacts(filenameBase);
+        CleanupArtifacts(tempFilenameBase);
         throw;
     }
 
     if (outputPath.empty() || !fileSystem_.Exists(outputPath)) {
-        CleanupArtifacts(filenameBase);
+        CleanupArtifacts(tempFilenameBase);
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_DOWNLOAD_OUTPUT_MISSING", errors::ErrorCategory::DownloadFailure,
             "The downloader reported success but the output file is missing.",
@@ -110,7 +121,7 @@ void DownloadJob::Execute() {
 
     filesystem::FileInfo info = fileSystem_.Inspect(outputPath);
     if (info.sizeBytes == 0) {
-        CleanupArtifacts(filenameBase);
+        CleanupArtifacts(tempFilenameBase);
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_DOWNLOAD_OUTPUT_EMPTY", errors::ErrorCategory::DownloadFailure,
             "The downloaded file is empty.", outputPath));
@@ -127,11 +138,26 @@ void DownloadJob::Execute() {
             info.bitrate = probed.bitrate;
             info.fps = probed.fps;
         } catch (const errors::MediaToolException& e) {
-            CleanupArtifacts(filenameBase);
+            CleanupArtifacts(tempFilenameBase);
             throw errors::MediaToolException(errors::ErrorInfo::Make(
                 "E_DOWNLOAD_VERIFICATION_FAILED", errors::ErrorCategory::InvalidFile,
                 "The downloaded file failed media verification.", e.Info().details));
         }
+    }
+
+    // Promote: strip the ".partial" marker from just the leaf filename (outputPath's
+    // extension is only known now, post-merge -- yt-dlp chooses it) and rename in place.
+    // Same directory, so this is a single cheap, atomic filesystem rename, not a copy.
+    const std::string leafName = filesystem::paths::GetFilename(outputPath);
+    if (leafName.compare(0, tempFilenameBase.size(), tempFilenameBase) == 0) {
+        const std::string cleanLeafName = filenameBase + leafName.substr(tempFilenameBase.size());
+        try {
+            fileSystem_.Rename(outputPath, cleanLeafName);
+        } catch (const errors::MediaToolException&) {
+            CleanupArtifacts(tempFilenameBase);
+            throw;
+        }
+        outputPath = filesystem::paths::Join(options_.outputDirectory, cleanLeafName);
     }
 
     nlohmann::json result;

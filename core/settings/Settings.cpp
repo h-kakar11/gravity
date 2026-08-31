@@ -120,7 +120,6 @@ nlohmann::json Settings::ToJson() const {
          {
              {"hardwareAccelerationEnabled", processing.hardwareAccelerationEnabled},
              {"defaultCompressionQuality", processing.defaultCompressionQuality},
-             {"defaultOutputFormat", processing.defaultOutputFormat},
              {"concurrentJobs", processing.concurrentJobs},
          }},
         {"privacy",
@@ -164,7 +163,6 @@ Settings Settings::FromJson(const nlohmann::json& json) {
         processing.at("hardwareAccelerationEnabled").get<bool>();
     settings.processing.defaultCompressionQuality =
         processing.at("defaultCompressionQuality").get<std::string>();
-    settings.processing.defaultOutputFormat = processing.at("defaultOutputFormat").get<std::string>();
     settings.processing.concurrentJobs = processing.at("concurrentJobs").get<int>();
 
     const auto& privacy = json.at("privacy");
@@ -186,12 +184,23 @@ void Settings::Validate() const {
     RequireInRange(downloads.concurrentDownloads, 1, 10, "downloads.concurrentDownloads");
     RequireOneOf(downloads.speedUnits, {"KBps", "KiBps", "MBps", "MiBps", "GBps", "GiBps", "Mbps"},
                  "downloads.speedUnits");
+    RequireOneOf(downloads.defaultQuality,
+                 {"BEST", "2160P", "1440P", "1080P", "720P", "480P", "AUDIO_ONLY"},
+                 "downloads.defaultQuality");
 
     RequireInRange(processing.concurrentJobs, 1, 25, "processing.concurrentJobs");
     RequireOneOf(processing.defaultCompressionQuality, {"lowest", "low", "medium", "high", "ultra"},
                  "processing.defaultCompressionQuality");
 
     RequireOneOf(advanced.logLevel, {"DEBUG", "INFO", "WARNING", "ERROR"}, "advanced.logLevel");
+
+    // Enforced, not just documented (the header comment on PrivacySettings::analyticsEnabled
+    // has promised "always false" since it was added, but nothing actually checked it --
+    // a hand-edited settings file or a raw updateSettings IPC call could silently flip it
+    // true with no telemetry backend behind it to even honor the flag).
+    if (privacy.analyticsEnabled) {
+        ThrowInvalid("privacy.analyticsEnabled must be false -- there is no telemetry backend to enable");
+    }
 
     RequireValidHotkeyIfPresent(general.hotkeyPasteAndDownload, "general.hotkeyPasteAndDownload");
     RequireValidHotkeyIfPresent(general.hotkeyFocusQueue, "general.hotkeyFocusQueue");
@@ -214,7 +223,7 @@ Settings Settings::Defaults() {
     settings.general.hotkeyPasteAndDownload = "CommandOrControl+Shift+D";
     settings.general.hotkeyFocusQueue = "CommandOrControl+Shift+Q";
 
-    settings.downloads.defaultQuality = "best";
+    settings.downloads.defaultQuality = "BEST";
     settings.downloads.downloadDirectory = defaultDir;
     settings.downloads.filenameTemplate = "%(title)s.%(ext)s";
     settings.downloads.concurrentDownloads = 1;
@@ -222,7 +231,6 @@ Settings Settings::Defaults() {
 
     settings.processing.hardwareAccelerationEnabled = true;
     settings.processing.defaultCompressionQuality = "medium";
-    settings.processing.defaultOutputFormat = "";
     settings.processing.concurrentJobs = 1;
 
     settings.privacy.analyticsEnabled = false;
