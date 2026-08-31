@@ -37,6 +37,7 @@
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
 #include "core/jobs/DownloadJob.h"
+#include "core/jobs/InProgressJobStore.h"
 #include "core/jobs/JobHistoryStore.h"
 #include "core/jobs/JobManager.h"
 #include "core/jobs/MediaProcessingJob.h"
@@ -139,6 +140,9 @@ struct AppContext {
     downloader::YtDlpProvider ytDlpProvider;
     jobs::JobManager jobManager;
     jobs::JobHistoryStore jobHistoryStore{jobs::DefaultJobHistoryFilePath()};
+    // #10: durable record of every non-terminal job, updated on each state transition --
+    // see core/jobs/InProgressJobStore.h.
+    jobs::InProgressJobStore inProgressJobStore{jobs::DefaultInProgressJobsFilePath()};
     settings::PresetStore presetStore{settings::DefaultPresetsFilePath()};
 
     // Tracks each job's previous state purely to classify the Running state as either
@@ -181,6 +185,9 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
         case JobState::Starting:
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobStarted,
                                                     {{"state", "STARTING"}}, id));
+            // #10: keep the in-progress record current so a crash/kill after this point
+            // still leaves a "this was Starting" trace instead of nothing at all.
+            app.inProgressJobStore.Upsert(app.jobManager.GetJob(id).ToJson());
             return;
         case JobState::Running:
             if (previous == JobState::Paused) {
@@ -192,10 +199,12 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
                 app.eventBus.Publish(
                     events::MakeEvent(events::EventType::JobStarted, {{"state", "RUNNING"}}, id));
             }
+            app.inProgressJobStore.Upsert(app.jobManager.GetJob(id).ToJson());
             return;
         case JobState::Paused:
             app.eventBus.Publish(
                 events::MakeEvent(events::EventType::JobPaused, {{"state", "PAUSED"}}, id));
+            app.inProgressJobStore.Upsert(app.jobManager.GetJob(id).ToJson());
             return;
         case JobState::Completed: {
             auto snapshot = app.jobManager.GetJob(id);
@@ -204,6 +213,7 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobCompleted, data, id));
             app.jobHistoryStore.Append(snapshot.ToJson());  // #10/"Session History": every
                                                              // terminal job is recorded
+            app.inProgressJobStore.Remove(id);  // JobHistoryStore is the durable record now
             return;
         }
         case JobState::Failed: {
@@ -212,12 +222,14 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             if (snapshot.error) data["error"] = snapshot.error->ToJson();
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobFailed, data, id));
             app.jobHistoryStore.Append(snapshot.ToJson());
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Cancelled: {
             app.eventBus.Publish(
                 events::MakeEvent(events::EventType::JobCancelled, {{"state", "CANCELLED"}}, id));
             app.jobHistoryStore.Append(app.jobManager.GetJob(id).ToJson());
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Queued:
@@ -485,6 +497,9 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+    // #10: persist even a job that hasn't started yet, so a crash before any worker picks
+    // it up still leaves a "this was Queued" trace rather than silently vanishing.
+    app.inProgressJobStore.Upsert(app.jobManager.GetJob(id).ToJson());
     return {{"jobId", id}};
 }
 
@@ -563,6 +578,9 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+    // #10: persist even a job that hasn't started yet, so a crash before any worker picks
+    // it up still leaves a "this was Queued" trace rather than silently vanishing.
+    app.inProgressJobStore.Upsert(app.jobManager.GetJob(id).ToJson());
     return {{"jobId", id}};
 }
 
@@ -591,6 +609,9 @@ json HandleCreateJob(AppContext& app, const json& params) {
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+    // #10: persist even a job that hasn't started yet, so a crash before any worker picks
+    // it up still leaves a "this was Queued" trace rather than silently vanishing.
+    app.inProgressJobStore.Upsert(app.jobManager.GetJob(id).ToJson());
     return {{"jobId", id}};
 }
 
@@ -617,6 +638,16 @@ json HandleListJobHistory(AppContext& app, const json& params) {
         if (entries.size() > static_cast<std::size_t>(*limit)) entries.resize(static_cast<std::size_t>(*limit));
     }
     return {{"jobs", json(entries)}};
+}
+
+// #10: surfaces whatever InProgressJobStore recovered from the previous run -- jobs that
+// were Queued/Starting/Running/Paused when the app last closed (crash, kill, or a normal
+// quit with work still in flight) and never reached a terminal state to be recorded by
+// JobHistoryStore instead. Read-only and startup-oriented: these entries are not live
+// JobManager jobs (nothing resumes the actual download/encode), just a durable trace of
+// what didn't finish, for the frontend to surface to the user.
+json HandleListInterruptedJobs(AppContext& app, const json&) {
+    return {{"jobs", json(app.inProgressJobStore.Load())}};
 }
 
 json HandleCancelJob(AppContext& app, const json& params) {
@@ -805,6 +836,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"getJob", HandleGetJob},
         {"listJobs", HandleListJobs},
         {"listJobHistory", HandleListJobHistory},
+        {"listInterruptedJobs", HandleListInterruptedJobs},
         {"cancelJob", HandleCancelJob},
         {"pauseJob", HandlePauseJob},
         {"resumeJob", HandleResumeJob},
@@ -833,6 +865,15 @@ void RunIpcLoop(AppContext& app) {
         [&app](const jobs::JobId& id, const jobs::Progress& progress) { PublishJobProgress(app, id, progress); });
     app.eventBus.Subscribe([](const events::Event& event) { WriteLine(event.ToJson()); });
     logging::Logger::SetEventSink([&app](events::Event event) { app.eventBus.Publish(event); });
+
+    // #10: log-visible signal that the previous run left work in flight (crash, kill, or
+    // a normal quit mid-job) -- listInterruptedJobs surfaces the same data to the
+    // frontend on request; this line just makes it observable without a client asking.
+    if (const auto interrupted = app.inProgressJobStore.Load(); !interrupted.empty()) {
+        logging::Log::Warning("mediatool-core", std::to_string(interrupted.size()) +
+                                                      " job(s) were still in progress when "
+                                                      "mediatool-core last exited.");
+    }
 
     logging::Log::Info("mediatool-core", "IPC loop starting");
 

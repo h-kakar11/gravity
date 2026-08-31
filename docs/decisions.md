@@ -385,3 +385,42 @@ section 47. Newest entries at the bottom of each phase's section.
   used instead -- same effect, stays mockable. `TempDirectory` (full working-directory
   isolation, not just the final artifact's name) is still not wired in; that's queue
   persistence's (#10) job, tracked separately in `docs/architecture.md`.
+
+### Queue persistence (#10) -- record durability now, artifact reconciliation deferred
+- **Context:** `JobManager` kept everything in memory; a crash, kill, or restart with jobs
+  still in flight silently lost the job record, its progress, its error history, and its
+  retry count, with nothing to show for it afterward.
+- **Delivered this pass:** `core/jobs/InProgressJobStore` (mirrors
+  `JsonFileSettingsStore`/`JobHistoryStore`'s exact atomic-write-then-rename,
+  fallback-to-empty-on-corrupt pattern) persists every non-terminal job's current
+  `JobManager::JobSnapshot::ToJson()` on each state transition -- upserted on
+  Queued/Starting/Running/Paused, removed once a job reaches a terminal state (from that
+  point `JobHistoryStore` is the durable record). A new read-only `listInterruptedJobs`
+  IPC command surfaces whatever survived from the previous run; `RunIpcLoop` also logs a
+  warning line at startup if the list is non-empty, so it's observable without a client
+  asking. Also closed a related, smaller gap while touching this: `docs/ipc-contract.md`'s
+  command table was missing `removeJob`/`getMediaEngineCapabilities`/`listPresets`/
+  `savePreset`/`deletePreset` even though all five already existed in both the C++ handler
+  table and the frontend's `types/ipc.ts` -- the doc's table itself was stale, not the code.
+- **Deliberately deferred:**
+  - **Resuming a job back into the live `JobManager` queue.** `listInterruptedJobs`'
+    entries are informational only -- nothing re-submits them, and nothing resumes the
+    actual yt-dlp/ffmpeg process. `JobHistoryStore.h`'s own header comment already records
+    this as an explicit non-goal ("resuming an in-flight process across a restart is high
+    complexity for little value on jobs that are typically seconds to minutes long"); this
+    pass doesn't relitigate that, it only stops the *record* of what was in flight from
+    being silently lost.
+  - **Orphaned-artifact reconciliation.** The generic `JobManager::JobSnapshot` doesn't
+    carry job-type-specific fields (output directory, the ".partial"/".processing"-marked
+    filename base Phase B's crash-safety work introduced), so this pass can't yet sweep a
+    startup directory scan for an interrupted job's leftover temp-marked files. Doing that
+    for real needs either widening the generic snapshot with optional job-type-specific
+    fields, or a job-type-aware reconciliation hook -- a real design decision, not a
+    mechanical addition, left for a follow-up now that the underlying record (this pass)
+    and the temp-marker naming convention (Phase B) both exist to build it on.
+  - **A `JobState::Interrupted` enum value.** Considered and rejected for this pass: it
+    would touch `JobStateMachine`'s transition table, `ToWireString`/`FromWireString`,
+    `IsTerminalState()`, and the frontend's `JobState` type -- a materially larger,
+    cross-cutting change for comparatively little gain over just reporting a job's last
+    *known* wire state (which `listInterruptedJobs` already does) as informational data
+    rather than inventing a new first-class state for it.

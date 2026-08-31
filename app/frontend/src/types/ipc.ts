@@ -16,6 +16,7 @@ export type CoreCommand =
   | "getJob"
   | "listJobs"
   | "listJobHistory"
+  | "listInterruptedJobs"
   | "cancelJob"
   | "pauseJob"
   | "resumeJob"
@@ -53,6 +54,7 @@ export interface CommandParams {
   getJob: { jobId: string };
   listJobs: Record<string, never>;
   listJobHistory: { limit?: number };
+  listInterruptedJobs: Record<string, never>;
   cancelJob: { jobId: string };
   pauseJob: { jobId: string };
   resumeJob: { jobId: string };
@@ -79,6 +81,9 @@ export interface CommandResult {
   getJob: { job: JobSnapshot };
   listJobs: { jobs: JobSnapshot[] };
   listJobHistory: { jobs: JobSnapshot[] };
+  // #10: jobs that were Queued/Starting/Running/Paused when mediatool-core last exited
+  // without reaching a terminal state -- informational only, not live JobManager jobs.
+  listInterruptedJobs: { jobs: JobSnapshot[] };
   cancelJob: Record<string, never>;
   pauseJob: Record<string, never>;
   resumeJob: Record<string, never>;

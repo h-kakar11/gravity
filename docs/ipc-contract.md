@@ -89,18 +89,24 @@ verified without hitting a real URL.
 |---|---|---|
 | `createJob` | `{type: JobType, params: object}` | `{jobId: string}` |
 | `listJobHistory` | `{limit?: number}` | `{jobs: JobSnapshot[]}` (most-recent-first; backed by `job_history.json`, a bounded ring buffer of terminal-state jobs -- see `core/jobs/JobHistoryStore.h`) |
+| `listInterruptedJobs` | `{}` | `{jobs: JobSnapshot[]}` (jobs that were Queued/Starting/Running/Paused when mediatool-core last exited without reaching a terminal state -- backed by `jobs_in_progress.json`, see `core/jobs/InProgressJobStore.h`, issue #10. Informational only: these are not live JobManager jobs and nothing resumes them.) |
 | `getJob` | `{jobId: string}` | `{job: JobSnapshot}` |
 | `listJobs` | `{}` | `{jobs: JobSnapshot[]}` |
 | `cancelJob` | `{jobId: string}` | `{}` |
 | `pauseJob` | `{jobId: string}` | `{}` |
 | `resumeJob` | `{jobId: string}` | `{}` |
 | `retryJob` | `{jobId: string}` | `{}` |
+| `removeJob` | `{jobId: string}` | `{}` (drops a terminal-state job from the active set; issue #29) |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[]}` |
 | `getSettings` | `{}` | `{settings: Settings}` |
 | `updateSettings` | `{settings: object}` (partial) | `{settings: Settings}` |
 | `getHardwareInfo` | `{}` | `{hardwareInfo: HardwareInfo}` |
+| `getMediaEngineCapabilities` | `{}` | `{availableEncoders: string[], hardwareEncodersAvailable: {nvenc, amf, qsv: boolean}}` |
+| `listPresets` | `{}` | `{presets: Preset[]}` |
+| `savePreset` | `{id?: string, name: string, kind: "DOWNLOAD"\|"CONVERSION"\|"COMPRESSION", options?: object}` | `{preset: Preset}` |
+| `deletePreset` | `{id: string}` | `{}` |
 
 Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 

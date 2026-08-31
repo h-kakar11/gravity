@@ -129,6 +129,8 @@ export const createJob = (params: CommandParams["createJob"]) => sendCommand("cr
 export const getJob = (jobId: string) => sendCommand("getJob", { jobId });
 export const listJobs = () => sendCommand("listJobs", {});
 export const listJobHistory = (limit?: number) => sendCommand("listJobHistory", { limit });
+// #10: jobs left non-terminal when mediatool-core last exited -- informational, not live.
+export const listInterruptedJobs = () => sendCommand("listInterruptedJobs", {});
 export const cancelJob = (jobId: string) => sendCommand("cancelJob", { jobId });
 export const pauseJob = (jobId: string) => sendCommand("pauseJob", { jobId });
 export const resumeJob = (jobId: string) => sendCommand("resumeJob", { jobId });
