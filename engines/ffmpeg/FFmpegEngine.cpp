@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/errors/MediaToolException.h"
+#include "core/process/CooperativeCancel.h"
 #include "engines/ffmpeg/FFmpegArgBuilder.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
 #include "engines/ffmpeg/FFmpegProgressParser.h"
@@ -307,28 +308,13 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
             "Failed to launch ffmpeg", "IProcessRunner::Start returned null"));
     }
 
-    // Cooperative cancellation, mirroring YtDlpProvider::RunPythonCommand's convention:
-    // Terminate() first, give it a couple seconds, Kill() if it's still not gone.
-    process::ProcessResult result;
-    bool finished = false;
-    while (!finished) {
-        if (isCancelled && isCancelled()) {
-            child->Terminate();
-            if (auto terminated = child->WaitFor(2000)) {
-                result = *terminated;
-            } else {
-                child->Kill();
-                result = child->Wait();
-            }
-            throw MediaToolException(ErrorInfo::Make(
-                "E_MEDIA_PROCESSING_CANCELLED", ErrorCategory::Cancelled,
-                "Conversion was cancelled.", "", /*recoverable=*/true));
-        }
-        if (auto finishedResult = child->WaitFor(200)) {
-            result = *finishedResult;
-            finished = true;
-        }
+    const process::WaitOutcome outcome = process::WaitForCompletionOrCancel(*child, isCancelled);
+    if (outcome.wasCancelled) {
+        throw MediaToolException(ErrorInfo::Make(
+            "E_MEDIA_PROCESSING_CANCELLED", ErrorCategory::Cancelled,
+            "Conversion was cancelled.", "", /*recoverable=*/true));
     }
+    const process::ProcessResult result = *outcome.result;
 
     if (result.exitCode != 0) {
         throw MediaToolException(ErrorInfo::Make(

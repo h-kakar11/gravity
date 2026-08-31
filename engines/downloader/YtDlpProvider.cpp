@@ -10,6 +10,7 @@
 
 #include "core/downloads/NdjsonLineProtocol.h"
 #include "core/errors/MediaToolException.h"
+#include "core/process/CooperativeCancel.h"
 #include "engines/downloader/YtDlpFormatSelector.h"
 
 namespace mediatool::downloader {
@@ -159,29 +160,14 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
     child->WriteLine(command.dump());
     child->CloseStdin();
 
-    process::ProcessResult result;
-    bool finished = false;
-    while (!finished) {
-        if (isCancelled && isCancelled()) {
-            child->Terminate();
-            if (auto terminated = child->WaitFor(2000)) {
-                result = *terminated;
-            } else {
-                child->Kill();
-                result = child->Wait();
-            }
-            throw errors::MediaToolException(errors::ErrorInfo::Make(
-                cancelCode, errors::ErrorCategory::Cancelled, cancelMessage, "", /*recoverable=*/true));
-        }
-
-        if (auto finishedResult = child->WaitFor(200)) {
-            result = *finishedResult;
-            finished = true;
-        }
+    const process::WaitOutcome waitOutcome = process::WaitForCompletionOrCancel(*child, isCancelled);
+    if (waitOutcome.wasCancelled) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            cancelCode, errors::ErrorCategory::Cancelled, cancelMessage, "", /*recoverable=*/true));
     }
 
     RunOutcome outcome;
-    outcome.processResult = result;
+    outcome.processResult = *waitOutcome.result;
     {
         std::lock_guard<std::mutex> lock(stateMutex);
         outcome.error = pendingError;

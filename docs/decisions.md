@@ -469,3 +469,22 @@ section 47. Newest entries at the bottom of each phase's section.
 - **Not revisited:** `docs/pr43-findings.md`'s retry-classification/backoff sketch (from
   an abandoned parallel PR) remains the best existing reference for the shape this should
   eventually take.
+
+### Shared `core/process/CooperativeCancel.h` for the ffmpeg/yt-dlp cancel loop
+- **Context:** `FFmpegEngine::RunFfmpegJob` and `YtDlpProvider::RunPythonCommand` each
+  independently hand-rolled the identical cooperative-cancel-then-kill polling loop (poll
+  `WaitFor(200ms)`; on cancellation, `Terminate()`, give it up to 2s via `WaitFor(2000)`,
+  `Kill()` if it's still not gone) -- flagged as exactly the kind of duplication that let
+  a real bug (the reproc-timeout-semantics bug documented earlier in this file) exist
+  independently in more than one place.
+- **Choice:** extracted `process::WaitForCompletionOrCancel(IProcess&, isCancelled)` into
+  a new `core/process/CooperativeCancel.h`/`.cpp`. Returns a `WaitOutcome{result,
+  wasCancelled}` rather than throwing itself -- each caller still constructs its own
+  specific `MediaToolException` (different error codes/messages/categories), so the
+  helper only owns the polling/teardown mechanics, not error semantics.
+- **Verification:** new `CooperativeCancelTest.cpp` exercises all three paths (finishes
+  cleanly without cancellation; cancelled and exits within the grace period; cancelled and
+  needs `Kill()`) against a small scripted `IProcess` written for this test --
+  `MockProcessRunner`'s existing `MockProcess` always completes synchronously on the first
+  `WaitFor()` call, so it can't represent "still running" long enough to reach either
+  branch of the cancel path.
