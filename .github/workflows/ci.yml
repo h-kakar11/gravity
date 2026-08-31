@@ -113,21 +113,23 @@ jobs:
           rustup component add clippy
 
       - name: cargo test
-        # Statically link the MinGW C/C++ runtime (libgcc/libstdc++/libwinpthread) into the
-        # test binary. Without this, the test exe dynamically links those DLLs and can pick
-        # up a different, incompatible copy from elsewhere on the runner's PATH at execution
-        # time (e.g. a second MinGW/MSYS install baked into windows-latest) -- symptom is a
-        # process that compiles and links fine but crashes on launch with
-        # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) because the loaded DLL doesn't export a
-        # symbol the exe expects. Static linking removes the runtime DLL search entirely.
-        run: cargo test
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
+        # TEMPORARY DIAGNOSTIC (see docs/decisions.md "Rust CI STATUS_ENTRYPOINT_NOT_FOUND
+        # investigation"): the compiled unittest binary crashes on launch with
+        # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) -- it links fine but a loaded DLL doesn't
+        # export a symbol the exe expects. Statically linking the MinGW C/C++ runtime
+        # (RUSTFLAGS=-C target-feature=+crt-static) did not fix it, ruling out a
+        # libgcc/libstdc++/libwinpthread version mismatch. Build the test binary without
+        # running it, dump its imported DLLs with objdump so the actual offending DLL shows
+        # up in the CI log, then run it for real so the job still reports pass/fail.
+        run: |
+          cargo test --no-run
+          $testExe = Get-ChildItem -Recurse -Filter "gravity_desktop_lib-*.exe" target\debug\deps | Select-Object -First 1
+          Write-Host "Test binary: $($testExe.FullName)"
+          objdump -p $testExe.FullName | Select-String -Pattern "DLL Name|File Offset"
+          cargo test
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
 
   frontend:
     name: Frontend (tsc + vite build + vitest)

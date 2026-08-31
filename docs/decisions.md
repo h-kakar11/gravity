@@ -307,3 +307,30 @@ section 47. Newest entries at the bottom of each phase's section.
   file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
   mistaken for a deliberate "we chose all-rights-reserved" decision later. Revisit before
   any public source distribution.
+
+### Commit `app/desktop/src-tauri/Cargo.lock` after all
+- **Context:** it was gitignored from the start. That's the right default for a Rust
+  *library* (let downstream consumers resolve freshly) but wrong for an application like
+  this Tauri shell — every CI run and every fresh clone re-resolves the entire dependency
+  graph from scratch, so a new patch release anywhere in a 300+-crate tree (this app has no
+  control over, e.g. inside Tauri's own dependencies) can silently change what actually
+  gets built, with zero code change on Gravity's side.
+- **Reason surfaced:** investigating Rust CI's `cargo test` crashing on launch with
+  `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139) starting ~2026-08-29 across otherwise-unrelated
+  branches simultaneously — a pattern that only makes sense if something external to the
+  diff changed, which an unpinned lockfile allows silently.
+- **Choice:** un-ignore it, commit a freshly generated one.
+- **Caveat:** generating it (via plain `cargo generate-lockfile`, cross-platform-safe since
+  it only resolves, not builds) reproduced essentially the same
+  `windows`/`windows-targets`/`windows_x86_64_gnu` version spread already present, so this
+  alone is not confirmed to fix the entrypoint crash — it removes one source of
+  non-reproducibility regardless, and CI now pins to this exact resolution rather than
+  whatever crates.io happens to serve on a given run.
+- **Still open:** the entrypoint crash itself. Ruled out so far: a MinGW C/C++ runtime DLL
+  version mismatch (`RUSTFLAGS=-C target-feature=+crt-static` made no difference — identical
+  crash, same exit code). Notably, the real `gravity-desktop.exe` binary (the `main.rs`
+  bin target) has run successfully outside CI; only `cargo test`'s separate unittest
+  binary for the `lib` target (`gravity_desktop_lib-*.exe`) crashes, which narrows this to
+  something specific to how the test harness binary links or initializes versus the real
+  bin target. A diagnostic `objdump -p` step was added to the CI job's `cargo test` step to
+  capture the crashing binary's actual imported DLL list before ruling out further causes.
