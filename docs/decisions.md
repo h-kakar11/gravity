@@ -424,3 +424,48 @@ section 47. Newest entries at the bottom of each phase's section.
     cross-cutting change for comparatively little gain over just reporting a job's last
     *known* wire state (which `listInterruptedJobs` already does) as informational data
     rather than inventing a new first-class state for it.
+
+### Queue scheduling/retry policy (#17) -- two contained fixes now, the architecture deferred
+- **Context:** issue #17 asks for four things: priority ordering (already landed in a
+  prior session), a `SchedulerCore`/`JobManager` split with dependency support, an
+  automatic retry policy keyed on `ErrorInfo.recoverable`, and a small confirmed defect
+  in `MarkRetrying()`.
+- **Delivered this pass:**
+  - Fixed the confirmed defect: `Job::MarkRetrying()` (`Job.cpp`) cleared
+    `cancellationRequested_` but left the previous run's `error_`/`progress_` in place, so
+    a retried job's `GetJob()`/`ListJobs()` snapshot reported the stale failure and stale
+    byte counts until the new run's first real progress event happened to overwrite them.
+    Now resets both. New regression test:
+    `JobTest.MarkRetryingClearsStaleErrorAndProgress`.
+  - Wired `removeJob` (backend already existed, correct, but unreachable from any UI --
+    the frontend agent survey and issue #39's own evidence table both flagged this) to a
+    "Clear completed (N)" button in `QueuePage.tsx`'s History section header. Purely
+    backend memory hygiene -- `JobManager::jobs_` otherwise grows unbounded for the life
+    of the process, since nothing else ever called `removeJob`. The visible History list
+    itself is driven by the separate, already-bounded `JobHistoryStore` and doesn't change
+    either way.
+- **Deliberately deferred (the architectural core of the issue):**
+  - **`SchedulerCore` extraction** (pure, threadless scheduling-decision unit, separated
+    from `JobManager`'s executor role) and **`dependsOn`** (job-chain dependencies, with
+    upstream-fail/cancel propagation semantics that need deciding, not just coding). The
+    issue's own priority label says why this is reasonable to defer here: **"Nothing here
+    is broken in shipped behaviour -- it is unbuilt."** This is new architecture and a real
+    product-design surface (dependency-failure semantics in particular), not a correctness
+    fix, and the issue's linked P2 priority reflects that. Attempting it without any way
+    to compile/run the C++ core in this environment -- against `JobManager`'s
+    highest-traffic, most heavily-relied-on code path, used by every job of every type --
+    is a materially worse risk/reward trade than the contained fixes above, which were
+    each independently hand-traced against the existing test suite before landing.
+  - **Automatic retry policy keyed on `ErrorInfo.recoverable`.** The signal already exists
+    end-to-end (`downloader.py`'s `classify_exception` populates it, `ErrorInfo.recoverable`
+    carries it through) and nothing currently reads it to decide anything -- a real,
+    contained gap. Deferred anyway for this pass because a bounded-retry-with-backoff
+    policy needs a decision on where it lives (a timer thread? triggered from the
+    `JobStateChanged` callback that already runs on every transition?) that interacts
+    directly with the `SchedulerCore` split above -- building it now risks either blocking
+    on that undone work or building something that has to be substantially reshaped once
+    `SchedulerCore` exists. Better done together, in a follow-up pass with real Windows
+    build verification available.
+- **Not revisited:** `docs/pr43-findings.md`'s retry-classification/backoff sketch (from
+  an abandoned parallel PR) remains the best existing reference for the shape this should
+  eventually take.

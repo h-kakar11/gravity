@@ -129,7 +129,7 @@ function HistoryRow({ job }: { job: JobSnapshot }) {
 }
 
 export default function QueuePage() {
-  const { jobs, connectionError, cancelJob, pauseJob, resumeJob, retryJob } = useJobs();
+  const { jobs, connectionError, cancelJob, pauseJob, resumeJob, retryJob, removeJob } = useJobs();
   const [history, setHistory] = useState<JobSnapshot[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
@@ -153,6 +153,17 @@ export default function QueuePage() {
   const activeJobs = jobs
     .filter((job) => !TERMINAL_STATES.has(job.state))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+  // Issue #29: terminal jobs stay in JobManager's in-memory set (unbounded growth over a
+  // long session) until something calls removeJob -- the History section below is driven
+  // by the separate, already-bounded JobHistoryStore and is unaffected either way, so this
+  // is purely backend cleanup, not a visual change to History.
+  const clearableCount = jobs.filter((job) => TERMINAL_STATES.has(job.state)).length;
+  const clearCompleted = () => {
+    for (const job of jobs) {
+      if (TERMINAL_STATES.has(job.state)) void removeJob(job.id);
+    }
+  };
 
   return (
     <div className={styles.wrap}>
@@ -179,7 +190,14 @@ export default function QueuePage() {
       </section>
 
       <section>
-        <h2 className={styles.sectionTitle}>History</h2>
+        <div className={styles.historyHeader}>
+          <h2 className={styles.sectionTitle}>History</h2>
+          {clearableCount > 0 && (
+            <button className={styles.actionButton} onClick={clearCompleted}>
+              Clear completed ({clearableCount})
+            </button>
+          )}
+        </div>
         {historyError && <div className={styles.errorText}>{historyError}</div>}
         {history.length === 0 ? (
           <div className={styles.emptyState}>No completed jobs yet.</div>

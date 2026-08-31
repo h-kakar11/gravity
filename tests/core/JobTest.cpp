@@ -5,9 +5,12 @@
 #include <string_view>
 
 #include "core/common/IClock.h"
+#include "core/errors/ErrorInfo.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/TestJob.h"
 
+using mediatool::errors::ErrorCategory;
+using mediatool::errors::ErrorInfo;
 using mediatool::jobs::GenerateJobId;
 using mediatool::jobs::JobState;
 using mediatool::jobs::Progress;
@@ -64,6 +67,31 @@ TEST(Job, TimestampsAreSetByLifecycleMethods) {
     job.MarkCompleted();
     EXPECT_EQ(job.State(), JobState::Completed);
     ASSERT_TRUE(job.CompletedAt().has_value());
+}
+
+// Regression test for #17: MarkRetrying() previously cleared cancellationRequested_ but
+// left the prior run's error_/progress_ in place, so a retried job's snapshot reported
+// the stale failure and stale byte counts until the new run's own progress events
+// happened to overwrite them.
+TEST(Job, MarkRetryingClearsStaleErrorAndProgress) {
+    TestJob job;
+    job.MarkStarting();
+    job.MarkRunning();
+
+    Progress midProgress;
+    midProgress.statusMessage = "Halfway done";
+    midProgress.percentage = 50.0;
+    job.ReportProgress(midProgress);
+    EXPECT_EQ(job.GetProgress().percentage, 50.0);
+
+    job.MarkFailed(ErrorInfo::Make("E_TEST_FAILURE", ErrorCategory::Unknown, "boom"));
+    ASSERT_TRUE(job.GetError().has_value());
+
+    job.MarkRetrying();
+
+    EXPECT_FALSE(job.GetError().has_value());
+    EXPECT_FALSE(job.GetProgress().percentage.has_value());
+    EXPECT_EQ(job.GetProgress().statusMessage, "Retrying");
 }
 
 TEST(Job, TestJobRunsDirectlyAndReportsIncreasingProgress) {

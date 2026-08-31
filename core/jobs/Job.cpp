@@ -251,6 +251,13 @@ void Job::MarkRetrying() {
         if (transitioned) {
             cancellationRequested_ = false;
             completedAt_.reset();
+            // #17: previously left the prior run's error_/progress_ in place, so a
+            // retried job's snapshot reported the stale failure and stale byte counts
+            // until the new run's own progress events overwrote them -- misleading for
+            // anything reading GetJob()/ListJobs() in the window between MarkRetrying()
+            // and the new run's first real progress report.
+            error_.reset();
+            progress_ = Progress{.statusMessage = "Retrying"};
         }
     }
     if (!transitioned) ThrowInvalidTransition(previous, JobState::Retrying);

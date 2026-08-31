@@ -16,6 +16,17 @@
   margin: 0 0 12px;
 }
 
+.historyHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.historyHeader .sectionTitle {
+  margin: 0;
+}
+
 .list {
   display: flex;
   flex-direction: column;
