@@ -261,6 +261,52 @@ std::string RequireString(const json& params, const char* field) {
     return value.get<std::string>();
 }
 
+// Completes the per-field validation RequireString's own comment left for later (issue
+// #21): createJob's nested params object, updateSettings' settings object, and the
+// preset/inspect/capabilities handlers all used to index straight into `params` with
+// `.at(...).get<T>()`, so a missing or wrong-typed field surfaced as a raw nlohmann
+// exception through the generic E_UNHANDLED_EXCEPTION catch in RunIpcLoop instead of a
+// specific, documented error code. Every remaining handler below is routed through one of
+// these instead.
+const json& RequireObject(const json& params, const char* field) {
+    if (!params.contains(field)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_MISSING_PARAM", errors::ErrorCategory::Unknown,
+            std::string(field) + " is required.", "field=" + std::string(field)));
+    }
+    const json& value = params.at(field);
+    if (!value.is_object()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PARAM_TYPE", errors::ErrorCategory::Unknown,
+            std::string(field) + " must be an object.", "field=" + std::string(field)));
+    }
+    return value;
+}
+
+int RequireInt(const json& params, const char* field) {
+    if (!params.contains(field)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_MISSING_PARAM", errors::ErrorCategory::Unknown,
+            std::string(field) + " is required.", "field=" + std::string(field)));
+    }
+    const json& value = params.at(field);
+    if (!value.is_number_integer()) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PARAM_TYPE", errors::ErrorCategory::Unknown,
+            std::string(field) + " must be an integer.", "field=" + std::string(field)));
+    }
+    return value.get<int>();
+}
+
+// For an optional field: absent or explicit null both mean "not supplied" (same
+// null-means-absent normalization RunIpcLoop already applies to the top-level `params`
+// object itself); present-and-wrong-typed is still a hard error rather than silently
+// ignored.
+std::optional<int> OptionalInt(const json& params, const char* field) {
+    if (!params.contains(field) || params.at(field).is_null()) return std::nullopt;
+    return RequireInt(params, field);
+}
+
 filesystem::FileInfo InspectFileEnriched(AppContext& app, const std::string& path) {
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
 
@@ -362,8 +408,8 @@ json HandleInspectDownloadUrl(AppContext& app, const json& params) {
 }
 
 json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
-    const std::string url = jobParams.at("url").get<std::string>();
-    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
+    const std::string url = RequireString(jobParams, "url");
+    const std::string outputDirectory = RequireString(jobParams, "outputDirectory");
     ValidateDownloadUrl(app, url);
     if (outputDirectory.empty()) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
@@ -394,9 +440,9 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     }
 
     downloads::QualityPreset quality = downloads::QualityPreset::Best;
-    if (jobParams.contains("quality")) {
+    if (jobParams.contains("quality") && !jobParams.at("quality").is_null()) {
         try {
-            quality = downloads::QualityPresetFromWireString(jobParams.at("quality").get<std::string>());
+            quality = downloads::QualityPresetFromWireString(RequireString(jobParams, "quality"));
         } catch (const std::invalid_argument& e) {
             throw errors::MediaToolException(errors::ErrorInfo::Make(
                 "E_INVALID_QUALITY_PRESET", errors::ErrorCategory::Unknown, e.what()));
@@ -407,7 +453,7 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     // entirely -- see downloads::DownloadOptions::formatId.
     std::optional<std::string> formatId;
     if (jobParams.contains("formatId") && !jobParams.at("formatId").is_null()) {
-        std::string value = jobParams.at("formatId").get<std::string>();
+        std::string value = RequireString(jobParams, "formatId");
         if (value.empty()) {
             throw errors::MediaToolException(errors::ErrorInfo::Make(
                 "E_INVALID_MEDIA_OPTIONS", errors::ErrorCategory::Unknown, "formatId must not be empty."));
@@ -425,8 +471,8 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
                                                     &app.ffmpegEngine, app.reservationRegistry);
     // Optional scheduling priority (issue #17): higher runs before lower among jobs still
     // Queued. Absent/0 keeps today's plain-FIFO behavior.
-    if (jobParams.contains("priority") && !jobParams.at("priority").is_null()) {
-        job->SetPriority(jobParams.at("priority").get<int>());
+    if (auto priority = OptionalInt(jobParams, "priority")) {
+        job->SetPriority(*priority);
     }
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
@@ -440,8 +486,8 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
 // option VALUES (supplied by the caller, i.e. the frontend's preset), not a different
 // code path here either.
 json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool isCompression) {
-    const std::string inputPath = jobParams.at("inputPath").get<std::string>();
-    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
+    const std::string inputPath = RequireString(jobParams, "inputPath");
+    const std::string outputDirectory = RequireString(jobParams, "outputDirectory");
 
     const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
     if (!filesystem::paths::IsSafeUserSuppliedPath(inputPath, allowNetworkPaths)) {
@@ -464,7 +510,10 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
             "outputDirectory=" + outputDirectory));
     }
 
-    const json processingOptions = jobParams.contains("options") ? jobParams.at("options") : json::object();
+    const json processingOptions =
+        (jobParams.contains("options") && !jobParams.at("options").is_null())
+            ? RequireObject(jobParams, "options")
+            : json::object();
     const std::string outputFormat = processingOptions.value("outputFormat", std::string());
     if (outputFormat.empty()) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
@@ -490,8 +539,8 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
     auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
                                                           app.fileSystem, app.reservationRegistry);
     // See HandleCreateDownloadJob above -- same optional scheduling priority (issue #17).
-    if (jobParams.contains("priority") && !jobParams.at("priority").is_null()) {
-        job->SetPriority(jobParams.at("priority").get<int>());
+    if (auto priority = OptionalInt(jobParams, "priority")) {
+        job->SetPriority(*priority);
     }
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
@@ -500,16 +549,16 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
 }
 
 json HandleCreateJob(AppContext& app, const json& params) {
-    const std::string typeWire = params.at("type").get<std::string>();
+    const std::string typeWire = RequireString(params, "type");
 
     if (typeWire == "DOWNLOAD") {
-        return HandleCreateDownloadJob(app, params.at("params"));
+        return HandleCreateDownloadJob(app, RequireObject(params, "params"));
     }
     if (typeWire == "CONVERSION") {
-        return HandleCreateMediaProcessingJob(app, params.at("params"), /*isCompression=*/false);
+        return HandleCreateMediaProcessingJob(app, RequireObject(params, "params"), /*isCompression=*/false);
     }
     if (typeWire == "COMPRESSION") {
-        return HandleCreateMediaProcessingJob(app, params.at("params"), /*isCompression=*/true);
+        return HandleCreateMediaProcessingJob(app, RequireObject(params, "params"), /*isCompression=*/true);
     }
 
     if (typeWire != "TEST") {
@@ -541,9 +590,13 @@ json HandleListJobHistory(AppContext& app, const json& params) {
     std::vector<nlohmann::json> entries = app.jobHistoryStore.Load();
     // Load() returns oldest-first; the UI wants most-recent-first ("Session History").
     std::reverse(entries.begin(), entries.end());
-    if (params.contains("limit") && !params.at("limit").is_null()) {
-        const auto limit = params.at("limit").get<std::size_t>();
-        if (entries.size() > limit) entries.resize(limit);
+    if (auto limit = OptionalInt(params, "limit")) {
+        if (*limit < 0) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_PARAM_TYPE", errors::ErrorCategory::Unknown,
+                "limit must not be negative.", "field=limit"));
+        }
+        if (entries.size() > static_cast<std::size_t>(*limit)) entries.resize(static_cast<std::size_t>(*limit));
     }
     return {{"jobs", json(entries)}};
 }
@@ -585,7 +638,7 @@ json HandleRemoveJob(AppContext& app, const json& params) {
 }
 
 json HandleInspectFile(AppContext& app, const json& params) {
-    const std::string path = params.at("path").get<std::string>();
+    const std::string path = RequireString(params, "path");
     // #11: same traversal/UNC gate as HandleCreateDownloadJob's output directory --
     // inspectFile previously accepted any absolute path with no restriction at all
     // (e.g. a traversal or UNC path reaching well outside anything the user selected).
@@ -601,7 +654,7 @@ json HandleInspectFile(AppContext& app, const json& params) {
 }
 
 json HandleGetCapabilities(AppContext& app, const json& params) {
-    const std::string path = params.at("path").get<std::string>();
+    const std::string path = RequireString(params, "path");
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
     return {{"capabilities", filesystem::CapabilitiesFor(info.category, info.extension)}};
 }
@@ -612,7 +665,7 @@ json HandleGetSettings(AppContext& app, const json&) {
 
 json HandleUpdateSettings(AppContext& app, const json& params) {
     json merged = app.settingsStore.Load().ToJson();
-    merged.merge_patch(params.at("settings"));
+    merged.merge_patch(RequireObject(params, "settings"));
     settings::Settings updated = settings::Settings::FromJson(merged);
     app.settingsStore.Save(updated);
     return {{"settings", updated.ToJson()}};
@@ -662,9 +715,11 @@ json HandleListPresets(AppContext& app, const json&) {
 }
 
 json HandleSavePreset(AppContext& app, const json& params) {
-    const std::string name = params.at("name").get<std::string>();
-    const std::string kind = params.at("kind").get<std::string>();
-    const json options = params.value("options", json::object());
+    const std::string name = RequireString(params, "name");
+    const std::string kind = RequireString(params, "kind");
+    const json options = (params.contains("options") && !params.at("options").is_null())
+                              ? RequireObject(params, "options")
+                              : json::object();
 
     if (name.empty()) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
@@ -685,7 +740,8 @@ json HandleSavePreset(AppContext& app, const json& params) {
     // place" (rename / re-save with new options); a missing or non-matching id means
     // "create a new one" -- match-by-identity rather than trusting an index, so a stale id
     // can never silently overwrite the wrong entry.
-    const std::string requestedId = params.value("id", std::string());
+    const std::string requestedId =
+        (params.contains("id") && !params.at("id").is_null()) ? RequireString(params, "id") : std::string();
     auto it = std::find_if(presets.begin(), presets.end(), [&](const settings::Preset& p) {
         return !requestedId.empty() && p.id == requestedId;
     });
@@ -707,7 +763,7 @@ json HandleSavePreset(AppContext& app, const json& params) {
 }
 
 json HandleDeletePreset(AppContext& app, const json& params) {
-    const std::string id = params.at("id").get<std::string>();
+    const std::string id = RequireString(params, "id");
     std::vector<settings::Preset> presets = app.presetStore.Load();
     const std::size_t before = presets.size();
     presets.erase(
@@ -762,9 +818,21 @@ void RunIpcLoop(AppContext& app) {
 
     logging::Log::Info("mediatool-core", "IPC loop starting");
 
+    // Defensive upper bound on a single NDJSON line (issue #21): std::getline on std::cin
+    // is otherwise unbounded, so one pathological/corrupted line could grow arbitrarily
+    // large before ever reaching json::parse. No real request approaches this size -- the
+    // largest legitimate payload is a download's format list, nowhere close to 8 MiB.
+    constexpr std::size_t kMaxLineLength = 8 * 1024 * 1024;
+
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
+        if (line.size() > kMaxLineLength) {
+            logging::Log::Warning("mediatool-core", "rejecting oversized request line (" +
+                                                          std::to_string(line.size()) +
+                                                          " bytes), no response possible");
+            continue;
+        }
 
         // A missing or non-string "id" can't be recovered from by writing a response --
         // the Rust bridge (core_bridge.rs) matches responses to pending requests purely by
@@ -786,7 +854,7 @@ void RunIpcLoop(AppContext& app) {
         }
 
         try {
-            const std::string command = request.at("command").get<std::string>();
+            const std::string command = RequireString(request, "command");
             // .value()'s default only applies when the key is absent -- a request that
             // sends "params": null keeps that null right through, which every handler
             // that indexes into params (i.e. all but the no-param ones like listJobs)
