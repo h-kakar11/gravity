@@ -5,6 +5,7 @@
 // instead of the real user profile -- see DefaultSettingsFilePath() below for the path
 // production code should actually use.
 
+#include <mutex>
 #include <string>
 
 #include "core/settings/ISettingsStore.h"
@@ -47,6 +48,12 @@ public:
 private:
     Settings LoadFrom(const std::string& path, bool& outExists);
 
+    // Load() and Save() are no longer confined to the single IPC thread: handlers that do
+    // I/O (inspectFile, inspectDownloadUrl) run on the request executor (see
+    // app/core/main.cpp), and each of them reads settings. Serializing here means a read
+    // concurrent with a save observes the file either fully before or fully after that
+    // save, never a partial rename.
+    mutable std::mutex mutex_;
     std::string filePath_;
     std::string legacyFilePath_;
 };

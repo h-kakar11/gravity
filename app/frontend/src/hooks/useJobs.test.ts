@@ -163,6 +163,121 @@ describe("useJobs", () => {
     await waitFor(() => expect(coreClient.getJob).toHaveBeenCalledWith("job-2"));
   });
 
+  // The other half of issue #19, which removing the progress round-trip did not address:
+  // the remaining lifecycle events each start their own getJob, and two of them in flight
+  // at once resolve in whatever order the runtime feels like. Before the ordering token,
+  // whichever resolved last won -- so a completed job could visibly go back to RUNNING.
+  it("does not let a late getJob response rewind a job that already completed", async () => {
+    vi.mocked(coreClient.listJobs).mockResolvedValue({ jobs: [makeJob({ state: "RUNNING" })] });
+
+    let resolveStale: ((value: { job: JobSnapshot }) => void) | undefined;
+    const stalePending = new Promise<{ job: JobSnapshot }>((resolve) => {
+      resolveStale = resolve;
+    });
+    vi.mocked(coreClient.getJob)
+      .mockReturnValueOnce(stalePending)
+      .mockResolvedValueOnce({ job: makeJob({ state: "COMPLETED" }) });
+
+    const { result } = renderHook(() => useJobs());
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+    await act(async () => {
+      // First event: its getJob is left hanging, exactly as a slow round trip would be.
+      eventCallback?.({
+        event: "jobStarted",
+        jobId: "job-1",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        data: { state: "RUNNING" },
+      });
+      // Second event, later in core order, resolves first.
+      eventCallback?.({
+        event: "jobCompleted",
+        jobId: "job-1",
+        timestamp: "2026-01-01T00:00:02.000Z",
+        data: { state: "COMPLETED" },
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.jobs[0].state).toBe("COMPLETED"));
+
+    await act(async () => {
+      resolveStale?.({ job: makeJob({ state: "RUNNING" }) });
+      await Promise.resolve();
+    });
+
+    expect(result.current.jobs[0].state).toBe("COMPLETED");
+  });
+
+  // The same hazard from the other direction: a progress payload is applied synchronously,
+  // but a getJob issued before it is still in flight and carries an older percentage.
+  it("does not let an in-flight snapshot overwrite a newer progress event", async () => {
+    vi.mocked(coreClient.listJobs).mockResolvedValue({
+      jobs: [makeJob({ state: "RUNNING", progress: { statusMessage: "Working", percentage: 10 } })],
+    });
+
+    let resolveStale: ((value: { job: JobSnapshot }) => void) | undefined;
+    vi.mocked(coreClient.getJob).mockReturnValueOnce(
+      new Promise<{ job: JobSnapshot }>((resolve) => {
+        resolveStale = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useJobs());
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+    act(() => {
+      eventCallback?.({
+        event: "jobStarted",
+        jobId: "job-1",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        data: { state: "RUNNING" },
+      });
+      eventCallback?.({
+        event: "jobProgress",
+        jobId: "job-1",
+        timestamp: "2026-01-01T00:00:02.000Z",
+        data: { state: "RUNNING", statusMessage: "Working", percentage: 80 },
+      });
+    });
+    await waitFor(() => expect(result.current.jobs[0].progress.percentage).toBe(80));
+
+    await act(async () => {
+      resolveStale?.({
+        job: makeJob({ state: "RUNNING", progress: { statusMessage: "Working", percentage: 10 } }),
+      });
+      await Promise.resolve();
+    });
+
+    expect(result.current.jobs[0].progress.percentage).toBe(80);
+  });
+
+  // Progress events themselves arrive in core order over one stdout stream, and the guard
+  // must not start dropping them: only *older* updates are refused.
+  it("applies a long run of progress events monotonically", async () => {
+    vi.mocked(coreClient.listJobs).mockResolvedValue({
+      jobs: [makeJob({ state: "RUNNING", progress: { statusMessage: "Working", percentage: 0 } })],
+    });
+
+    const { result } = renderHook(() => useJobs());
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+    const seen: number[] = [];
+    for (let percentage = 1; percentage <= 100; percentage++) {
+      act(() => {
+        eventCallback?.({
+          event: "jobProgress",
+          jobId: "job-1",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          data: { state: "RUNNING", statusMessage: "Working", percentage },
+        });
+      });
+      seen.push(result.current.jobs[0].progress.percentage ?? -1);
+    }
+
+    expect(seen).toEqual(Array.from({ length: 100 }, (_, i) => i + 1));
+    expect(coreClient.getJob).not.toHaveBeenCalled();
+  });
+
   // Issue #29: removeJob deletes the job on the core side, so (unlike cancel/pause/
   // resume/retry) refetching via getJob afterwards would just fail -- it must drop the
   // job from local state directly instead.

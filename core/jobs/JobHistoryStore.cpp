@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "core/filesystem/PathUtils.h"
 #include "core/logging/Logger.h"
 
 namespace fs = std::filesystem;
@@ -32,6 +33,11 @@ JobHistoryStore::JobHistoryStore(std::string filePath, std::size_t maxEntries)
     : filePath_(std::move(filePath)), maxEntries_(maxEntries) {}
 
 std::vector<nlohmann::json> JobHistoryStore::Load() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return LoadLocked();
+}
+
+std::vector<nlohmann::json> JobHistoryStore::LoadLocked() const {
     std::error_code existsError;
     if (!fs::exists(filePath_, existsError) || existsError) {
         return {};
@@ -62,7 +68,8 @@ std::vector<nlohmann::json> JobHistoryStore::Load() const {
 }
 
 void JobHistoryStore::Append(nlohmann::json snapshotJson) {
-    std::vector<nlohmann::json> entries = Load();
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<nlohmann::json> entries = LoadLocked();
     entries.push_back(std::move(snapshotJson));
     if (entries.size() > maxEntries_) {
         entries.erase(entries.begin(), entries.begin() + static_cast<long>(entries.size() - maxEntries_));
@@ -81,7 +88,7 @@ void JobHistoryStore::Append(nlohmann::json snapshotJson) {
             }
         }
 
-        const fs::path tempPath = targetPath.string() + ".tmp";
+        const fs::path tempPath = filesystem::paths::UniqueTemporarySibling(targetPath.string());
         {
             std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
             if (!output) {
@@ -100,6 +107,10 @@ void JobHistoryStore::Append(nlohmann::json snapshotJson) {
         fs::rename(tempPath, targetPath, renameError);
         if (renameError) {
             logging::Log::Warning("JobHistory", "Could not finalize '" + filePath_ + "': " + renameError.message());
+            // The temp path is unique per write, so a failed rename would otherwise leave
+            // an ever-growing pile of orphaned .tmp-<pid>-<n> files next to the history.
+            std::error_code removeError;
+            fs::remove(tempPath, removeError);
         }
     } catch (const std::exception& e) {
         // Best-effort: history persistence must never disrupt the job-completion path

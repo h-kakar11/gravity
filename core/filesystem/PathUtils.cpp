@@ -1,5 +1,14 @@
 #include "core/filesystem/PathUtils.h"
 
+#include <atomic>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -91,6 +100,19 @@ std::string GetFilename(const std::string& path) {
 
 std::string GetParentDirectory(const std::string& path) {
     return stdfs::path(path).parent_path().string();
+}
+
+std::string UniqueTemporarySibling(const std::string& finalPath) {
+    static std::atomic<unsigned long long> counter{0};
+    const auto pid = static_cast<unsigned long long>(
+#ifdef _WIN32
+        ::GetCurrentProcessId()
+#else
+        ::getpid()
+#endif
+    );
+    return finalPath + ".tmp-" + std::to_string(pid) + "-" +
+           std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
 }
 
 }  // namespace mediatool::filesystem::paths

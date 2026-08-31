@@ -7,13 +7,17 @@
 // (OnJobStateChanged/OnJobProgress) that a later integration pass bridges into the
 // EventBus this module does not own or know about.
 //
-// Concurrency model (deliberately simple per spec section 41): one queue of pending
-// JobIds, N worker threads each pulling one JobId at a time and running it to
-// completion before pulling the next. That alone caps concurrent execution at N without
-// needing a separate "running" counter.
+// Concurrency model (docs/concurrency-model.md): N worker threads, each asking
+// SchedulerCore for the next eligible job, running it to completion, and asking again.
+// The pool size alone caps concurrent execution at N without needing a separate "running"
+// counter.
+//
+// What runs next is not decided here. JobManager owns threads, locks, ownership of Job
+// objects and the callback plumbing; SchedulerCore (core/jobs/SchedulerCore.h) owns
+// priority, dependencies and eligibility, with no threads of its own. JobManager calls
+// into it under mutex_ and never lets a Job callback fire while holding that lock.
 
 #include <condition_variable>
-#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -27,8 +31,10 @@
 
 #include "core/errors/ErrorInfo.h"
 #include "core/jobs/Job.h"
+#include "core/jobs/JobStateMachine.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/Progress.h"
+#include "core/jobs/SchedulerCore.h"
 
 namespace mediatool::jobs {
 
@@ -59,6 +65,12 @@ public:
         nlohmann::json ToJson() const;
     };
 
+    // Starts a pool of `maxConcurrentJobs` worker threads (0 is treated as 1). If the OS
+    // refuses to create that many threads, the pool is silently smaller -- see
+    // MaxConcurrentJobs() -- rather than the process dying on a partially constructed
+    // pool. Throws errors::MediaToolException{EngineFailure, "E_WORKER_POOL_UNAVAILABLE"}
+    // only if not one worker could be started, since a JobManager that can never run
+    // anything is not worth handing back.
     explicit JobManager(std::size_t maxConcurrentJobs = 1);
     ~JobManager();
 
@@ -76,10 +88,17 @@ public:
     // until its own Execute() returns.
     void Shutdown();
 
+    // The number of worker threads that actually exist, which is what bounds concurrency.
+    // May be lower than the constructor's argument (see above).
     std::size_t MaxConcurrentJobs() const { return maxConcurrentJobs_; }
 
     // Registers `job` and enqueues it for execution on the worker pool. Ownership of
     // `job` passes to the JobManager. Returns its JobId (job->Id()).
+    //
+    // Reads the job's Priority() and DependsOn() once, here, and hands them to
+    // SchedulerCore. Throws (and does not register the job) if the scheduler refuses the
+    // submission -- e.g. a dependency naming a job that does not exist or has already
+    // failed; see SchedulerCore::Submit.
     JobId SubmitJob(std::unique_ptr<Job> job);
 
     // Throws errors::MediaToolException (ErrorCategory::Unknown, code
@@ -97,7 +116,9 @@ public:
     void RetryJob(const JobId& id);
 
     // Drops a job in a terminal state (Completed/Failed/Cancelled) from the active set.
-    // Throws if `id` is unknown or the job is not yet terminal.
+    // Throws if `id` is unknown, the job is not yet terminal, or a still-queued job
+    // depends on it (E_JOB_HAS_DEPENDENTS -- removing it would leave that job waiting on
+    // an outcome nothing can report).
     void RemoveJob(const JobId& id);
 
     // Replaces any previously-registered subscriber (not additive). Called from
@@ -108,30 +129,43 @@ public:
     // Testing seam only -- never set outside tests. If set, RunJob() calls this
     // synchronously on the worker thread immediately after observing a Queued job and
     // before calling MarkStarting() on it. This is exactly the window in which a
-    // concurrent RequestCancel() can transition the job straight to Cancelled and make
-    // MarkStarting() throw (the #4 race) -- a hook lets a test force that interleaving
-    // deterministically instead of depending on unreliable timing.
+    // concurrent RequestCancel() can transition the job straight to Cancelled, making
+    // MarkStarting() report AlreadyTerminal (the #4 race, which used to throw here) -- a
+    // hook lets a test force that interleaving deterministically instead of depending on
+    // unreliable timing.
     void SetPreMarkStartingHookForTesting(std::function<void(const JobId&)> hook);
 
 private:
     void WorkerLoop();
     void RunJob(const JobId& id);
+    // Runs the testing-only interleaving hook, then attempts this job's QUEUED ->
+    // STARTING claim, returning that attempt's result.
+    TransitionResult RunPreMarkStartingHook(const JobId& id);
+    // True if `result` means this worker owns the job and may proceed. Logs (but does not
+    // throw) when the result indicates a state-machine disagreement rather than a lost
+    // race -- see the TransitionResult documentation in core/jobs/JobStateMachine.h.
+    static bool ClaimedForExecution(const Job& job, TransitionResult result,
+                                     JobState attempted = JobState::Running);
     Job* LookupJobLocked(const JobId& id) const;
-    // Inserts `id` into queue_ ahead of the first entry with a strictly lower priority
-    // (issue #17), preserving FIFO order among entries of equal priority. Caller must
-    // hold mutex_.
-    void InsertIntoQueueLocked(const JobId& id, int priority);
+    // Cancels jobs the scheduler reported as unrunnable because a dependency did not
+    // complete. Must be called with mutex_ released: cancelling fires state-changed
+    // callbacks that re-enter this class.
+    void CancelStrandedDependents(const std::vector<JobId>& ids, const JobId& because);
     JobSnapshot SnapshotOf(const Job& job) const;
     void HandleJobStateChanged(const JobId& id, JobState state);
     void HandleJobProgress(const JobId& id, const Progress& progress);
     [[noreturn]] void ThrowNotFound(const JobId& id) const;
     [[noreturn]] void ThrowInvalidOperation(const JobId& id, const std::string& reason) const;
 
-    const std::size_t maxConcurrentJobs_;
+    // Not const: fixed up in the constructor body once the pool's real size is known.
+    std::size_t maxConcurrentJobs_ = 0;
 
     mutable std::mutex mutex_;
     std::map<JobId, std::unique_ptr<Job>> jobs_;
-    std::deque<JobId> queue_;
+    // Guarded by mutex_ -- SchedulerCore is deliberately not thread-safe on its own, so
+    // that its logic stays testable without threads and there is exactly one lock in this
+    // subsystem rather than two that could be taken in two orders.
+    SchedulerCore scheduler_;
     std::condition_variable queueCv_;
     bool stopping_ = false;
 

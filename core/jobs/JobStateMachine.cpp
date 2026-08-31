@@ -25,4 +25,18 @@ bool CanTransition(JobState from, JobState to) {
     return false;
 }
 
+const char* ToString(TransitionResult result) {
+    switch (result) {
+        case TransitionResult::Success:
+            return "Success";
+        case TransitionResult::AlreadyInState:
+            return "AlreadyInState";
+        case TransitionResult::AlreadyTerminal:
+            return "AlreadyTerminal";
+        case TransitionResult::InvalidTransition:
+            return "InvalidTransition";
+    }
+    return "Unknown";
+}
+
 }  // namespace mediatool::jobs

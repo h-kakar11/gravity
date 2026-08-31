@@ -6,6 +6,7 @@
 // -write-then-rename, fallback-to-empty-on-corrupt pattern as
 // core/settings/JsonFileSettingsStore.h and core/jobs/JobHistoryStore.h.
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,10 @@ public:
     void Save(const std::vector<Preset>& presets);
 
 private:
+    // Same reasoning as JsonFileSettingsStore: Save() is a whole-file overwrite driven by
+    // IPC commands that no longer all run on one thread, so the read side must not be able
+    // to observe a write in progress.
+    mutable std::mutex mutex_;
     std::string filePath_;
 };
 

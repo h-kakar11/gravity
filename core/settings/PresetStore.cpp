@@ -7,6 +7,7 @@
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
+#include "core/filesystem/PathUtils.h"
 #include "core/logging/Logger.h"
 
 namespace fs = std::filesystem;
@@ -46,6 +47,7 @@ std::string DefaultPresetsFilePath() {
 PresetStore::PresetStore(std::string filePath) : filePath_(std::move(filePath)) {}
 
 std::vector<Preset> PresetStore::Load() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::error_code existsError;
     if (!fs::exists(filePath_, existsError) || existsError) {
         return {};
@@ -89,6 +91,7 @@ std::vector<Preset> PresetStore::Load() const {
 }
 
 void PresetStore::Save(const std::vector<Preset>& presets) {
+    std::lock_guard<std::mutex> lock(mutex_);
     nlohmann::json array = nlohmann::json::array();
     for (const auto& preset : presets) array.push_back(preset.ToJson());
 
@@ -105,7 +108,7 @@ void PresetStore::Save(const std::vector<Preset>& presets) {
         }
     }
 
-    const fs::path tempPath = targetPath.string() + ".tmp";
+    const fs::path tempPath = filesystem::paths::UniqueTemporarySibling(targetPath.string());
     {
         std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
         if (!output) {

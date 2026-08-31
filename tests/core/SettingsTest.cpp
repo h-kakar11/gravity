@@ -165,8 +165,12 @@ TEST(SettingsTest, FromJsonRejectsOutOfRangeAndUnrecognizedValues) {
         {"concurrentJobsNegative", [](Settings& s) { s.processing.concurrentJobs = -1; }},
         {"concurrentDownloadsTooHigh", [](Settings& s) { s.downloads.concurrentDownloads = 50; }},
         {"speedUnitsBogus", [](Settings& s) { s.downloads.speedUnits = "lightyears"; }},
+        // "ultra" used to be the unrecognized value here, but issue #59 added it to the
+        // allowed set -- which quietly turned this case into an assertion that a *valid*
+        // value is rejected, and it has been failing ever since. Restored to the thing it
+        // was always testing: a value the enum does not contain.
         {"compressionQualityBogus",
-         [](Settings& s) { s.processing.defaultCompressionQuality = "ultra"; }},
+         [](Settings& s) { s.processing.defaultCompressionQuality = "extreme"; }},
         {"logLevelBogus", [](Settings& s) { s.advanced.logLevel = "VERBOSE"; }},
         {"ffmpegPathRelative", [](Settings& s) { s.advanced.ffmpegPath = "..\\..\\ffmpeg.exe"; }},
         {"downloadDirectoryRelative", [](Settings& s) { s.downloads.downloadDirectory = "Downloads"; }},

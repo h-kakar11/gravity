@@ -20,7 +20,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -36,6 +35,9 @@
 #include "core/filesystem/PathUtils.h"
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
+#include "core/ipc/LineReader.h"
+#include "core/ipc/RequestExecutor.h"
+#include "core/ipc/RequestValidation.h"
 #include "core/jobs/DownloadJob.h"
 #include "core/jobs/JobHistoryStore.h"
 #include "core/jobs/JobManager.h"
@@ -237,28 +239,37 @@ void PublishJobProgress(AppContext& app, const jobs::JobId& id, const jobs::Prog
 
 // --- command handlers --------------------------------------------------------------------
 
-// A missing or wrong-typed field used to surface as a raw nlohmann `json::out_of_range`/
-// `json::type_error` -- caught generically by RunIpcLoop and reported as
-// E_UNHANDLED_EXCEPTION with the library's own exception text as the message. That's not
-// actionable for a caller and leaks an implementation detail. Handlers that take a single
-// required string field (every jobId-keyed command) route through this instead for a
-// specific, documented error code (issue #21). Not attempting the full per-handler
-// validation the issue describes for every field of every command in one pass -- this
-// covers the mechanical, highest-traffic case (jobId) without touching handlers whose
-// param shapes are more involved (createJob, updateSettings, presets).
-std::string RequireString(const json& params, const char* field) {
-    if (!params.contains(field)) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_MISSING_PARAM", errors::ErrorCategory::Unknown,
-            std::string(field) + " is required.", "field=" + std::string(field)));
-    }
-    const json& value = params.at(field);
-    if (!value.is_string()) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_PARAM_TYPE", errors::ErrorCategory::Unknown,
-            std::string(field) + " must be a string.", "field=" + std::string(field)));
-    }
-    return value.get<std::string>();
+// Every handler below takes its parameters through core/ipc/RequestValidation.h rather
+// than indexing into the params object directly (issue #21). Two rules, applied without
+// exception: a value is validated before it is used, and the failure says which field was
+// wrong and why. Handlers should read as "here are my inputs, here is the work" -- if a
+// handler is checking a type or a range inline, that check belongs in the validation tier.
+using ipc::OptionalInt;
+using ipc::OptionalObject;
+using ipc::OptionalString;
+using ipc::RequireEnum;
+using ipc::RequireInt;
+using ipc::RequireNonEmptyString;
+using ipc::RequireObject;
+
+// Scheduling priority (issue #17) is an ordering key, not a resource, so the bound is
+// about keeping the value legible in logs and snapshots rather than protecting anything.
+constexpr std::int64_t kMinJobPriority = -1000;
+constexpr std::int64_t kMaxJobPriority = 1000;
+
+// A workflow ("download, then convert, then compress") is a handful of steps. The bound is
+// here because `dependsOn` is a list from an untrusted caller, not because 32 is a
+// meaningful product limit.
+constexpr std::size_t kMaxJobDependencies = 32;
+
+// The two scheduling parameters every job type accepts, applied identically for all of
+// them (jobs::SchedulerCore is what interprets them). Both are optional: absent means
+// priority 0 and no dependencies, which is the plain FIFO behavior. Invalid dependency ids
+// are rejected later, by JobManager::SubmitJob -- this only validates the shape.
+void ApplySchedulingParams(jobs::Job& job, const json& jobParams) {
+    job.SetPriority(static_cast<int>(
+        OptionalInt(jobParams, "priority", 0, kMinJobPriority, kMaxJobPriority)));
+    job.SetDependsOn(ipc::OptionalStringArray(jobParams, "dependsOn", kMaxJobDependencies));
 }
 
 filesystem::FileInfo InspectFileEnriched(AppContext& app, const std::string& path) {
@@ -341,7 +352,7 @@ void ValidateDownloadUrl(AppContext& app, const std::string& url) {
 constexpr auto kInspectDeadline = std::chrono::seconds(30);
 
 json HandleInspectDownloadUrl(AppContext& app, const json& params) {
-    const std::string url = RequireString(params, "url");
+    const std::string url = RequireNonEmptyString(params, "url");
     ValidateDownloadUrl(app, url);
 
     const auto deadline = std::chrono::steady_clock::now() + kInspectDeadline;
@@ -362,14 +373,9 @@ json HandleInspectDownloadUrl(AppContext& app, const json& params) {
 }
 
 json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
-    const std::string url = jobParams.at("url").get<std::string>();
-    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
+    const std::string url = RequireNonEmptyString(jobParams, "url");
+    const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
     ValidateDownloadUrl(app, url);
-    if (outputDirectory.empty()) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_OUTPUT_DIRECTORY", errors::ErrorCategory::Unknown,
-            "An output directory is required."));
-    }
     // #11: reject traversal and (unless explicitly opted into) UNC output directories --
     // previously any string was accepted as-is.
     const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
@@ -394,25 +400,28 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     }
 
     downloads::QualityPreset quality = downloads::QualityPreset::Best;
-    if (jobParams.contains("quality")) {
+    if (const auto qualityWire = OptionalString(jobParams, "quality")) {
         try {
-            quality = downloads::QualityPresetFromWireString(jobParams.at("quality").get<std::string>());
+            quality = downloads::QualityPresetFromWireString(*qualityWire);
         } catch (const std::invalid_argument& e) {
+            // QualityPreset owns the list of valid values; re-listing it here as a
+            // RequireEnum allowlist would be a second copy to drift out of sync.
             throw errors::MediaToolException(errors::ErrorInfo::Make(
-                "E_INVALID_QUALITY_PRESET", errors::ErrorCategory::Unknown, e.what()));
+                "E_INVALID_QUALITY_PRESET", errors::ErrorCategory::Unknown, e.what(),
+                "field=quality value=" + *qualityWire));
         }
     }
 
     // Explicit format id from Inspect()'s format list (issue #31) overrides `quality`
     // entirely -- see downloads::DownloadOptions::formatId.
     std::optional<std::string> formatId;
-    if (jobParams.contains("formatId") && !jobParams.at("formatId").is_null()) {
-        std::string value = jobParams.at("formatId").get<std::string>();
-        if (value.empty()) {
+    if (const auto value = OptionalString(jobParams, "formatId")) {
+        if (value->empty()) {
             throw errors::MediaToolException(errors::ErrorInfo::Make(
-                "E_INVALID_MEDIA_OPTIONS", errors::ErrorCategory::Unknown, "formatId must not be empty."));
+                "E_INVALID_PARAM_VALUE", errors::ErrorCategory::Unknown,
+                "formatId must not be empty.", "field=formatId value is an empty string"));
         }
-        formatId = std::move(value);
+        formatId = *value;
     }
 
     jobs::DownloadJob::Options options;
@@ -423,11 +432,7 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
 
     auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
                                                     &app.ffmpegEngine, app.reservationRegistry);
-    // Optional scheduling priority (issue #17): higher runs before lower among jobs still
-    // Queued. Absent/0 keeps today's plain-FIFO behavior.
-    if (jobParams.contains("priority") && !jobParams.at("priority").is_null()) {
-        job->SetPriority(jobParams.at("priority").get<int>());
-    }
+    ApplySchedulingParams(*job, jobParams);
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
@@ -440,8 +445,8 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
 // option VALUES (supplied by the caller, i.e. the frontend's preset), not a different
 // code path here either.
 json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool isCompression) {
-    const std::string inputPath = jobParams.at("inputPath").get<std::string>();
-    const std::string outputDirectory = jobParams.at("outputDirectory").get<std::string>();
+    const std::string inputPath = RequireNonEmptyString(jobParams, "inputPath");
+    const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
 
     const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
     if (!filesystem::paths::IsSafeUserSuppliedPath(inputPath, allowNetworkPaths)) {
@@ -464,17 +469,13 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
             "outputDirectory=" + outputDirectory));
     }
 
-    const json processingOptions = jobParams.contains("options") ? jobParams.at("options") : json::object();
-    const std::string outputFormat = processingOptions.value("outputFormat", std::string());
-    if (outputFormat.empty()) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_MEDIA_OPTIONS", errors::ErrorCategory::Unknown, "outputFormat is required."));
-    }
+    const json& processingOptions = OptionalObject(jobParams, "options");
+    const std::string outputFormat = RequireNonEmptyString(processingOptions, "outputFormat");
     // Server-side Pro-tier gate, independent of the UI never offering this value at all
     // (idealist.md: build the "Pro" affordances as visibly-present-but-inert, not wired
     // to anything real) -- there is no entitlement system, so this is an unconditional
     // rejection, not a toggle.
-    if (processingOptions.value("quality", std::string("medium")) == "lossless") {
+    if (OptionalString(processingOptions, "quality").value_or("medium") == "lossless") {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_PRO_FEATURE_LOCKED", errors::ErrorCategory::UnsupportedFormat,
             "Lossless quality is a Pro feature and is not available yet."));
@@ -489,10 +490,7 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
 
     auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
                                                           app.fileSystem, app.reservationRegistry);
-    // See HandleCreateDownloadJob above -- same optional scheduling priority (issue #17).
-    if (jobParams.contains("priority") && !jobParams.at("priority").is_null()) {
-        job->SetPriority(jobParams.at("priority").get<int>());
-    }
+    ApplySchedulingParams(*job, jobParams);
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
@@ -500,16 +498,19 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
 }
 
 json HandleCreateJob(AppContext& app, const json& params) {
-    const std::string typeWire = params.at("type").get<std::string>();
+    const std::string typeWire = RequireNonEmptyString(params, "type");
+    // Absent/empty job params are legitimate for TEST; the per-type handlers below require
+    // whatever they actually need out of this object.
+    const json& jobParams = OptionalObject(params, "params");
 
     if (typeWire == "DOWNLOAD") {
-        return HandleCreateDownloadJob(app, params.at("params"));
+        return HandleCreateDownloadJob(app, jobParams);
     }
     if (typeWire == "CONVERSION") {
-        return HandleCreateMediaProcessingJob(app, params.at("params"), /*isCompression=*/false);
+        return HandleCreateMediaProcessingJob(app, jobParams, /*isCompression=*/false);
     }
     if (typeWire == "COMPRESSION") {
-        return HandleCreateMediaProcessingJob(app, params.at("params"), /*isCompression=*/true);
+        return HandleCreateMediaProcessingJob(app, jobParams, /*isCompression=*/true);
     }
 
     if (typeWire != "TEST") {
@@ -521,6 +522,7 @@ json HandleCreateJob(AppContext& app, const json& params) {
     }
 
     auto job = std::make_unique<jobs::TestJob>();
+    ApplySchedulingParams(*job, jobParams);
     const jobs::JobId id = job->Id();
     app.jobManager.SubmitJob(std::move(job));
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
@@ -528,7 +530,7 @@ json HandleCreateJob(AppContext& app, const json& params) {
 }
 
 json HandleGetJob(AppContext& app, const json& params) {
-    return {{"job", app.jobManager.GetJob(RequireString(params, "jobId")).ToJson()}};
+    return {{"job", app.jobManager.GetJob(RequireNonEmptyString(params, "jobId")).ToJson()}};
 }
 
 json HandleListJobs(AppContext& app, const json&) {
@@ -541,30 +543,33 @@ json HandleListJobHistory(AppContext& app, const json& params) {
     std::vector<nlohmann::json> entries = app.jobHistoryStore.Load();
     // Load() returns oldest-first; the UI wants most-recent-first ("Session History").
     std::reverse(entries.begin(), entries.end());
-    if (params.contains("limit") && !params.at("limit").is_null()) {
-        const auto limit = params.at("limit").get<std::size_t>();
+    // Bounded, and bounded as a signed integer: `get<std::size_t>()` on a negative limit
+    // wrapped to an enormous positive value instead of being rejected.
+    constexpr std::int64_t kMaxHistoryLimit = 10000;
+    if (ipc::HasParam(params, "limit")) {
+        const auto limit = static_cast<std::size_t>(RequireInt(params, "limit", 1, kMaxHistoryLimit));
         if (entries.size() > limit) entries.resize(limit);
     }
     return {{"jobs", json(entries)}};
 }
 
 json HandleCancelJob(AppContext& app, const json& params) {
-    app.jobManager.CancelJob(RequireString(params, "jobId"));
+    app.jobManager.CancelJob(RequireNonEmptyString(params, "jobId"));
     return json::object();
 }
 
 json HandlePauseJob(AppContext& app, const json& params) {
-    app.jobManager.PauseJob(RequireString(params, "jobId"));
+    app.jobManager.PauseJob(RequireNonEmptyString(params, "jobId"));
     return json::object();
 }
 
 json HandleResumeJob(AppContext& app, const json& params) {
-    app.jobManager.ResumeJob(RequireString(params, "jobId"));
+    app.jobManager.ResumeJob(RequireNonEmptyString(params, "jobId"));
     return json::object();
 }
 
 json HandleRetryJob(AppContext& app, const json& params) {
-    app.jobManager.RetryJob(RequireString(params, "jobId"));
+    app.jobManager.RetryJob(RequireNonEmptyString(params, "jobId"));
     return json::object();
 }
 
@@ -574,7 +579,7 @@ json HandleRetryJob(AppContext& app, const json& params) {
 // forever in JobManager::jobs_, AppContext::previousState, and the frontend's job list
 // (issue #29).
 json HandleRemoveJob(AppContext& app, const json& params) {
-    const std::string jobId = RequireString(params, "jobId");
+    const std::string jobId = RequireNonEmptyString(params, "jobId");
     app.jobManager.RemoveJob(jobId);
     // JobManager::RemoveJob() already rejects a non-terminal job, so by the time this
     // erase runs no further transition will ever be published for this id -- safe to drop
@@ -585,7 +590,7 @@ json HandleRemoveJob(AppContext& app, const json& params) {
 }
 
 json HandleInspectFile(AppContext& app, const json& params) {
-    const std::string path = params.at("path").get<std::string>();
+    const std::string path = RequireNonEmptyString(params, "path");
     // #11: same traversal/UNC gate as HandleCreateDownloadJob's output directory --
     // inspectFile previously accepted any absolute path with no restriction at all
     // (e.g. a traversal or UNC path reaching well outside anything the user selected).
@@ -601,7 +606,7 @@ json HandleInspectFile(AppContext& app, const json& params) {
 }
 
 json HandleGetCapabilities(AppContext& app, const json& params) {
-    const std::string path = params.at("path").get<std::string>();
+    const std::string path = RequireNonEmptyString(params, "path");
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
     return {{"capabilities", filesystem::CapabilitiesFor(info.category, info.extension)}};
 }
@@ -612,7 +617,7 @@ json HandleGetSettings(AppContext& app, const json&) {
 
 json HandleUpdateSettings(AppContext& app, const json& params) {
     json merged = app.settingsStore.Load().ToJson();
-    merged.merge_patch(params.at("settings"));
+    merged.merge_patch(RequireObject(params, "settings"));
     settings::Settings updated = settings::Settings::FromJson(merged);
     app.settingsStore.Save(updated);
     return {{"settings", updated.ToJson()}};
@@ -662,22 +667,9 @@ json HandleListPresets(AppContext& app, const json&) {
 }
 
 json HandleSavePreset(AppContext& app, const json& params) {
-    const std::string name = params.at("name").get<std::string>();
-    const std::string kind = params.at("kind").get<std::string>();
-    const json options = params.value("options", json::object());
-
-    if (name.empty()) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_PRESET", errors::ErrorCategory::Unknown, "A preset name is required.",
-            "name is empty"));
-    }
-    static const std::unordered_set<std::string> kAllowedKinds{"DOWNLOAD", "CONVERSION",
-                                                                 "COMPRESSION"};
-    if (!kAllowedKinds.count(kind)) {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_INVALID_PRESET", errors::ErrorCategory::Unknown, "Unrecognized preset kind.",
-            "kind=" + kind));
-    }
+    const std::string name = RequireNonEmptyString(params, "name");
+    const std::string kind = RequireEnum(params, "kind", {"DOWNLOAD", "CONVERSION", "COMPRESSION"});
+    const json options = OptionalObject(params, "options");
 
     std::vector<settings::Preset> presets = app.presetStore.Load();
 
@@ -685,7 +677,7 @@ json HandleSavePreset(AppContext& app, const json& params) {
     // place" (rename / re-save with new options); a missing or non-matching id means
     // "create a new one" -- match-by-identity rather than trusting an index, so a stale id
     // can never silently overwrite the wrong entry.
-    const std::string requestedId = params.value("id", std::string());
+    const std::string requestedId = OptionalString(params, "id").value_or(std::string());
     auto it = std::find_if(presets.begin(), presets.end(), [&](const settings::Preset& p) {
         return !requestedId.empty() && p.id == requestedId;
     });
@@ -707,7 +699,7 @@ json HandleSavePreset(AppContext& app, const json& params) {
 }
 
 json HandleDeletePreset(AppContext& app, const json& params) {
-    const std::string id = params.at("id").get<std::string>();
+    const std::string id = RequireNonEmptyString(params, "id");
     std::vector<settings::Preset> presets = app.presetStore.Load();
     const std::size_t before = presets.size();
     presets.erase(
@@ -752,6 +744,52 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
 
 // --- the IPC loop --------------------------------------------------------------------
 
+// Commands that wait on something outside this process (a yt-dlp subprocess doing network
+// I/O, an ffprobe run over a large file) and therefore must not run on the request loop
+// thread -- see core/ipc/RequestExecutor.h for why. Everything else is memory-speed work on
+// already-loaded state and is faster to run inline than to hand to another thread.
+bool IsBlockingCommand(const std::string& command) {
+    return command == "inspectDownloadUrl" || command == "inspectFile";
+}
+
+// Four threads is enough to keep a burst of inspects moving without letting a burst turn
+// into a swarm of yt-dlp processes; the queue bound is what stops a client that never stops
+// asking from growing this process without limit.
+constexpr std::size_t kBlockingCommandThreads = 4;
+constexpr std::size_t kMaxQueuedBlockingCommands = 64;
+
+// A generous ceiling for a single NDJSON request: the longest legitimate request is a
+// createJob carrying two Windows paths and a preset object, which is kilobytes. Anything
+// past this is a malformed or hostile stream, not a request (see core/ipc/LineReader.h).
+constexpr std::size_t kMaxRequestLineBytes = 1024 * 1024;
+
+json ErrorResponse(const std::string& id, errors::ErrorInfo error) {
+    return {{"id", id}, {"ok", false}, {"error", error.ToJson()}};
+}
+
+// Runs one command to completion and returns the response envelope to write. Never throws:
+// every failure is turned into an `ok:false` response here, because this is called from
+// executor threads as well as the loop, and an exception escaping there would be an
+// unanswered request rather than a crash the caller can see.
+json ExecuteRequest(AppContext& app, const std::string& id, const std::string& command,
+                     const json& params) {
+    try {
+        const auto& table = CommandTable();
+        const auto it = table.find(command);
+        if (it == table.end()) {
+            return ErrorResponse(id, errors::ErrorInfo::Make("E_UNKNOWN_COMMAND",
+                                                              errors::ErrorCategory::Unknown,
+                                                              "Unknown command: " + command));
+        }
+        return {{"id", id}, {"ok", true}, {"result", it->second(app, params)}};
+    } catch (const errors::MediaToolException& e) {
+        return ErrorResponse(id, e.Info());
+    } catch (const std::exception& e) {
+        return ErrorResponse(id, errors::ErrorInfo::Make("E_UNHANDLED_EXCEPTION",
+                                                          errors::ErrorCategory::Unknown, e.what()));
+    }
+}
+
 void RunIpcLoop(AppContext& app) {
     app.jobManager.OnJobStateChanged(
         [&app](const jobs::JobId& id, jobs::JobState state) { PublishJobStateChanged(app, id, state); });
@@ -762,9 +800,23 @@ void RunIpcLoop(AppContext& app) {
 
     logging::Log::Info("mediatool-core", "IPC loop starting");
 
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        if (line.empty()) continue;
+    // Declared here, so it is torn down (and its threads joined) when this function
+    // returns -- before AppContext, which its queued tasks reference.
+    ipc::RequestExecutor executor(kBlockingCommandThreads, kMaxQueuedBlockingCommands);
+
+    while (true) {
+        const ipc::ReadLineResult read = ipc::ReadBoundedLine(std::cin, kMaxRequestLineBytes);
+        if (read.status == ipc::ReadLineStatus::EndOfStream) break;
+        if (read.status == ipc::ReadLineStatus::LineTooLong) {
+            // No id is recoverable from a line that was never accumulated, so there is
+            // nobody to answer -- but the loop survives, which is the entire point.
+            logging::Log::Warning("mediatool-core",
+                                   "discarded an oversized request line (" +
+                                       std::to_string(read.bytesDiscarded) + " bytes, limit " +
+                                       std::to_string(kMaxRequestLineBytes) + ")");
+            continue;
+        }
+        if (read.line.empty()) continue;
 
         // A missing or non-string "id" can't be recovered from by writing a response --
         // the Rust bridge (core_bridge.rs) matches responses to pending requests purely by
@@ -775,8 +827,8 @@ void RunIpcLoop(AppContext& app) {
         json request;
         std::string id;
         try {
-            request = json::parse(line);
-            id = request.at("id").get<std::string>();
+            request = json::parse(read.line);
+            id = ipc::RequireNonEmptyString(request, "id");
         } catch (const std::exception& e) {
             logging::Log::Warning("mediatool-core",
                                    "rejecting request with missing/malformed id, no response "
@@ -785,38 +837,49 @@ void RunIpcLoop(AppContext& app) {
             continue;
         }
 
+        // From here on a response is always written: the id is routable, so every outcome
+        // -- including "your request was malformed" -- reaches the caller as an answer
+        // rather than as a timeout.
+        std::string command;
+        json params;
         try {
-            const std::string command = request.at("command").get<std::string>();
+            command = ipc::RequireNonEmptyString(request, "command");
             // .value()'s default only applies when the key is absent -- a request that
             // sends "params": null keeps that null right through, which every handler
             // that indexes into params (i.e. all but the no-param ones like listJobs)
             // then throws on. Explicit JSON null and "key absent" should behave the same
             // way here: no params supplied (issue #21).
-            json params = request.value("params", json::object());
+            params = request.value("params", json::object());
             if (params.is_null()) params = json::object();
-
-            const auto& table = CommandTable();
-            const auto it = table.find(command);
-            if (it == table.end()) {
-                WriteLine({{"id", id},
-                          {"ok", false},
-                          {"error", errors::ErrorInfo::Make("E_UNKNOWN_COMMAND", errors::ErrorCategory::Unknown,
-                                                            "Unknown command: " + command)
-                                        .ToJson()}});
-                continue;
+            if (!params.is_object()) {
+                throw errors::MediaToolException(errors::ErrorInfo::Make(
+                    "E_INVALID_PARAM_TYPE", errors::ErrorCategory::Unknown,
+                    "params must be an object.",
+                    std::string("field=params actualType=") + params.type_name()));
             }
-
-            const json result = it->second(app, params);
-            WriteLine({{"id", id}, {"ok", true}, {"result", result}});
         } catch (const errors::MediaToolException& e) {
-            WriteLine({{"id", id}, {"ok", false}, {"error", e.Info().ToJson()}});
-        } catch (const std::exception& e) {
-            WriteLine({{"id", id},
-                      {"ok", false},
-                      {"error", errors::ErrorInfo::Make("E_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
-                                                        e.what())
-                                    .ToJson()}});
+            WriteLine(ErrorResponse(id, e.Info()));
+            continue;
         }
+
+        if (IsBlockingCommand(command)) {
+            const bool queued = executor.TrySubmit([&app, id, command, params] {
+                WriteLine(ExecuteRequest(app, id, command, params));
+            });
+            if (queued) continue;
+            // Backpressure rather than a stall: the executor is saturated, so running this
+            // inline would block the loop for exactly as long as the request the executor
+            // exists to keep off it. Say so, and say it is worth retrying.
+            WriteLine(ErrorResponse(
+                id, errors::ErrorInfo::Make("E_CORE_BUSY", errors::ErrorCategory::EngineFailure,
+                                             "Gravity is busy with too many lookups right now.",
+                                             "command=" + command + " queued=" +
+                                                 std::to_string(executor.PendingCount()),
+                                             /*recoverable=*/true)));
+            continue;
+        }
+
+        WriteLine(ExecuteRequest(app, id, command, params));
     }
 
     logging::Log::Info("mediatool-core", "stdin closed, shutting down");

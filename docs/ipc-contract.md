@@ -104,20 +104,54 @@ verified without hitting a real URL.
 
 Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
+### Request handling guarantees
+
+- **Every request with a usable `id` gets exactly one response.** A request whose `id` is
+  missing, non-string or empty is logged and dropped instead -- there is no pending caller
+  to route an answer to, and writing an unroutable line would leave whoever sent it waiting
+  out the full 30s bridge timeout for nothing.
+- **A request line is limited to 1 MiB.** Anything longer is discarded up to the next
+  newline and logged; the loop keeps reading. See `core/ipc/LineReader.h`.
+- **Parameters are validated before the handler runs** (`core/ipc/RequestValidation.h`).
+  A missing field is `E_MISSING_PARAM`, a wrong type is `E_INVALID_PARAM_TYPE`, and an
+  out-of-range or disallowed value is `E_INVALID_PARAM_VALUE`; each names the offending
+  field in `error.details`. An explicit JSON `null` is treated as an absent field
+  throughout.
+- **`inspectDownloadUrl` and `inspectFile` run off the request loop**, on a bounded pool
+  (`core/ipc/RequestExecutor.h`), so a slow network lookup cannot delay other commands.
+  Responses are still correlated by `id`; as stated above, requests may complete out of
+  order. If that pool is saturated the request is answered with `E_CORE_BUSY`
+  (`recoverable: true`), never queued without limit.
+
 ### `createJob` params by `type`
 
 | `type` | `params` |
 |---|---|
-| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31) |
-| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
-| `"TEST"` | `{}` |
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[]}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31) |
+| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number, dependsOn?: string[]}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
+| `"TEST"` | `{priority?: number, dependsOn?: string[]}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
+
+#### Scheduling params (every job type)
+
+Both are optional, and both are interpreted by `core/jobs/SchedulerCore.h` — see
+`docs/concurrency-model.md` for the full ordering and dependency semantics.
+
+| param | meaning |
+|---|---|
+| `priority` | Integer in `[-1000, 1000]`, default `0`. Higher runs first among queued jobs; ties keep submission (FIFO) order. Out of range → `E_INVALID_PARAM_VALUE`. |
+| `dependsOn` | Up to 32 job ids that must reach `COMPLETED` before this job may start. Each must be a job the core already knows about — an unknown id, this job itself, or a job that already ended in `FAILED`/`CANCELLED` is rejected at submission with `E_INVALID_DEPENDENCY`. Because a dependency must already exist, dependency cycles cannot be expressed. |
+
+A job whose dependency does not complete is **cancelled**, transitively down the chain:
+its `state` becomes `CANCELLED` with no `error` field, and the reason is in the core log.
+`removeJob` on a job that a still-queued job depends on is rejected with
+`E_JOB_HAS_DEPENDENTS`.
 
 #### `MediaProcessingOptions` (CONVERSION/COMPRESSION's `options`)
 
 `{outputFormat: string, quality?: "low"|"medium"|"high"|"lossless", videoCodec?: "auto"|"h264"|"h265"|"vp9"|"av1", hardwareAcceleration?: "auto"|"none"|"nvenc"|"amf"|"qsv", resolution?: {width: number, height: number}, trim?: {startSeconds?: number, endSeconds?: number}, watermark?: {imagePath: string, position: "top-left"|"top-right"|"bottom-left"|"bottom-right"|"center", opacity: number}, audioBitrateKbps?: number}`
 
-`outputFormat` is required (rejected with `E_INVALID_MEDIA_OPTIONS` if missing/empty). `quality: "lossless"` is rejected unconditionally with `E_PRO_FEATURE_LOCKED` — there is no Pro entitlement system yet, so this is a hard server-side gate, not a toggle; the frontend must never offer it as a selectable value. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
+`outputFormat` is required (rejected with `E_MISSING_PARAM` if absent, `E_INVALID_PARAM_VALUE` if empty). `quality: "lossless"` is rejected unconditionally with `E_PRO_FEATURE_LOCKED` — there is no Pro entitlement system yet, so this is a hard server-side gate, not a toggle; the frontend must never offer it as a selectable value. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
 
 ## Events (core -> ... -> React)
 

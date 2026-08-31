@@ -11,6 +11,7 @@
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
+#include "core/filesystem/PathUtils.h"
 #include "core/logging/Logger.h"
 
 namespace fs = std::filesystem;
@@ -86,6 +87,7 @@ Settings JsonFileSettingsStore::LoadFrom(const std::string& path, bool& outExist
 }
 
 Settings JsonFileSettingsStore::Load() {
+    std::lock_guard<std::mutex> lock(mutex_);
     bool exists = false;
     Settings settings = LoadFrom(filePath_, exists);
     if (exists) {
@@ -106,6 +108,7 @@ Settings JsonFileSettingsStore::Load() {
 }
 
 void JsonFileSettingsStore::Save(const Settings& settings) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const fs::path targetPath(filePath_);
     const fs::path parentDir = targetPath.parent_path();
 
@@ -120,7 +123,7 @@ void JsonFileSettingsStore::Save(const Settings& settings) {
         }
     }
 
-    const fs::path tempPath = targetPath.string() + ".tmp";
+    const fs::path tempPath = filesystem::paths::UniqueTemporarySibling(targetPath.string());
 
     {
         std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);

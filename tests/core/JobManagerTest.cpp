@@ -2,10 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
 #include <thread>
+#include <vector>
 
 #include "core/errors/ErrorInfo.h"
 #include "core/errors/MediaToolException.h"
@@ -148,6 +150,26 @@ TEST(JobManager, ShutdownCancelsQueuedJobsAndDoesNotWaitForThem) {
     EXPECT_EQ(manager.GetJob(runningId).state, JobState::Cancelled);
 }
 
+// The pool JobManager reports must be the pool it actually started. A JobManager whose
+// std::thread creation partially fails used to destroy a vector of joinable threads while
+// unwinding out of its own constructor, which is an unconditional std::terminate -- the
+// same "one setting value takes the process down" shape as #5. It now keeps whatever
+// workers it managed to start and reports that number, so concurrency accounting
+// downstream describes reality rather than an aspiration.
+TEST(JobManager, ReportsTheWorkerPoolItActuallyStarted) {
+    JobManager zeroRequested(0);
+    EXPECT_EQ(zeroRequested.MaxConcurrentJobs(), 1u) << "0 workers is meaningless; 1 is the floor";
+
+    constexpr std::size_t kRequested = 8;
+    JobManager manager(kRequested);
+    EXPECT_GE(manager.MaxConcurrentJobs(), 1u);
+    EXPECT_LE(manager.MaxConcurrentJobs(), kRequested);
+
+    // Whatever size it settled on, it must still run work.
+    const auto id = manager.SubmitJob(std::make_unique<InstantJob>());
+    EXPECT_TRUE(IsTerminal(WaitForState(manager, id, std::chrono::seconds(2), IsTerminal)));
+}
+
 TEST(JobManager, SecondJobWaitsForFirstWhenMaxConcurrentJobsIsOne) {
     JobManager manager(1);
     const auto id1 = manager.SubmitJob(std::make_unique<TestJob>());
@@ -195,4 +217,181 @@ TEST(JobManager, AllJobsRunConcurrentlyWhenMaxConcurrentJobsAllowsIt) {
         EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(5), IsTerminal),
                   JobState::Completed);
     }
+}
+
+// --- dependencies, end to end through the worker pool ------------------------------------
+// SchedulerCoreTest covers the policy exhaustively without threads; these prove JobManager
+// actually drives that policy -- that a dependent is not started early, that a failed
+// dependency does not leave a job queued forever, and that the workers wake up when a
+// dependency finishes rather than sleeping through it.
+
+namespace {
+
+// Fails on demand, so a dependency chain can be broken deliberately. Optionally waits for
+// a release flag first: a chain has to be fully submitted before its root fails, because a
+// dependency that has *already* failed is refused at submission (SchedulerCore::Submit)
+// rather than accepted and cancelled -- so a test that wants to observe propagation must
+// hold the failure until the dependents exist.
+class FailingJob final : public mediatool::jobs::Job {
+public:
+    explicit FailingJob(std::atomic<bool>* releaseFlag = nullptr)
+        : Job(JobType::Test), releaseFlag_(releaseFlag) {}
+
+    void Execute() override {
+        if (releaseFlag_) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!releaseFlag_->load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        throw MediaToolException(ErrorInfo::Make("E_TEST_FAILED", ErrorCategory::Unknown, "failed"));
+    }
+
+private:
+    std::atomic<bool>* releaseFlag_;
+};
+
+std::unique_ptr<mediatool::jobs::Job> DependentInstantJob(std::vector<mediatool::jobs::JobId> dependsOn,
+                                                           int priority = 0) {
+    auto job = std::make_unique<InstantJob>();
+    job->SetPriority(priority);
+    job->SetDependsOn(std::move(dependsOn));
+    return job;
+}
+
+}  // namespace
+
+TEST(JobManager, ADependentJobDoesNotStartUntilItsDependencyCompletes) {
+    JobManager manager(4);  // room to run it early if the dependency were ignored
+
+    const auto first = manager.SubmitJob(std::make_unique<TestJob>());  // ~1000ms
+    const auto second = manager.SubmitJob(DependentInstantJob({first}));
+
+    ASSERT_EQ(WaitForState(manager, first, std::chrono::seconds(2),
+                           [](JobState s) { return s == JobState::Running; }),
+              JobState::Running);
+    // Three idle workers and an instant job: if dependencies were not enforced this would
+    // already be finished.
+    EXPECT_EQ(manager.GetJob(second).state, JobState::Queued);
+
+    EXPECT_EQ(WaitForState(manager, first, std::chrono::seconds(5), IsTerminal), JobState::Completed);
+    EXPECT_EQ(WaitForState(manager, second, std::chrono::seconds(5), IsTerminal), JobState::Completed);
+
+    // Ordering, not just completion: the dependent started after the dependency finished.
+    const auto firstSnapshot = manager.GetJob(first);
+    const auto secondSnapshot = manager.GetJob(second);
+    ASSERT_TRUE(firstSnapshot.completedAt.has_value());
+    ASSERT_TRUE(secondSnapshot.startedAt.has_value());
+    EXPECT_GE(*secondSnapshot.startedAt, *firstSnapshot.completedAt);
+}
+
+TEST(JobManager, AFailedDependencyCancelsWhatWasWaitingOnIt) {
+    JobManager manager(1);
+    std::atomic<bool> release{false};
+    const auto failing = manager.SubmitJob(std::make_unique<FailingJob>(&release));
+    const auto dependent = manager.SubmitJob(DependentInstantJob({failing}));
+    release = true;
+
+    EXPECT_EQ(WaitForState(manager, failing, std::chrono::seconds(5), IsTerminal), JobState::Failed);
+    // Without propagation this job would sit QUEUED forever, blocking nothing and
+    // finishing never -- the queue's version of a leak.
+    EXPECT_EQ(WaitForState(manager, dependent, std::chrono::seconds(2), IsTerminal),
+              JobState::Cancelled);
+}
+
+TEST(JobManager, DependencyFailurePropagatesDownAWholeChain) {
+    JobManager manager(2);
+    std::atomic<bool> release{false};
+    const auto a = manager.SubmitJob(std::make_unique<FailingJob>(&release));
+    const auto b = manager.SubmitJob(DependentInstantJob({a}));
+    const auto c = manager.SubmitJob(DependentInstantJob({b}));
+    release = true;  // the whole chain exists now; let the root fail
+
+    EXPECT_EQ(WaitForState(manager, a, std::chrono::seconds(5), IsTerminal), JobState::Failed);
+    EXPECT_EQ(WaitForState(manager, b, std::chrono::seconds(2), IsTerminal), JobState::Cancelled);
+    EXPECT_EQ(WaitForState(manager, c, std::chrono::seconds(2), IsTerminal), JobState::Cancelled);
+}
+
+TEST(JobManager, AnImpossibleDependencyIsRejectedAtSubmission) {
+    JobManager manager(1);
+
+    // An id no job has ever had: accepting this would queue a job that can never run.
+    EXPECT_THROW(manager.SubmitJob(DependentInstantJob({"job-does-not-exist"})), MediaToolException);
+
+    const auto completed = manager.SubmitJob(std::make_unique<InstantJob>());
+    ASSERT_EQ(WaitForState(manager, completed, std::chrono::seconds(2), IsTerminal),
+              JobState::Completed);
+    // Depending on a job that already completed is fine and starts immediately.
+    const auto after = manager.SubmitJob(DependentInstantJob({completed}));
+    EXPECT_EQ(WaitForState(manager, after, std::chrono::seconds(2), IsTerminal), JobState::Completed);
+}
+
+TEST(JobManager, ManyWaitingJobsDoNotKeepTheWorkersSpinning) {
+    // A queue full of jobs that cannot run must leave the pool asleep on its condition
+    // variable, not spinning through ineligible entries. Asserted indirectly but honestly:
+    // 500 blocked jobs, then the dependency completes and every one of them runs.
+    JobManager manager(4);
+    const auto blocker = manager.SubmitJob(std::make_unique<TestJob>());  // ~1000ms
+
+    std::vector<mediatool::jobs::JobId> waiting;
+    waiting.reserve(500);
+    for (int i = 0; i < 500; ++i) waiting.push_back(manager.SubmitJob(DependentInstantJob({blocker})));
+
+    ASSERT_EQ(WaitForState(manager, blocker, std::chrono::seconds(5), IsTerminal),
+              JobState::Completed);
+    for (const auto& id : waiting) {
+        ASSERT_EQ(WaitForState(manager, id, std::chrono::seconds(10), IsTerminal), JobState::Completed)
+            << "job " << id << " never ran after its dependency completed";
+    }
+}
+
+TEST(JobManager, HigherPriorityQueuedWorkRunsFirst) {
+    // The pool is occupied by one long job, so everything else queues up behind it and the
+    // order they come out in is entirely the scheduler's decision.
+    JobManager manager(1);
+    const auto occupier = manager.SubmitJob(std::make_unique<TestJob>());
+    ASSERT_EQ(WaitForState(manager, occupier, std::chrono::seconds(2),
+                           [](JobState s) { return s == JobState::Running; }),
+              JobState::Running);
+
+    std::vector<mediatool::jobs::JobId> ids;
+    for (int priority : {0, 50, 0, 100}) {
+        auto job = std::make_unique<InstantJob>();
+        job->SetPriority(priority);
+        ids.push_back(manager.SubmitJob(std::move(job)));
+    }
+    manager.CancelJob(occupier);
+
+    for (const auto& id : ids) {
+        ASSERT_TRUE(IsTerminal(WaitForState(manager, id, std::chrono::seconds(5), IsTerminal)));
+    }
+
+    // startedAt is an ISO-8601 UTC string, so lexicographic order is chronological order.
+    const auto startedAt = [&manager](const mediatool::jobs::JobId& id) {
+        const auto snapshot = manager.GetJob(id);
+        return snapshot.startedAt.value_or("");
+    };
+    EXPECT_LE(startedAt(ids[3]), startedAt(ids[1])) << "priority 100 must precede priority 50";
+    EXPECT_LE(startedAt(ids[1]), startedAt(ids[0])) << "priority 50 must precede priority 0";
+    EXPECT_LE(startedAt(ids[0]), startedAt(ids[2])) << "equal priorities keep FIFO order";
+}
+
+TEST(JobManager, AJobStillDependedOnCannotBeRemoved) {
+    JobManager manager(1);
+    const auto blocker = manager.SubmitJob(std::make_unique<TestJob>());
+    const auto dependent = manager.SubmitJob(DependentInstantJob({blocker}));
+
+    ASSERT_EQ(WaitForState(manager, blocker, std::chrono::seconds(5), IsTerminal),
+              JobState::Completed);
+    // The dependency is terminal, so removeJob would normally be allowed -- but its
+    // dependent may not have run yet, and dropping the record it is waiting on would
+    // strand it.
+    if (manager.GetJob(dependent).state == JobState::Queued) {
+        EXPECT_THROW(manager.RemoveJob(blocker), MediaToolException);
+    }
+
+    ASSERT_EQ(WaitForState(manager, dependent, std::chrono::seconds(5), IsTerminal),
+              JobState::Completed);
+    EXPECT_NO_THROW(manager.RemoveJob(blocker));
+    EXPECT_NO_THROW(manager.RemoveJob(dependent));
 }
