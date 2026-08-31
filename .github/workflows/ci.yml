@@ -113,19 +113,24 @@ jobs:
           rustup component add clippy
 
       - name: cargo test
-        # TEMPORARY DIAGNOSTIC (see docs/decisions.md "Rust CI STATUS_ENTRYPOINT_NOT_FOUND
-        # investigation"): the compiled unittest binary crashes on launch with
-        # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) -- it links fine but a loaded DLL doesn't
-        # export a symbol the exe expects. Statically linking the MinGW C/C++ runtime
-        # (RUSTFLAGS=-C target-feature=+crt-static) did not fix it, ruling out a
-        # libgcc/libstdc++/libwinpthread version mismatch. Build the test binary without
-        # running it, dump its imported DLLs with objdump so the actual offending DLL shows
-        # up in the CI log, then run it for real so the job still reports pass/fail.
+        # TEMPORARY DIAGNOSTIC round 2 (see docs/decisions.md "Rust CI
+        # STATUS_ENTRYPOINT_NOT_FOUND investigation"): round 1's DLL-name-only dump showed
+        # nothing but ordinary Windows system DLLs (no MinGW runtime DLLs at all -- so
+        # crt-static was a no-op, not a fix, ruling out a libgcc/libstdc++/libwinpthread
+        # mismatch). This round captures the actual per-symbol import table (which function
+        # under which DLL is unresolvable) plus the Windows Error Reporting record from the
+        # crash itself, which usually names the specific faulting module.
         run: |
           cargo test --no-run
           $testExe = Get-ChildItem -Recurse -Filter "gravity_desktop_lib-*.exe" target\debug\deps | Select-Object -First 1
           Write-Host "Test binary: $($testExe.FullName)"
-          objdump -p $testExe.FullName | Select-String -Pattern "DLL Name|File Offset"
+          objdump -p $testExe.FullName | Out-File -FilePath imports.txt -Encoding utf8
+          Write-Host "--- imports for propsys/dwmapi/comctl32/oleaut32/ole32 (uncommon COM/shell libs) ---"
+          Select-String -Path imports.txt -Pattern "DLL Name|propsys|dwmapi|comctl32|oleaut32|ole32|winrt" -Context 0,15
+          & $testExe.FullName --list
+          Write-Host "Direct-run exit code: $LASTEXITCODE"
+          Write-Host "--- Application event log (last 5, looking for the crash record) ---"
+          Get-WinEvent -LogName Application -MaxEvents 5 -ErrorAction SilentlyContinue | Format-List TimeCreated,Id,LevelDisplayName,Message
           cargo test
 
       - name: cargo clippy
