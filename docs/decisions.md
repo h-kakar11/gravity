@@ -603,3 +603,44 @@ tests, and making `MockFileSystem` model reality faithfully.
   Rust bridge tests for `core_bridge.rs` (zero today; blocked on the same CI-execution
   problem above for confirming they'd actually pass, not just compile), and the
   real-dependency integration tier (explicitly the issue's own lowest-priority item).
+
+### Settings UX pass (#59) -- mechanical tier: one gap closed, rest already fine or deferred
+The issue is a grab-bag; checked each mechanical item against current code before touching
+anything, since several turned out to already be handled by earlier work this session or a
+prior one.
+
+- **Delivered this pass: folder picker for `general.defaultOutputDirectory`.** Was a bare
+  text input, typo-prone for a real filesystem path. Now uses the same
+  `@tauri-apps/plugin-dialog` `open({ directory: true })` pattern `ConvertPage.tsx` already
+  uses for its file picker (#57) -- `SettingsPage.tsx`'s new `handleBrowseOutputDirectory`
+  plus a `.pathRow`-wrapped `input` + "Browse..." button in `SettingsPage.module.css`. The
+  text input stays editable directly too (some users will want to type a path or use a
+  variable-style template later) -- the picker is an addition, not a replacement.
+- **Already fine, no change needed: `speedUnits`.** The dropdown already lists all of
+  KB/s, KiB/s, MB/s, MiB/s, GB/s, GiB/s (plus Mb/s) with full names as option labels
+  (`"Kilobytes/sec (KB/s)"` etc.), and `Settings.cpp`'s `RequireOneOf` already accepts
+  exactly that same seven-value set. The issue's ask was already met before this pass.
+- **Already fine, no change needed: concurrent-downloads/concurrent-jobs limits.** Backend
+  validates `downloads.concurrentDownloads` to 1-10 and `processing.concurrentJobs` to
+  1-25 (`Settings.cpp`'s `RequireInRange` calls); the frontend's two number inputs already
+  carry the matching `min`/`max` (10 and 25 respectively). No stale lower cap found.
+- **Already fine, no change needed: hotkey display.** `formatHotkeyForDisplay()` already
+  existed in `SettingsPage.tsx`, converting the stored `CommandOrControl+...` accelerator
+  format to `Ctrl+...` for display while keeping the wire format Rust's `global-shortcut`
+  plugin expects. Not full platform-specific glyph rendering (⌘/⇧ symbols), but it already
+  addresses the issue's core complaint (raw `CommandOrControl` string leaking into the UI).
+- **Deferred: folder pickers for `downloads.downloadDirectory` and the watch-folder path
+  field.** `downloadDirectory` exists on the `Settings` type but has no control in
+  `SettingsPage.tsx` at all today -- adding a picker to a field with no UI yet is really
+  "add a new settings field," a bigger and more ambiguous change (how does it relate to
+  `general.defaultOutputDirectory`? is it downloads-specific or redundant?) than the
+  mechanical picker-extension the issue describes, so it's left for a follow-up that can
+  answer that question deliberately. `WatchFoldersSection.tsx`'s path input takes an
+  arbitrary folder to watch (not an output location), console-style; a picker there is a
+  reasonable enhancement but the component has no existing picker precedent to extend the
+  way `SettingsPage.tsx` did, and this pass prioritized the well-scoped, verifiable change.
+- **Not attempted (per the issue's own framing, left explicitly itemized rather than
+  silently dropped):** the settings-icon quick-popup redesign, autosave-vs-save-button
+  restructuring, hardware-detection-driven "recommended settings" suggestions, and a
+  sequential-vs-parallel processing toggle. All four are real product-design questions,
+  not mechanical fixes, and were out of scope for a hardening-focused pass by design.

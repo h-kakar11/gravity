@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import GlassCard from "../components/GlassCard";
 import WatchFoldersSection from "../components/WatchFoldersSection";
 import * as coreClient from "../services/coreClient";
@@ -104,6 +105,14 @@ export default function SettingsPage() {
     setSaveState("idle");
   };
 
+  // Issue #59: this field was a bare text input, typo-prone for a real filesystem path --
+  // same native picker ConvertPage.tsx already uses for its file-picker fallback (#57),
+  // just in directory mode.
+  const handleBrowseOutputDirectory = async () => {
+    const selected = await openFolderPicker({ directory: true, title: "Choose default output directory" });
+    if (typeof selected === "string") update("general", { defaultOutputDirectory: selected });
+  };
+
   const save = async () => {
     setSaveState("saving");
     setSaveError(null);
@@ -126,12 +135,17 @@ export default function SettingsPage() {
       <GlassCard className={styles.section}>
         <h2 className={styles.sectionTitle}>General</h2>
         <Field label="Default output directory">
-          <input
-            className={styles.textInput}
-            type="text"
-            value={settings.general.defaultOutputDirectory}
-            onChange={(e) => update("general", { defaultOutputDirectory: e.target.value })}
-          />
+          <div className={styles.pathRow}>
+            <input
+              className={styles.textInput}
+              type="text"
+              value={settings.general.defaultOutputDirectory}
+              onChange={(e) => update("general", { defaultOutputDirectory: e.target.value })}
+            />
+            <button type="button" className={styles.browseButton} onClick={handleBrowseOutputDirectory}>
+              Browse...
+            </button>
+          </div>
         </Field>
         <Field label="Launch on startup">
           <input

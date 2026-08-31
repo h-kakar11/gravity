@@ -53,6 +53,32 @@
   min-width: 220px;
 }
 
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pathRow .textInput {
+  flex: 1;
+}
+
+.browseButton {
+  background: var(--color-surface);
+  border: 1px solid var(--color-surface-border);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-control);
+  padding: 6px 12px;
+  font-size: 13px;
+  font-family: var(--font-family);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.browseButton:hover {
+  background: var(--color-surface-hover);
+}
+
 .numberInput {
   background: var(--color-bg);
   border: 1px solid var(--color-surface-border);
