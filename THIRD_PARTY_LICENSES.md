@@ -1,3 +1,6 @@
+# Main license
+
+
 # Third-party licenses
 
 Gravity's C++ core depends on the packages below, managed via `vcpkg.json`. Every one is
