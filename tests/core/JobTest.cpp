@@ -77,12 +77,11 @@ TEST(Job, MarkRetryingClearsStaleErrorAndProgress) {
     TestJob job;
     job.MarkStarting();
     job.MarkRunning();
-
-    Progress midProgress;
-    midProgress.statusMessage = "Halfway done";
-    midProgress.percentage = 50.0;
-    job.ReportProgress(midProgress);
-    EXPECT_EQ(job.GetProgress().percentage, 50.0);
+    // ReportProgress() is protected (only a Job subclass's own Execute() may call it) --
+    // TestJob::Execute() reports real, non-default progress internally, giving this test
+    // stale progress to clear without needing test-only access to a protected method.
+    job.Execute();
+    ASSERT_TRUE(job.GetProgress().percentage.has_value());
 
     job.MarkFailed(ErrorInfo::Make("E_TEST_FAILURE", ErrorCategory::Unknown, "boom"));
     ASSERT_TRUE(job.GetError().has_value());
