@@ -666,3 +666,63 @@ always existed and wrong for one being added: `LoadFrom` catches a parse failure
 back to `Settings::Defaults()`, so a settings file written before this field existed — a
 completely normal thing to find on disk after an upgrade — would have silently discarded
 every setting the user had chosen. An additive field must default, not fail.
+
+### Integration and stress suites are separate binaries, not more files in `mediatool_tests`
+
+The unit suite is fast (about 15 seconds) and that is why it gets run constantly. Adding a
+suite that spawns real subprocesses, and another that submits hundreds of jobs across four
+worker threads, would have taken that away from every developer on every build to buy
+coverage that is only meaningful when run deliberately.
+
+So `mediatool_integration_tests` and `mediatool_stress_tests` are their own executables,
+gated behind `scripts/ci-local.ps1 -IntegrationTest` / `-StressTest`. CMake passes the
+built `mediatool-core` path into the integration binary as a compile definition
+(`$<TARGET_FILE:mediatool-core>`), so it always drives the binary that was just built
+rather than whatever happens to be on PATH.
+
+The integration tests redirect `LOCALAPPDATA` into a per-test temporary directory, so the
+child's settings file, job history and in-progress-job store are never the developer's
+real ones, and point `MEDIATOOL_PYTHON_PATH`/`MEDIATOOL_DOWNLOADER_SCRIPT` at real existing
+files so the downloader-availability gate passes and the validation behind it is reachable.
+
+What they cannot cover on a POSIX build host is recorded in the file itself: anything
+needing a path to survive `IsSafeUserSuppliedPath`, which requires a Windows-shaped
+absolute path by design. Those paths work on Windows and here can only be exercised in
+their rejecting direction.
+
+### The IPC integration tests found a real defect on their first run: `RealProcessRunner` writes
+
+`RealProcess`'s header states the invariant plainly -- reproc does not support two threads
+operating on one process handle, so **only** the drain thread may touch `process_`, which is
+why `Terminate()`/`Kill()` set a flag for that thread instead of acting directly.
+`WriteLine()` and `CloseStdin()` did not follow it: both called into `process_` from the
+caller's thread.
+
+The consequence was invisible in production and immediate under test. The only production
+caller, `YtDlpProvider::RunPythonCommand`, writes exactly one command line and then closes
+stdin, so a *second* write to a live child had never happened. The IPC integration tests
+write repeatedly, and the second write to a running `mediatool-core` fails with
+`REPROC_EINVAL` — reproducibly, from the first run of the first test.
+
+Writes and the stdin close are now queued and performed by the drain thread, with the
+caller blocking until the result is known so `WriteLine` keeps its synchronous
+"wrote it, or threw" contract. Two things fell out of the fix:
+
+* **Partial writes were being discarded.** `reproc::process::write()` reports how much it
+  managed to write, and the old code ignored that count, silently truncating anything the
+  pipe could not take in one go. The queued path loops until the buffer is written, which is
+  what makes the 4 MB oversized-line test meaningful rather than accidentally passing.
+* **The poll interval dropped from 200ms to 50ms.** A queued write waits at most one poll
+  interval, and the same interval already bounded how quickly `Terminate()`/`Kill()` take
+  effect — so the shorter window helps both. The integration suite went from 29s to 4.8s.
+
+### Stress tests assert outcomes, never durations
+
+There is exactly one timing assertion in the stress suite, and it is a 10-second ceiling on
+shutting down a manager with 500 queued jobs -- a bound that separates "cancelled the queue"
+from "ran the queue", not a performance target. Everything else asserts that every job
+reached a terminal state, that no job ran more times than the retry policy allows, and that
+no snapshot was ever torn.
+
+A stress test that fails on a loaded CI box teaches people to re-run it until it passes,
+which is worse than not having it.

@@ -262,7 +262,7 @@ std::vector<std::string> BuildFfmpegArgs(const std::string& inputPath, const std
         args.push_back("-vn");
         args.push_back("-c:a");
         args.push_back(AudioEncoderFor(options.outputFormat));
-        if (options.audioBitrateKbps.has_value()) {
+        if (options.audioBitrateKbps.has_value() && *options.audioBitrateKbps > 0) {
             args.push_back("-b:a");
             args.push_back(std::to_string(*options.audioBitrateKbps) + "k");
         }
@@ -387,7 +387,13 @@ std::vector<std::string> BuildFfmpegArgs(const std::string& inputPath, const std
     //  3. Otherwise nothing: no rate-control flag the resolved encoder would honour.
     //     MediaProcessingJob avoids reaching this branch for anything it can probe, by
     //     supplying (1) instead.
-    if (options.videoBitrateKbps.has_value()) {
+    // > 0, not just has_value(): videoBitrateKbps is read straight out of the caller's
+    // options JSON (see FromJson), so a zero or negative value is reachable from the IPC
+    // boundary. Emitting one produces "-b:v -5000k", where ffmpeg reads the value as the
+    // start of another flag -- a malformed command line built from a number nobody
+    // checked. Falling through to CRF is the right degradation: the caller asked for a
+    // rate-control target that is not one.
+    if (options.videoBitrateKbps.has_value() && *options.videoBitrateKbps > 0) {
         const int kbps = *options.videoBitrateKbps;
         args.push_back("-b:v");
         args.push_back(std::to_string(kbps) + "k");
@@ -402,7 +408,8 @@ std::vector<std::string> BuildFfmpegArgs(const std::string& inputPath, const std
 
     args.push_back("-c:a");
     args.push_back(AudioEncoderFor(options.outputFormat));
-    if (options.audioBitrateKbps.has_value()) {
+    // Same bound as videoBitrateKbps above, and for the same reason.
+    if (options.audioBitrateKbps.has_value() && *options.audioBitrateKbps > 0) {
         args.push_back("-b:a");
         args.push_back(std::to_string(*options.audioBitrateKbps) + "k");
     }

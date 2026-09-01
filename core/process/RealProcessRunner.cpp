@@ -5,6 +5,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -153,9 +155,20 @@ public:
                 } else if (action == 2) {
                     process_.kill();
                 }
+                // Stdin writes and the stdin close happen HERE, on this thread, for
+                // exactly the reason terminate()/kill() already do: reproc does not
+                // support two threads operating on one process handle. WriteLine() used
+                // to call process_.write() directly from the caller's thread, and the
+                // second such write to a live child fails with REPROC_EINVAL while this
+                // loop is inside poll()/read() -- reproducible, and previously invisible
+                // because the only production caller (YtDlpProvider) writes exactly one
+                // command and then closes stdin, so a second write never happened. See
+                // tests/integration/IpcProtocolTest.cpp, which does write repeatedly and
+                // is what found it.
+                RunPendingStdinWork();
 
-                auto [events, pollEc] =
-                    process_.poll(reproc::event::out | reproc::event::err, reproc::milliseconds(200));
+                auto [events, pollEc] = process_.poll(reproc::event::out | reproc::event::err,
+                                                       reproc::milliseconds(kPollIntervalMs));
                 // reproc represents "our 200ms poll window elapsed with nothing ready" as
                 // a SUCCESS code (empty pollEc) with events == 0, not as a distinct timeout
                 // error -- reproc_poll() (reproc/src/reproc.c) only ever sets a DEADLINE
@@ -191,6 +204,10 @@ public:
             }
             outSink.Flush();
             errSink.Flush();
+            // The child is gone, so nothing more can be written to it. Anything still
+            // queued is completed with a broken pipe rather than left blocking its caller
+            // forever -- this thread is the only one that could ever have serviced it.
+            FailPendingStdinWork();
 
             auto [status, ec] = process_.wait(reproc::infinite);
 
@@ -230,10 +247,9 @@ public:
     RealProcess& operator=(const RealProcess&) = delete;
 
     void WriteLine(const std::string& line) override {
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        const std::string data = line + "\n";
-        auto [written, ec] = process_.write(reinterpret_cast<const uint8_t*>(data.data()), data.size());
-        (void)written;
+        const std::error_code ec = SubmitStdinWork(line + "\n", /*close=*/false);
+        // A broken pipe means the child is simply gone, which is a normal outcome (it
+        // exited, or was cancelled) and not something to throw about.
         if (ec && ec != std::errc::broken_pipe) {
             throw mediatool::errors::MediaToolException(mediatool::errors::ErrorInfo::Make(
                 "E_PROCESS_WRITE_FAILED", mediatool::errors::ErrorCategory::EngineFailure,
@@ -241,7 +257,10 @@ public:
         }
     }
 
-    void CloseStdin() override { process_.close(reproc::stream::in); }
+    // Queued behind any pending writes rather than performed immediately, so "write the
+    // command, then signal end of input" cannot close the pipe before the command has
+    // gone through it.
+    void CloseStdin() override { (void)SubmitStdinWork(std::string(), /*close=*/true); }
 
     ProcessResult Wait() override {
         std::unique_lock<std::mutex> lock(resultMutex_);
@@ -282,9 +301,98 @@ public:
     }
 
 private:
+    // One unit of stdin work for the drain thread to perform on the caller's behalf. The
+    // caller blocks on `done` so WriteLine keeps its synchronous "wrote it, or threw"
+    // contract even though the write itself happens on another thread.
+    struct StdinWork {
+        std::string data;
+        bool close = false;
+        bool done = false;
+        std::error_code ec;
+    };
+
+    std::error_code SubmitStdinWork(std::string data, bool close) {
+        auto work = std::make_shared<StdinWork>();
+        work->data = std::move(data);
+        work->close = close;
+
+        std::unique_lock<std::mutex> lock(stdinMutex_);
+        if (drainFinished_) {
+            return std::make_error_code(std::errc::broken_pipe);
+        }
+        stdinQueue_.push_back(work);
+        // Up to one poll interval, which is why that interval is short. Not signalled
+        // directly: the drain thread may be inside poll(), and interrupting that safely
+        // would need a self-pipe -- more machinery than a 50ms wait is worth.
+        stdinCv_.wait(lock, [&work] { return work->done; });
+        return work->ec;
+    }
+
+    // Drain thread only.
+    void RunPendingStdinWork() {
+        for (;;) {
+            std::shared_ptr<StdinWork> work;
+            {
+                std::lock_guard<std::mutex> lock(stdinMutex_);
+                if (stdinQueue_.empty()) return;
+                work = stdinQueue_.front();
+                stdinQueue_.pop_front();
+            }
+
+            std::error_code ec;
+            if (work->close) {
+                ec = process_.close(reproc::stream::in);
+            } else {
+                // Looped, because reproc::process::write() reports what it managed to
+                // write rather than writing everything: the previous code discarded that
+                // count, so a partial write silently truncated the line. A 4 MB request
+                // line is exactly when that happens.
+                std::size_t offset = 0;
+                while (offset < work->data.size()) {
+                    auto [written, writeEc] = process_.write(
+                        reinterpret_cast<const uint8_t*>(work->data.data()) + offset,
+                        work->data.size() - offset);
+                    if (writeEc) {
+                        ec = writeEc;
+                        break;
+                    }
+                    if (written == 0) break;  // no progress; stop rather than spin
+                    offset += written;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(stdinMutex_);
+                work->ec = ec;
+                work->done = true;
+            }
+            stdinCv_.notify_all();
+        }
+    }
+
+    // Drain thread only, once it will never service the queue again.
+    void FailPendingStdinWork() {
+        std::deque<std::shared_ptr<StdinWork>> abandoned;
+        {
+            std::lock_guard<std::mutex> lock(stdinMutex_);
+            drainFinished_ = true;
+            abandoned.swap(stdinQueue_);
+            for (auto& work : abandoned) {
+                work->ec = std::make_error_code(std::errc::broken_pipe);
+                work->done = true;
+            }
+        }
+        stdinCv_.notify_all();
+    }
+
+    static constexpr int kPollIntervalMs = 50;
+
     reproc::process process_;
+    std::mutex stdinMutex_;
+    std::condition_variable stdinCv_;
+    std::deque<std::shared_ptr<StdinWork>> stdinQueue_;
+    bool drainFinished_ = false;
     std::thread drainThread_;
-    std::mutex writeMutex_;
     mutable std::mutex resultMutex_;
     std::condition_variable resultCv_;
     std::optional<ProcessResult> cachedResult_;

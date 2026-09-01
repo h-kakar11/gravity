@@ -81,6 +81,15 @@ bool IsSafeFormatSelector(const std::string& selector) {
         if (!IsFormatIdCharacter(c)) {
             return false;
         }
+        // A real format id always starts with a letter or a digit. Requiring that costs
+        // nothing and removes the one shape in this character set that means something
+        // elsewhere: a leading '-' reads as a flag to any argv-style parser, and a
+        // leading '.' as a relative path. Neither can reach one today (the selector
+        // travels as a JSON field, not an argument), which is exactly why it is worth
+        // closing now rather than after something changes.
+        if (current.empty() && std::isalnum(static_cast<unsigned char>(c)) == 0) {
+            return false;
+        }
         current.push_back(c);
         if (current.size() > kMaxFormatIdLength) {
             return false;
