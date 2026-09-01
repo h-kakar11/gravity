@@ -1,13 +1,17 @@
 #include "core/jobs/JobManager.h"
 
+#include <chrono>
 #include <system_error>
+#include <vector>
 
 #include "core/errors/MediaToolException.h"
 #include "core/logging/Logger.h"
 
 namespace mediatool::jobs {
 
-JobManager::JobManager(std::size_t requestedConcurrentJobs) {
+JobManager::JobManager(std::size_t requestedConcurrentJobs, RetryPolicy retryPolicy,
+                        JobWatchdogPolicy watchdogPolicy)
+    : retryPolicy_(retryPolicy), watchdogPolicy_(watchdogPolicy) {
     const std::size_t requested = requestedConcurrentJobs == 0 ? 1 : requestedConcurrentJobs;
     workers_.reserve(requested);
     for (std::size_t i = 0; i < requested; ++i) {
@@ -46,6 +50,22 @@ JobManager::JobManager(std::size_t requestedConcurrentJobs) {
     // concurrency decision downstream (and MaxConcurrentJobs() itself) must describe
     // reality.
     maxConcurrentJobs_ = workers_.size();
+
+    // Started last, and only when it has something to do. A pool that could not start a
+    // single worker never gets here (the throw above), and a zero limit means the caller
+    // asked for no watchdog at all.
+    if (watchdogPolicy_.maxJobDuration > std::chrono::steady_clock::duration::zero()) {
+        try {
+            watchdog_ = std::thread([this] { WatchdogLoop(); });
+        } catch (const std::system_error& e) {
+            // Same reasoning as a short worker pool: running without the backstop is far
+            // better than refusing to run at all, but it must be said out loud.
+            logging::Log::Warning("JobManager",
+                                   std::string("Could not start the stuck-job watchdog; jobs "
+                                               "will not be time-limited (") +
+                                       e.what() + ")");
+        }
+    }
 }
 
 JobManager::~JobManager() { Shutdown(); }
@@ -78,6 +98,12 @@ void JobManager::Shutdown() {
     for (Job* job : toCancel) job->RequestCancel();
 
     queueCv_.notify_all();
+    watchdogCv_.notify_all();
+
+    // Joined before the workers: it wakes on `stopping_` rather than waiting out its
+    // interval, and leaving it running while the pool tears down would let it cancel jobs
+    // that are already being finalized.
+    if (watchdog_.joinable()) watchdog_.join();
     for (auto& worker : workers_) {
         if (worker.joinable()) worker.join();
     }
@@ -148,6 +174,7 @@ JobManager::JobSnapshot JobManager::SnapshotOf(const Job& job) const {
     snapshot.type = job.Type();
     snapshot.state = job.State();
     snapshot.priority = job.Priority();
+    snapshot.attempts = job.AttemptCount();
     snapshot.progress = job.GetProgress();
     snapshot.error = job.GetError();
     snapshot.result = job.GetResult();
@@ -164,6 +191,7 @@ nlohmann::json JobManager::JobSnapshot::ToJson() const {
     json["type"] = ToWireString(type);
     json["state"] = ToWireString(state);
     json["priority"] = priority;
+    json["attempts"] = attempts;
     json["createdAt"] = createdAt;
     if (startedAt) json["startedAt"] = *startedAt;
     if (completedAt) json["completedAt"] = *completedAt;
@@ -313,12 +341,26 @@ void JobManager::WorkerLoop() {
         JobId id;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            // Note the predicate: not "is anything queued" but "is anything *runnable*". A
-            // queue full of jobs waiting on a dependency must leave workers asleep rather
-            // than spinning on entries they cannot start.
-            queueCv_.wait(lock, [this] { return stopping_ || scheduler_.HasEligible(); });
+            // Not "is anything queued" but "is anything *runnable* right now". A queue
+            // full of jobs waiting on a dependency must leave workers asleep rather than
+            // spinning on entries they cannot start -- and a job waiting out a retry
+            // backoff must wake the pool when its time comes rather than only when some
+            // unrelated event happens to notify it, which is what the timed wait below is
+            // for. Written as a loop rather than a wait predicate because the deadline is
+            // recomputed on every pass: a shorter backoff scheduled while this worker
+            // slept must shorten the sleep.
+            while (!stopping_ && !scheduler_.HasEligible(std::chrono::steady_clock::now())) {
+                const std::optional<SchedulerCore::TimePoint> wakeAt =
+                    scheduler_.NextEligibleTime(std::chrono::steady_clock::now());
+                if (wakeAt) {
+                    queueCv_.wait_until(lock, *wakeAt);
+                } else {
+                    queueCv_.wait(lock);
+                }
+            }
             if (stopping_) return;
-            const std::optional<JobId> next = scheduler_.TakeNextEligible();
+            const std::optional<JobId> next =
+                scheduler_.TakeNextEligible(std::chrono::steady_clock::now());
             if (!next) continue;  // lost the race to another worker
             id = *next;
         }
@@ -376,16 +418,117 @@ void JobManager::RunJob(const JobId& id) {
         if (e.Info().category == errors::ErrorCategory::Cancelled) {
             job->MarkCancelled();
         } else {
-            job->MarkFailed(e.Info());
+            FinalizeFailure(*job, e.Info());
         }
     } catch (const std::exception& e) {
-        job->MarkFailed(errors::ErrorInfo::Make(
-            "E_JOB_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
-            "Job failed unexpectedly", e.what()));
+        FinalizeFailure(*job, errors::ErrorInfo::Make(
+                                   "E_JOB_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
+                                   "Job failed unexpectedly", e.what()));
     }
     // Every path above ends in a Mark* whose result is deliberately unexamined: by then
     // the only way it can fail is that a concurrent cancellation already finalized the
     // job, which is precisely the outcome those calls were trying to record.
+}
+
+void JobManager::WatchdogLoop() {
+    // What this can and cannot do, stated plainly because the difference matters. It
+    // requests cancellation, which is genuinely effective: DownloadJob and
+    // MediaProcessingJob poll IsCancellationRequested() and both engines terminate (then
+    // kill) their child process on seeing it, so a wedged ffmpeg or yt-dlp really does
+    // die. What it CANNOT do is force a job whose Execute() ignores cancellation to
+    // return -- that thread belongs to the job, and there is no portable way to take it
+    // back without killing the process. So after the grace period it reports the job as
+    // unresponsive and leaves it alone, rather than marking it Failed while its worker is
+    // still running, which would lie about a slot that is not actually free.
+    for (;;) {
+        std::vector<Job*> overdue;
+        std::vector<JobId> unresponsive;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            watchdogCv_.wait_for(lock, watchdogPolicy_.checkInterval, [this] { return stopping_; });
+            if (stopping_) return;
+
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& [id, job] : jobs_) {
+                const auto runningFor = job->RunningFor();
+                if (!runningFor.has_value()) {
+                    watchdogCancelledAt_.erase(id);  // not running: nothing outstanding
+                    continue;
+                }
+                if (*runningFor < watchdogPolicy_.maxJobDuration) continue;
+
+                const auto cancelled = watchdogCancelledAt_.find(id);
+                if (cancelled == watchdogCancelledAt_.end()) {
+                    watchdogCancelledAt_.emplace(id, now);
+                    overdue.push_back(job.get());
+                } else if (now - cancelled->second >= watchdogPolicy_.cancellationGrace) {
+                    unresponsive.push_back(id);
+                    cancelled->second = now;  // re-arm, so this is reported periodically
+                }
+            }
+        }
+
+        // Outside the lock: RequestCancel fires state-changed callbacks that re-enter here.
+        for (Job* job : overdue) {
+            logging::Log::Warning("JobManager",
+                                   "Job " + job->Id() + " has been running past the " +
+                                       std::to_string(std::chrono::duration_cast<std::chrono::hours>(
+                                                          watchdogPolicy_.maxJobDuration)
+                                                          .count()) +
+                                       "h limit; cancelling it.");
+            job->RequestCancel();
+        }
+        for (const JobId& id : unresponsive) {
+            logging::Log::Error("JobManager",
+                                 "Job " + id +
+                                     " did not stop after cancellation was requested. It is "
+                                     "holding a worker slot and cannot be reclaimed without "
+                                     "restarting the core.");
+        }
+    }
+}
+
+void JobManager::FinalizeFailure(Job& job, const errors::ErrorInfo& error) {
+    const RetryDecision decision = DecideRetry(error, job.AttemptCount(), retryPolicy_);
+    if (!decision.shouldRetry) {
+        logging::Log::Debug("JobManager", "Job " + job.Id() + " failed for good: " + decision.reason);
+        job.MarkFailed(error);
+        return;
+    }
+
+    // Checked before the transition, not after: a job resurrected during shutdown would
+    // be requeued into a scheduler whose pending set has already been drained and
+    // cancelled, leaving it parked in RETRYING with no worker left to pick it up. The
+    // window between this read and the Requeue below is real but harmless -- the worst
+    // case is exactly that parked job, in a process that is exiting anyway.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) {
+            job.MarkFailed(error);
+            return;
+        }
+    }
+
+    // RUNNING -> RETRYING directly. Not through FAILED: that would tell the scheduler
+    // this job had ended, cancelling everything that depends on it, and write a failure
+    // into Session History -- both for an attempt the next line is about to repeat. Fires
+    // the state-changed callback, which re-enters this class, so it must not be called
+    // under mutex_.
+    if (job.MarkRetryScheduled(error) != TransitionResult::Success) {
+        return;  // cancelled or otherwise finalized underneath us; nothing to retry
+    }
+
+    logging::Log::Info("JobManager", "Retrying job " + job.Id() + " in " +
+                                          std::to_string(decision.delay.count()) + "ms: " +
+                                          decision.reason);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        scheduler_.Requeue(job.Id(), job.Priority(),
+                            std::chrono::steady_clock::now() + decision.delay);
+    }
+    // notify_all, not notify_one: the woken worker may not be the one whose timed wait is
+    // shortest, and a worker asleep on a later deadline needs to recompute it.
+    queueCv_.notify_all();
 }
 
 // Runs the testing-only interleaving hook (if any) and then attempts the Queued ->

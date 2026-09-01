@@ -25,6 +25,9 @@ enum class EventType {
     JobCompleted,
     JobFailed,
     JobCancelled,
+    // A failed ATTEMPT that is about to be repeated -- not a terminal outcome. Carries
+    // the attempt count, the limit, the backoff, and the error that triggered it.
+    JobRetrying,
     FileDetected,
     HardwareDetected,
     DownloadMetadataReceived,

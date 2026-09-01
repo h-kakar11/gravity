@@ -24,6 +24,7 @@ export type CoreCommand =
   | "inspectFile"
   | "inspectDownloadUrl"
   | "getCapabilities"
+  | "getDownloaderInfo"
   | "getSettings"
   | "updateSettings"
   | "getHardwareInfo"
@@ -67,6 +68,7 @@ export interface CommandParams {
   inspectFile: { path: string };
   inspectDownloadUrl: { url: string };
   getCapabilities: { path: string };
+  getDownloaderInfo: Record<string, never>;
   getSettings: Record<string, never>;
   updateSettings: { settings: Partial<Settings> };
   getHardwareInfo: Record<string, never>;
@@ -90,7 +92,25 @@ export interface CommandResult {
   removeJob: Record<string, never>;
   inspectFile: { fileInfo: FileInfo };
   inspectDownloadUrl: { metadata: DownloadMetadata };
-  getCapabilities: { capabilities: string[] };
+  getCapabilities: {
+    capabilities: string[];
+    // Operations that apply to this file but that the build cannot run. Attempting one
+    // fails with E_NOT_IMPLEMENTED; `reason` is user-facing and safe to render verbatim
+    // (see core/media/DeferredOperations.h).
+    deferredCapabilities: Array<{ capability: string; reason: string }>;
+  };
+  // Whether the yt-dlp backend is usable, and how old it is. `stale` means its extractors
+  // are old enough that downloads are likely to fail with errors that look like the
+  // video's fault -- worth surfacing before the user blames the link.
+  getDownloaderInfo: {
+    downloaderInfo: {
+      available: boolean;
+      backend: string;
+      version: string | null;
+      ageDays: number | null;
+      stale: boolean;
+    };
+  };
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };
   getHardwareInfo: { hardwareInfo: HardwareInfo };
@@ -126,6 +146,7 @@ export type CoreEventName =
   | "jobCompleted"
   | "jobFailed"
   | "jobCancelled"
+  | "jobRetrying"
   | "fileDetected"
   | "hardwareDetected"
   | "downloadMetadataReceived"
@@ -143,6 +164,15 @@ export interface CoreEventData {
   jobCompleted: { state: "COMPLETED"; result?: Record<string, unknown> };
   jobFailed: { state: "FAILED"; error: ErrorInfo };
   jobCancelled: { state: "CANCELLED" };
+  // A failed ATTEMPT that will be repeated -- not a terminal outcome, and deliberately
+  // not a jobFailed. `attempt` is the attempt that just failed, `maxAttempts` the limit.
+  jobRetrying: {
+    state: "RETRYING";
+    attempt: number;
+    maxAttempts: number;
+    retryInMs: number;
+    error: ErrorInfo;
+  };
   fileDetected: { fileInfo: FileInfo };
   hardwareDetected: { hardwareInfo: HardwareInfo };
   downloadMetadataReceived: {

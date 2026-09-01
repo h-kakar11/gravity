@@ -69,6 +69,25 @@ struct DownloadMetadata {
     std::vector<DownloadFormat> formats;
 };
 
+// What the downloader backend actually is on this machine, and whether it is healthy
+// enough to be worth using. Reported before a download fails for a reason the user cannot
+// see: yt-dlp's extractors for the big sites break on a scale of weeks, so a build a couple
+// of years old fails on real URLs with messages ("video unavailable") that blame the video
+// rather than the tool.
+struct DownloaderInfo {
+    // False means the backend cannot run at all -- the interpreter is missing, or its
+    // library is not installed. Everything below is then unset.
+    bool available = false;
+    std::string backend = "yt-dlp";
+    std::optional<std::string> version;
+    // Days since the backend's own release date, when its version string carries one.
+    std::optional<int> ageDays;
+    // True when `ageDays` is past the point where extractor breakage is near-certain.
+    bool stale = false;
+
+    nlohmann::json ToJson() const;
+};
+
 using MetadataCallback = std::function<void(const DownloadMetadata&)>;
 using ProgressCallback = std::function<void(const jobs::Progress&)>;
 using CompletedCallback = std::function<void(const std::string& outputPath)>;
@@ -79,6 +98,11 @@ public:
     virtual ~IDownloadProvider() = default;
 
     virtual bool CanHandle(const std::string& url) const = 0;
+
+    // Cheap enough to call on demand but not free (it starts a process), so callers are
+    // expected to cache it. Never throws: "the downloader is not usable" is the answer
+    // this question exists to give, not an error condition.
+    virtual DownloaderInfo Info() = 0;
 
     // Blocking; fetches full metadata -- including the available formats a caller needs
     // for quality selection -- WITHOUT downloading anything (spec section 5/6). Throws

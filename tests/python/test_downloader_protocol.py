@@ -77,16 +77,131 @@ class ClassifyExceptionTest(unittest.TestCase):
         self.assertEqual(category, "PERMISSION_ERROR")
 
     def test_recognizes_network_failure_by_type(self):
-        import socket
-        code, category, recoverable = downloader.classify_exception(socket.timeout("timed out"))
+        # socket.timeout used to land here too; it now classifies as E_NETWORK_TIMEOUT --
+        # see VersionCommandTest's neighbours below. A refused connection is the plain
+        # network failure this test is about.
+        code, category, recoverable = downloader.classify_exception(
+            ConnectionRefusedError("Connection refused"))
         self.assertEqual(code, "E_NETWORK")
         self.assertEqual(category, "NETWORK_ERROR")
         self.assertTrue(recoverable)
+
+    # --- Merge / post-processing failures -------------------------------------------
+    # These fail after the bytes are already on disk, in yt-dlp's own ffmpeg step. They
+    # used to fall through to E_DOWNLOAD_FAILED/UNKNOWN, which tells a retry policy
+    # nothing -- the whole point of classifying them is the recoverable/permanent split.
+    # The message strings below are yt-dlp's own (verified against its source at
+    # 2026.8.19; the pattern table cites the exact files and lines).
+
+    def test_missing_merge_tool_is_permanent(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "You have requested merging of multiple formats but ffmpeg is not installed. "
+            "Aborting due to --abort-on-error"))
+        self.assertEqual(code, "E_MERGE_TOOL_MISSING")
+        self.assertEqual(category, "ENGINE_FAILURE")
+        # Retrying cannot install ffmpeg; a retry would only re-download and re-fail.
+        self.assertFalse(recoverable)
+
+    def test_postprocessor_missing_ffmpeg_is_permanent(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "ffmpeg not found. Please install or provide the path using --ffmpeg-location"))
+        self.assertEqual(code, "E_MERGE_TOOL_MISSING")
+        self.assertEqual(category, "ENGINE_FAILURE")
+        self.assertFalse(recoverable)
+
+    def test_postprocessing_failure_is_permanent(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "Postprocessing: Error opening output files: Invalid argument"))
+        self.assertEqual(code, "E_MERGE_FAILED")
+        self.assertEqual(category, "ENGINE_FAILURE")
+        self.assertFalse(recoverable)
+
+    def test_fragment_transport_failure_is_recoverable(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "Unable to open fragment 17; HTTP Error 503: Service Unavailable"))
+        self.assertEqual(code, "E_FRAGMENT_DOWNLOAD_FAILED")
+        self.assertEqual(category, "NETWORK_ERROR")
+        # The other half of the split: a fragment that failed to transfer genuinely often
+        # succeeds on a second attempt.
+        self.assertTrue(recoverable)
+
+    def test_missing_fragment_is_permanent(self):
+        code, _, recoverable = downloader.classify_exception(Exception(
+            "fragment 4 not found, unable to continue"))
+        self.assertEqual(code, "E_FRAGMENT_MISSING")
+        self.assertFalse(recoverable)
+
+    def test_a_more_specific_merge_pattern_wins_over_the_postprocessing_prefix(self):
+        # yt-dlp prefixes the underlying message with "Postprocessing: ", so both patterns
+        # match this string. Ordering in the table is what makes the specific one win --
+        # without it every post-processing failure collapses to one opaque code.
+        code, _, _ = downloader.classify_exception(Exception(
+            "Postprocessing: ffmpeg not found. Please install or provide the path using "
+            "--ffmpeg-location"))
+        self.assertEqual(code, "E_MERGE_TOOL_MISSING")
+
+    # --- Network timeouts ------------------------------------------------------------
+    # Split out from E_NETWORK because a timeout is the network failure most likely to
+    # succeed on a retry, and the retry policy reads the code as well as the flag.
+
+    def test_socket_timeout_is_its_own_code(self):
+        import socket
+        code, category, recoverable = downloader.classify_exception(socket.timeout("timed out"))
+        self.assertEqual(code, "E_NETWORK_TIMEOUT")
+        self.assertEqual(category, "NETWORK_ERROR")
+        self.assertTrue(recoverable)
+
+    def test_a_host_that_does_not_resolve_is_not_a_timeout(self):
+        import socket
+        code, _, recoverable = downloader.classify_exception(
+            socket.gaierror("Name or service not known"))
+        self.assertEqual(code, "E_NETWORK")
+        self.assertTrue(recoverable)
+
+    def test_timeout_wording_wins_over_the_general_network_keywords(self):
+        # "connection timed out" matches both tables; the timeout is the more specific
+        # reading and must be checked first.
+        code, _, _ = downloader.classify_exception(Exception("Connection timed out after 30s"))
+        self.assertEqual(code, "E_NETWORK_TIMEOUT")
 
     def test_unrecognized_message_falls_back_to_unknown(self):
         code, category, _ = downloader.classify_exception(Exception("completely novel failure text"))
         self.assertEqual(code, "E_DOWNLOAD_FAILED")
         self.assertEqual(category, "UNKNOWN")
+
+
+class VersionCommandTest(unittest.TestCase):
+    """The version probe must answer even when there is nothing to probe -- "is the
+    downloader usable" is exactly the question, so a missing yt_dlp is an answer, not an
+    error. This suite runs with yt_dlp deliberately absent, which is the interesting case.
+    """
+
+    def test_reports_unavailable_without_failing_when_yt_dlp_is_missing(self):
+        result, events = run_command_stdin('{"command": "version", "params": {}}')
+        self.assertEqual(result.returncode, 0)
+        version_events = [e for e in events if e["event"] == "version"]
+        self.assertEqual(len(version_events), 1)
+        data = version_events[0]["data"]
+        self.assertFalse(data["available"])
+        self.assertIsNone(data["ytDlpVersion"])
+        self.assertFalse(data["stale"])
+        # The interpreter itself is always identifiable, even when the library is not.
+        self.assertTrue(data["pythonVersion"])
+        self.assertTrue(any(e["event"] == "completed" for e in events))
+
+    def test_a_dated_version_string_parses_into_a_release_date(self):
+        import datetime
+        self.assertEqual(downloader._yt_dlp_release_date("2026.8.19"),
+                          datetime.date(2026, 8, 19))
+        # yt-dlp nightlies append build information after the date.
+        self.assertEqual(downloader._yt_dlp_release_date("2026.08.19.123456"),
+                          datetime.date(2026, 8, 19))
+
+    def test_an_undated_version_string_is_not_guessed_at(self):
+        # A source checkout can report anything. Returning None means "age unknown", which
+        # the C++ side renders as such rather than warning about a staleness it invented.
+        for undated in ("", "unknown", "1.0", "v2026.8.19-git", "not.a.date.at.all"):
+            self.assertIsNone(downloader._yt_dlp_release_date(undated), undated)
 
 
 class FormatEntryTest(unittest.TestCase):

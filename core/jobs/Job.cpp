@@ -146,9 +146,12 @@ TransitionResult Job::RequestCancel() {
         // not an error -- see TransitionResult::AlreadyTerminal.
         if (IsTerminalState(state_)) return TransitionResult::AlreadyTerminal;
         cancellationRequested_ = true;
-        if (state_ == JobState::Queued) {
-            // No worker thread will ever run Execute() for a still-Queued job, so
-            // nothing else will ever notice the flag -- finalize the transition here.
+        if (state_ == JobState::Queued || state_ == JobState::Retrying) {
+            // Neither state has a worker thread inside Execute() to notice the flag: a
+            // Queued job has not started, and a Retrying one is parked in the scheduler
+            // waiting out a backoff. Nothing else would ever finalize them, so this call
+            // does it. (A backoff is exactly when a user gives up on a job, and having to
+            // wait out a 30-second timer before Cancel took effect is what this fixes.)
             transitionedHere = TransitionLocked(JobState::Cancelled) == TransitionResult::Success;
             if (transitionedHere) completedAt_ = clock_.NowIso8601Utc();
         }
@@ -210,10 +213,23 @@ TransitionResult Job::MarkRunning() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         result = TransitionLocked(JobState::Running);
-        if (result == TransitionResult::Success && !startedAt_) startedAt_ = clock_.NowIso8601Utc();
+        if (result == TransitionResult::Success) {
+            if (!startedAt_) startedAt_ = clock_.NowIso8601Utc();
+            runningSince_ = std::chrono::steady_clock::now();
+            // Every attempt -- the first and every retry alike -- reaches Running through
+            // exactly this transition, which is what makes this a count of attempts
+            // rather than of anything else that happens to a job.
+            ++attemptCount_;
+        }
     }
     if (result == TransitionResult::Success) FireStateChanged(JobState::Running);
     return result;
+}
+
+std::optional<std::chrono::steady_clock::duration> Job::RunningFor() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != JobState::Running || !runningSince_) return std::nullopt;
+    return std::chrono::steady_clock::now() - *runningSince_;
 }
 
 TransitionResult Job::MarkCompleted() {
@@ -249,6 +265,24 @@ TransitionResult Job::MarkCancelled() {
         if (result == TransitionResult::Success) completedAt_ = clock_.NowIso8601Utc();
     }
     if (result == TransitionResult::Success) FireStateChanged(JobState::Cancelled);
+    return result;
+}
+
+TransitionResult Job::MarkRetryScheduled(errors::ErrorInfo error) {
+    TransitionResult result;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result = TransitionLocked(JobState::Retrying);
+        if (result == TransitionResult::Success) {
+            // The attempt DID fail, so the error is recorded even though the job is not
+            // terminal: getJob on a job sitting out a backoff should say what went wrong
+            // last time, not nothing. completedAt_ stays unset -- this job has not
+            // completed.
+            error_ = std::move(error);
+            cancellationRequested_ = false;
+        }
+    }
+    if (result == TransitionResult::Success) FireStateChanged(JobState::Retrying);
     return result;
 }
 

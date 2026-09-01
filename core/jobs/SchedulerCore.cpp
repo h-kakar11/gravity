@@ -81,23 +81,45 @@ bool SchedulerCore::DependenciesSatisfied(const JobId& id) const {
     return true;
 }
 
-std::optional<JobId> SchedulerCore::TakeNextEligible() {
-    // Iterates in scheduling order; the first entry whose dependencies are met wins, and
-    // the ones passed over stay exactly where they are.
+std::optional<JobId> SchedulerCore::TakeNextEligible(TimePoint now) {
+    // Iterates in scheduling order; the first eligible entry wins, and the ones passed
+    // over stay exactly where they are.
     for (auto it = pending_.begin(); it != pending_.end(); ++it) {
-        if (!DependenciesSatisfied(it->second)) continue;  // skipped, not blocking
+        if (!IsEligible(it->second, now)) continue;  // skipped, not blocking
         const JobId id = it->second;
         pending_.erase(it);
         entries_.at(id).phase = Phase::Running;
+        entries_.at(id).notBefore = TimePoint{};  // consumed
         return id;
     }
     return std::nullopt;
 }
 
-bool SchedulerCore::HasEligible() const {
-    return std::any_of(pending_.begin(), pending_.end(), [this](const auto& entry) {
-        return DependenciesSatisfied(entry.second);
-    });
+bool SchedulerCore::HasEligible(TimePoint now) const {
+    return std::any_of(pending_.begin(), pending_.end(),
+                        [this, now](const auto& entry) { return IsEligible(entry.second, now); });
+}
+
+std::optional<SchedulerCore::TimePoint> SchedulerCore::NextEligibleTime(TimePoint now) const {
+    std::optional<TimePoint> earliest;
+    for (const auto& [key, id] : pending_) {
+        const auto entry = entries_.find(id);
+        if (entry == entries_.end()) continue;
+        // Only a job held back purely by its own clock can be woken by waiting. One
+        // waiting on a dependency becomes eligible when that dependency finishes, which
+        // is a notify, not a deadline.
+        if (!DependenciesSatisfied(id)) continue;
+        if (entry->second.notBefore <= now) continue;  // already eligible, nothing to wait for
+        if (!earliest || entry->second.notBefore < *earliest) earliest = entry->second.notBefore;
+    }
+    return earliest;
+}
+
+bool SchedulerCore::IsEligible(const JobId& id, TimePoint now) const {
+    const auto entry = entries_.find(id);
+    if (entry == entries_.end()) return false;
+    if (entry->second.notBefore > now) return false;
+    return DependenciesSatisfied(id);
 }
 
 std::vector<JobId> SchedulerCore::RecordTerminal(const JobId& id, JobState terminal) {
@@ -126,7 +148,7 @@ std::vector<JobId> SchedulerCore::RecordTerminal(const JobId& id, JobState termi
     return unrunnable;
 }
 
-void SchedulerCore::Requeue(const JobId& id, int priority) {
+void SchedulerCore::Requeue(const JobId& id, int priority, TimePoint notBefore) {
     const auto it = entries_.find(id);
     if (it == entries_.end()) {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
@@ -136,6 +158,7 @@ void SchedulerCore::Requeue(const JobId& id, int priority) {
     if (it->second.phase == Phase::Pending) return;
 
     it->second.phase = Phase::Pending;
+    it->second.notBefore = notBefore;
     // A retried job goes to the back of its priority band rather than jumping ahead of
     // jobs that have been waiting: it already had its turn.
     it->second.key = {priority, nextSequence_++};

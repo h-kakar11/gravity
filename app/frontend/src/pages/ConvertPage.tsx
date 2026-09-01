@@ -1,14 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import GlassCard from "../components/GlassCard";
 import PresetBar from "../components/PresetBar";
-import { ProLockedControl } from "../components/ProLockedBadge";
 import { useJobs } from "../hooks/useJobs";
 import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
 import type { FileCategory, FileInfo } from "../types/fileInfo";
 import type { ErrorInfo } from "../types/error";
-import type { HardwareAcceleration, MediaProcessingOptions, MediaQuality, VideoCodec } from "../types/conversion";
+import {
+  CONVERSION_QUALITY_TIERS,
+  LOSSY_QUALITY_TIERS,
+  QUALITY_LABELS,
+  type HardwareAcceleration,
+  type MediaProcessingOptions,
+  type MediaQuality,
+  type VideoCodec,
+} from "../types/conversion";
 import { asErrorInfo } from "../utils/errors";
 import { formatBytes, formatBytesPerSecond, formatEta } from "../utils/format";
 import styles from "./ConvertPage.module.css";
@@ -52,6 +59,9 @@ export default function ConvertPage() {
 
   const [outputFormat, setOutputFormat] = useState("");
   const [quality, setQuality] = useState<MediaQuality>("medium");
+  const [defaultCompressionQuality, setDefaultCompressionQuality] = useState<MediaQuality>("medium");
+  // Whether the user has picked a quality themselves -- see the Settings seed below.
+  const qualityTouched = useRef(false);
   const [videoCodec, setVideoCodec] = useState<VideoCodec>("auto");
   const [hardwareAcceleration, setHardwareAcceleration] = useState<HardwareAcceleration>("auto");
   const [audioBitrateKbps, setAudioBitrateKbps] = useState<string>("");
@@ -67,14 +77,42 @@ export default function ConvertPage() {
   const jobInFlight = activeJob !== null && !["COMPLETED", "FAILED", "CANCELLED"].includes(activeJob.state);
 
   // Seed the output directory from Settings once, so the user isn't stuck typing a path by
-  // hand for the common case -- they can still override it per job.
+  // hand for the common case -- they can still override it per job. Same for the default
+  // compression quality: Settings has advertised one since issue #59, but nothing ever
+  // read it here, so picking "Ultra low" there changed nothing about an actual job.
   useEffect(() => {
     coreClient
       .getSettings()
-      .then(({ settings }) => setOutputDirectory(settings.general.defaultOutputDirectory))
+      .then(({ settings }) => {
+        setOutputDirectory(settings.general.defaultOutputDirectory);
+        const configured = settings.processing.defaultCompressionQuality as MediaQuality;
+        if (!LOSSY_QUALITY_TIERS.includes(configured)) return;
+        setDefaultCompressionQuality(configured);
+        // Settings arrives asynchronously, so this can land after the user has already
+        // picked a tier -- adopting it then would silently discard their choice.
+        if (!qualityTouched.current) setQuality(configured);
+      })
       .catch(() => {
-        // Non-fatal -- the field just starts empty and the user fills it in.
+        // Non-fatal -- the fields just start at their existing defaults.
       });
+    // Deliberately mount-only: this seeds initial values, it does not track Settings.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Compression never offers "lossless" (see types/conversion.ts), so switching into it
+  // has to pull an out-of-range selection back rather than submit a tier the mode doesn't
+  // support.
+  const qualityTiers = mode === "compress" ? LOSSY_QUALITY_TIERS : CONVERSION_QUALITY_TIERS;
+  useEffect(() => {
+    if (mode !== "compress") return;
+    setQuality((current) =>
+      LOSSY_QUALITY_TIERS.includes(current) ? current : defaultCompressionQuality,
+    );
+  }, [mode, defaultCompressionQuality]);
+
+  const chooseQuality = useCallback((next: MediaQuality) => {
+    qualityTouched.current = true;
+    setQuality(next);
   }, []);
 
   useEffect(() => {
@@ -123,7 +161,10 @@ export default function ConvertPage() {
   const applyPresetOptions = useCallback((options: Record<string, unknown>) => {
     const opts = options as Partial<MediaProcessingOptions>;
     if (typeof opts.outputFormat === "string") setOutputFormat(opts.outputFormat);
-    if (opts.quality && opts.quality !== "lossless") setQuality(opts.quality);
+    if (opts.quality) {
+      qualityTouched.current = true;
+      setQuality(opts.quality);
+    }
     if (opts.videoCodec) setVideoCodec(opts.videoCodec);
     if (opts.hardwareAcceleration) setHardwareAcceleration(opts.hardwareAcceleration);
     if (typeof opts.audioBitrateKbps === "number") setAudioBitrateKbps(String(opts.audioBitrateKbps));
@@ -220,9 +261,6 @@ export default function ConvertPage() {
             >
               or choose a file...
             </button>
-            <ProLockedControl label="Select multiple files for batch conversion">
-              <span className={styles.batchStub}>Batch convert</span>
-            </ProLockedControl>
           </div>
         </GlassCard>
       ) : (
@@ -268,18 +306,13 @@ export default function ConvertPage() {
 
               <div className={styles.field}>
                 <label className={styles.fieldLabel}>Quality</label>
-                <div className={styles.qualityRow}>
-                  <select className={styles.selectInput} value={quality} onChange={(e) => setQuality(e.target.value as MediaQuality)}>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                  </select>
-                  <ProLockedControl label="Lossless (LZMA2)">
-                    <select className={styles.selectInput} disabled>
-                      <option>Lossless</option>
-                    </select>
-                  </ProLockedControl>
-                </div>
+                <select className={styles.selectInput} value={quality} onChange={(e) => chooseQuality(e.target.value as MediaQuality)}>
+                  {qualityTiers.map((tier) => (
+                    <option key={tier} value={tier}>
+                      {QUALITY_LABELS[tier]}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               {isVideo && (
@@ -307,18 +340,6 @@ export default function ConvertPage() {
                       <option value="amf">AMF (AMD)</option>
                       <option value="qsv">Quick Sync (Intel)</option>
                     </select>
-                  </div>
-                  <div className={styles.field}>
-                    <label className={styles.fieldLabel}>Trim</label>
-                    <ProLockedControl label="Trim before converting">
-                      <span className={styles.trimStub}>00:00:00 &ndash; 00:00:00</span>
-                    </ProLockedControl>
-                  </div>
-                  <div className={styles.field}>
-                    <label className={styles.fieldLabel}>Watermark</label>
-                    <ProLockedControl label="Watermark overlay">
-                      <span className={styles.trimStub}>No image selected</span>
-                    </ProLockedControl>
                   </div>
                 </>
               )}

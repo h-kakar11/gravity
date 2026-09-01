@@ -33,13 +33,17 @@
 #include "core/filesystem/FileInfo.h"
 #include "core/filesystem/LocalFileSystem.h"
 #include "core/filesystem/PathUtils.h"
+#include "core/filesystem/ToolPathResolver.h"
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
 #include "core/ipc/LineReader.h"
 #include "core/ipc/RequestExecutor.h"
 #include "core/ipc/RequestValidation.h"
 #include "core/jobs/DownloadJob.h"
+#include "core/jobs/InProgressJobStore.h"
+#include "core/jobs/JobArtifactCleanup.h"
 #include "core/jobs/JobHistoryStore.h"
+#include "core/jobs/JobSpec.h"
 #include "core/jobs/JobManager.h"
 #include "core/jobs/MediaProcessingJob.h"
 #include "core/jobs/JobTypes.h"
@@ -52,6 +56,7 @@
 #include "core/settings/PresetStore.h"
 #include "core/settings/Settings.h"
 #include "core/common/Uuid.h"
+#include "engines/downloader/YtDlpFormatSelector.h"
 #include "engines/downloader/YtDlpProvider.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
 #include "engines/ffmpeg/FFmpegEngine.h"
@@ -86,21 +91,68 @@ std::string EnvOr(const char* name, const std::string& fallback) {
     return (value && *value) ? std::string(value) : fallback;
 }
 
-// A literal (non-bare-command) path is passed straight through to CreateProcess on
-// Windows without a PATH search, and CreateProcess does not reliably accept a
-// forward-slash path there the way POSIX-style tools do -- construct through
-// std::filesystem::path and normalize to the native separator so the relative dev-mode
-// default actually resolves instead of failing with "cannot find the file specified".
-std::string NativePath(const std::string& value) {
-    return stdfs::path(value).make_preferred().string();
+// Issue #79. Both of these used to be an environment variable or a CWD-relative literal,
+// handed straight to CreateProcess with no existence check at all, so the two ways they
+// could go wrong -- a working directory that isn't the repository root, and an environment
+// variable whose value carries the quotes a batch file wrapped it in -- both surfaced as
+// the same opaque "The system cannot find the file specified" naming a path that reads as
+// perfectly valid. Candidates are now anchored to the core executable's own directory
+// (see ToolPathResolver.h) and checked before launch.
+//
+// A tool that resolves to nothing does NOT abort startup: downloading is one feature of
+// several, and a missing Python interpreter should not stop conversion, compression or
+// settings from working. The empty string propagates to YtDlpProvider, and
+// EnsureDownloaderAvailable below turns the next download/inspect attempt into an error
+// that names every path that was tried.
+const std::vector<std::string> kPythonRelativeCandidates = {
+    // Packaged layout (app/desktop/src-tauri/src/core_bridge.rs bundles it here).
+    "python/python.exe",
+    // Dev layout, Windows venv...
+    "python/downloader/.venv/Scripts/python.exe",
+    // ...and POSIX venv, so a non-Windows dev build resolves the same way.
+    "python/downloader/.venv/bin/python3",
+};
+
+const std::vector<std::string> kDownloaderScriptRelativeCandidates = {
+    "python/downloader/downloader.py",
+};
+
+struct ResolvedTool {
+    std::string path;                     // empty when nothing existed
+    std::vector<std::string> candidates;  // everything tried, in order, for diagnostics
+};
+
+ResolvedTool ResolveTool(const char* envName, const std::vector<std::string>& relativeCandidates) {
+    ResolvedTool resolved;
+    resolved.candidates = filesystem::BuildToolCandidates(
+        EnvOr(envName, ""), filesystem::ExecutableDirectory(), relativeCandidates);
+    std::error_code ec;
+    resolved.path = filesystem::FirstExisting(resolved.candidates,
+                                               [&ec](const std::string& candidate) {
+                                                   return stdfs::exists(candidate, ec);
+                                               })
+                        .value_or(std::string());
+    return resolved;
 }
 
-std::string ResolvePythonExecutable() {
-    return NativePath(EnvOr("MEDIATOOL_PYTHON_PATH", "python/downloader/.venv/Scripts/python.exe"));
+ResolvedTool ResolvePythonExecutable() {
+    return ResolveTool("MEDIATOOL_PYTHON_PATH", kPythonRelativeCandidates);
 }
 
-std::string ResolveDownloaderScript() {
-    return NativePath(EnvOr("MEDIATOOL_DOWNLOADER_SCRIPT", "python/downloader/downloader.py"));
+ResolvedTool ResolveDownloaderScript() {
+    return ResolveTool("MEDIATOOL_DOWNLOADER_SCRIPT", kDownloaderScriptRelativeCandidates);
+}
+
+// Turns "nothing resolved" into an error a user can act on, at the point a download is
+// actually requested. Lists every candidate rather than only the last one, because the
+// useful information is which layout the core thought it was running in.
+[[noreturn]] void ThrowDownloaderToolMissing(const char* what, const ResolvedTool& tool) {
+    std::string details = "Tried, in order:";
+    for (const std::string& candidate : tool.candidates) details += "\n  " + candidate;
+    details += "\nSet MEDIATOOL_PYTHON_PATH / MEDIATOOL_DOWNLOADER_SCRIPT to override.";
+    throw errors::MediaToolException(errors::ErrorInfo::Make(
+        "E_DOWNLOADER_NOT_FOUND", errors::ErrorCategory::EngineFailure,
+        std::string("The downloader's ") + what + " could not be found.", details));
 }
 
 // A user-supplied path in Settings always wins (they explicitly chose a different
@@ -138,10 +190,25 @@ struct AppContext {
     // per process, not per job.
     filesystem::FilenameReservationRegistry reservationRegistry;
     media::FFmpegEngine ffmpegEngine;
+    // Resolved once at startup and kept, not just consumed: the candidate list is what
+    // makes a "downloader not found" failure diagnosable (issue #79). Declared before
+    // ytDlpProvider so member-initialization order fills them in first.
+    ResolvedTool pythonTool{ResolvePythonExecutable()};
+    ResolvedTool downloaderScriptTool{ResolveDownloaderScript()};
     downloader::YtDlpProvider ytDlpProvider;
-    jobs::JobManager jobManager;
     jobs::JobHistoryStore jobHistoryStore{jobs::DefaultJobHistoryFilePath()};
+    // The jobs that have NOT finished, as recipes rather than status reports, so a crash
+    // does not lose the queue -- see core/jobs/InProgressJobStore.h.
+    jobs::InProgressJobStore inProgressJobStore{jobs::DefaultInProgressJobsFilePath()};
     settings::PresetStore presetStore{settings::DefaultPresetsFilePath()};
+
+    // The downloader health probe starts a process, so it runs at most once and only when
+    // something actually asks. Cached rather than probed at startup: a probe on every
+    // launch would slow a cold start for information most sessions never need, and it
+    // would run before the user has had a chance to point `advanced.ytDlpPath` somewhere
+    // that works.
+    std::once_flag downloaderInfoOnce;
+    downloads::DownloaderInfo downloaderInfo;
 
     // Tracks each job's previous state purely to classify the Running state as either
     // "resumed from pause" or "(re)started" when JobManager reports a transition -- see
@@ -149,16 +216,60 @@ struct AppContext {
     std::mutex previousStateMutex;
     std::unordered_map<jobs::JobId, jobs::JobState> previousState;
 
+    // DECLARED LAST, DELIBERATELY, and it is the only member whose position matters.
+    // ~JobManager cancels every queued job and joins the worker pool, which fires
+    // state-changed callbacks -- and those callbacks touch jobHistoryStore,
+    // inProgressJobStore, previousState and previousStateMutex. Members are destroyed in
+    // reverse declaration order, so anything declared after this one would already be
+    // gone by the time those callbacks run. It used to sit above the two stores, which
+    // meant a shutdown with jobs still queued wrote history into a destroyed object.
+    jobs::JobManager jobManager;
+
     explicit AppContext(const settings::Settings& settings)
         : ffmpegEngine(processRunner, EffectiveFfmpegOverride(settings), EffectiveFfprobeOverride()),
           // Resolved once at startup (not per-download) and handed to yt-dlp so it merges
           // separate video/audio streams via the SAME ffmpeg binary the rest of the app
           // already uses -- see docs/decisions.md "Video/audio merge strategy".
-          ytDlpProvider(processRunner, ResolvePythonExecutable(), ResolveDownloaderScript(),
+          ytDlpProvider(processRunner, pythonTool.path, downloaderScriptTool.path,
                         media::DiscoverFfmpegPath(processRunner, EffectiveFfmpegOverride(settings))
                             .value_or("")),
-          jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs))) {}
+          jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs)),
+                      jobs::RetryPolicy{
+                          .maxAttempts = std::max(1, settings.processing.maxRetryAttempts)}) {}
 };
+
+// Called before anything that would launch the Python downloader. Startup deliberately
+// does not fail when these are missing (issue #79) -- this is where a user finds out, with
+// the full candidate list, instead of getting CreateProcess's bare "cannot find the file
+// specified" pointing at a path that looks correct.
+void EnsureDownloaderAvailable(const AppContext& app) {
+    if (app.pythonTool.path.empty()) ThrowDownloaderToolMissing("Python interpreter", app.pythonTool);
+    if (app.downloaderScriptTool.path.empty())
+        ThrowDownloaderToolMissing("downloader.py script", app.downloaderScriptTool);
+}
+
+// Probes the downloader once per process and remembers the answer. The warning is logged
+// from here rather than from a startup path so it appears the first time it is relevant --
+// which is also the first time a user could act on it.
+const downloads::DownloaderInfo& DownloaderInfoCached(AppContext& app) {
+    std::call_once(app.downloaderInfoOnce, [&app] {
+        app.downloaderInfo = app.ytDlpProvider.Info();
+        if (!app.downloaderInfo.available) {
+            logging::Log::Warning("downloader",
+                                   "The downloader backend is not usable: yt-dlp could not be "
+                                   "loaded by the configured Python interpreter. Downloads will "
+                                   "fail until it is installed.");
+        } else if (app.downloaderInfo.stale) {
+            logging::Log::Warning(
+                "downloader",
+                "yt-dlp " + app.downloaderInfo.version.value_or("(unknown version)") + " is " +
+                    std::to_string(app.downloaderInfo.ageDays.value_or(0)) +
+                    " days old. Site extractors break within weeks, so downloads are likely to "
+                    "fail with errors that look like the video's fault. Update it.");
+        }
+    });
+    return app.downloaderInfo;
+}
 
 // --- event publishing from JobManager callbacks -----------------------------------------
 
@@ -206,6 +317,9 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobCompleted, data, id));
             app.jobHistoryStore.Append(snapshot.ToJson());  // #10/"Session History": every
                                                              // terminal job is recorded
+            // Terminal means there is nothing left to recover. Leaving the record would
+            // re-run finished work on the next launch.
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Failed: {
@@ -214,20 +328,37 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             if (snapshot.error) data["error"] = snapshot.error->ToJson();
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobFailed, data, id));
             app.jobHistoryStore.Append(snapshot.ToJson());
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Cancelled: {
             app.eventBus.Publish(
                 events::MakeEvent(events::EventType::JobCancelled, {{"state", "CANCELLED"}}, id));
             app.jobHistoryStore.Append(app.jobManager.GetJob(id).ToJson());
+            app.inProgressJobStore.Remove(id);
+            return;
+        }
+        case JobState::Retrying: {
+            // Not a terminal event, and deliberately not a jobFailed: the attempt failed,
+            // the job did not. The frontend needs all four facts to say something honest
+            // ("attempt 2 of 3, retrying in 4s, because ...") instead of showing a job
+            // flicker through FAILED and back.
+            const auto snapshot = app.jobManager.GetJob(id);
+            json data{{"state", "RETRYING"},
+                       {"attempt", snapshot.attempts},
+                       {"maxAttempts", app.jobManager.GetRetryPolicy().maxAttempts},
+                       {"retryInMs", 0}};
+            if (snapshot.error) data["error"] = snapshot.error->ToJson();
+            app.eventBus.Publish(events::MakeEvent(events::EventType::JobRetrying, data, id));
+            // The attempt budget has to survive a crash too, or relaunching the app hands
+            // a permanently-broken job a fresh three attempts every time.
+            app.inProgressJobStore.SetAttemptCount(id, snapshot.attempts);
             return;
         }
         case JobState::Queued:
-        case JobState::Retrying:
-            // Queued is announced explicitly by the createJob handler (JobManager has no
-            // "transitioned into Queued" callback since a Job starts Queued at
-            // construction); Retrying is a momentary internal state with no wire event of
-            // its own -- the follow-up Retrying->Running transition above covers it.
+            // Announced explicitly by the createJob handler: JobManager has no
+            // "transitioned into Queued" callback, since a Job starts Queued at
+            // construction.
             return;
     }
 }
@@ -354,6 +485,7 @@ constexpr auto kInspectDeadline = std::chrono::seconds(30);
 json HandleInspectDownloadUrl(AppContext& app, const json& params) {
     const std::string url = RequireNonEmptyString(params, "url");
     ValidateDownloadUrl(app, url);
+    EnsureDownloaderAvailable(app);
 
     const auto deadline = std::chrono::steady_clock::now() + kInspectDeadline;
     auto isCancelled = [deadline] { return std::chrono::steady_clock::now() >= deadline; };
@@ -372,10 +504,27 @@ json HandleInspectDownloadUrl(AppContext& app, const json& params) {
     }
 }
 
-json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
+// The three builders below validate their params and hand back a constructed Job. They
+// deliberately do NOT submit, persist or publish: SubmitJobOfType() does all three for
+// every type, so the createJob path and the crash-recovery path cannot drift apart.
+//
+// `onArtifactLocation` is threaded through because it is the only thing a job knows that
+// the recovery store cannot work out for itself -- see core/jobs/JobSpec.h.
+using ArtifactHook = std::function<void(const std::string&, const std::string&)>;
+
+std::unique_ptr<jobs::Job> BuildDownloadJob(AppContext& app, const json& jobParams,
+                                             ArtifactHook onArtifactLocation) {
     const std::string url = RequireNonEmptyString(jobParams, "url");
     const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
     ValidateDownloadUrl(app, url);
+    // Fail here, with the candidate list, rather than letting the job start and die inside
+    // a worker thread with CreateProcess's opaque message (issue #79).
+    EnsureDownloaderAvailable(app);
+    // The paths exist; whether the backend behind them actually works is a separate
+    // question, and this is the first moment it matters. Probed once per process, and
+    // never fatal -- a stale yt-dlp still works for many sites, so this warns rather than
+    // refusing a download the user might well get.
+    (void)DownloaderInfoCached(app);
     // #11: reject traversal and (unless explicitly opted into) UNC output directories --
     // previously any string was accepted as-is.
     const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
@@ -421,6 +570,17 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
                 "E_INVALID_PARAM_VALUE", errors::ErrorCategory::Unknown,
                 "formatId must not be empty.", "field=formatId value is an empty string"));
         }
+        // This value reaches yt-dlp's -f verbatim, and -f is an expression language, not
+        // a name (see downloader::IsSafeFormatSelector). Rejected here so the caller gets
+        // the error synchronously from createJob instead of discovering it once a worker
+        // thread has already started the job.
+        if (!downloader::IsSafeFormatSelector(*value)) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_FORMAT_ID", errors::ErrorCategory::UnsupportedFormat,
+                "That stream selection is not a valid format id.",
+                "field=formatId value=" + *value +
+                    " (expected up to 8 '+'-joined ids of [A-Za-z0-9_.-])"));
+        }
         formatId = *value;
     }
 
@@ -430,13 +590,10 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     options.quality = quality;
     options.formatId = formatId;
 
-    auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
-                                                    &app.ffmpegEngine, app.reservationRegistry);
-    ApplySchedulingParams(*job, jobParams);
-    const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
-    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
-    return {{"jobId", id}};
+    options.onArtifactLocation = std::move(onArtifactLocation);
+
+    return std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
+                                                &app.ffmpegEngine, app.reservationRegistry);
 }
 
 // Shared by HandleCreateConversionJob/HandleCreateCompressionJob -- they differ only in
@@ -444,7 +601,9 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
 // per engines/ffmpeg/FFmpegArgBuilder.h, Compress is Convert with different default
 // option VALUES (supplied by the caller, i.e. the frontend's preset), not a different
 // code path here either.
-json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool isCompression) {
+std::unique_ptr<jobs::Job> BuildMediaProcessingJob(AppContext& app, const json& jobParams,
+                                                    bool isCompression,
+                                                    ArtifactHook onArtifactLocation) {
     const std::string inputPath = RequireNonEmptyString(jobParams, "inputPath");
     const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
 
@@ -469,16 +628,27 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
             "outputDirectory=" + outputDirectory));
     }
 
+    // The same coarse floor DOWNLOAD already had. A conversion writes a file too, and
+    // running out of space mid-encode wastes however long the encode had been running --
+    // catching "the drive is already essentially full" here costs one stat call.
+    constexpr std::uint64_t kMinFreeBytesForProcessing = 100ull * 1024 * 1024;
+    if (auto available = app.fileSystem.GetAvailableDiskSpace(outputDirectory);
+        available && *available < kMinFreeBytesForProcessing) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INSUFFICIENT_DISK_SPACE", errors::ErrorCategory::DiskSpaceError,
+            "Not enough free disk space at the selected output directory.",
+            "available=" + std::to_string(*available) + " bytes"));
+    }
+
     const json& processingOptions = OptionalObject(jobParams, "options");
     const std::string outputFormat = RequireNonEmptyString(processingOptions, "outputFormat");
-    // Server-side Pro-tier gate, independent of the UI never offering this value at all
-    // (idealist.md: build the "Pro" affordances as visibly-present-but-inert, not wired
-    // to anything real) -- there is no entitlement system, so this is an unconditional
-    // rejection, not a toggle.
-    if (OptionalString(processingOptions, "quality").value_or("medium") == "lossless") {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_PRO_FEATURE_LOCKED", errors::ErrorCategory::UnsupportedFormat,
-            "Lossless quality is a Pro feature and is not available yet."));
+    // `quality` used to reach the arg builder unvalidated, where an unrecognized value
+    // silently degraded to "medium" -- a typo in a preset produced a job that ran with a
+    // quality the caller never asked for. Issue #82 also removed the Pro tier that used to
+    // reject "lossless" here outright, so the whole tier list is now simply the allowed set.
+    if (processingOptions.contains("quality") && !processingOptions.at("quality").is_null()) {
+        (void)ipc::RequireEnum(processingOptions, "quality",
+                                {"lowest", "low", "medium", "high", "ultra", "lossless"});
     }
 
     jobs::MediaProcessingJob::Options options;
@@ -487,33 +657,45 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
     options.outputFormat = outputFormat;
     options.engineOptions = processingOptions;
     options.isCompression = isCompression;
+    options.onArtifactLocation = std::move(onArtifactLocation);
 
-    auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
-                                                          app.fileSystem, app.reservationRegistry);
-    ApplySchedulingParams(*job, jobParams);
-    const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
-    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
-    return {{"jobId", id}};
+    return std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
+                                                      app.fileSystem, app.reservationRegistry);
 }
 
-json HandleCreateJob(AppContext& app, const json& params) {
-    const std::string typeWire = RequireNonEmptyString(params, "type");
-    // Absent/empty job params are legitimate for TEST; the per-type handlers below require
-    // whatever they actually need out of this object.
-    const json& jobParams = OptionalObject(params, "params");
+// Builds, persists and submits one job, whatever its type. The single place that does
+// so: createJob calls it with a fresh request, and the startup recovery pass calls it
+// with a stored one, so a recovered job is constructed and validated exactly like a new
+// one rather than through a second path that can drift.
+//
+// `recoveryCount` is carried through from a recovered spec (0 for a fresh request) so a
+// job that takes the process down on every attempt eventually stops being recovered --
+// see jobs::kMaxRecoveryAttempts. `attempts` likewise carries the retry budget already
+// spent, so a relaunch does not hand a permanently-broken job a fresh three attempts.
+jobs::JobId SubmitJobOfType(AppContext& app, const std::string& typeWire, const json& jobParams,
+                             int recoveryCount = 0, int attempts = 0) {
+    // The hook fires from a worker thread once the job has reserved its output filename,
+    // which is necessarily after SubmitJob() below -- so capturing an id that is filled in
+    // a few lines further down is safe, and is the only way to hand a job its own id
+    // through a constructor argument.
+    auto idHolder = std::make_shared<jobs::JobId>();
+    ArtifactHook onArtifactLocation = [&app, idHolder](const std::string& directory,
+                                                        const std::string& filenameBase) {
+        app.inProgressJobStore.SetArtifactLocation(*idHolder, {directory, filenameBase});
+    };
 
+    std::unique_ptr<jobs::Job> job;
     if (typeWire == "DOWNLOAD") {
-        return HandleCreateDownloadJob(app, jobParams);
-    }
-    if (typeWire == "CONVERSION") {
-        return HandleCreateMediaProcessingJob(app, jobParams, /*isCompression=*/false);
-    }
-    if (typeWire == "COMPRESSION") {
-        return HandleCreateMediaProcessingJob(app, jobParams, /*isCompression=*/true);
-    }
-
-    if (typeWire != "TEST") {
+        job = BuildDownloadJob(app, jobParams, std::move(onArtifactLocation));
+    } else if (typeWire == "CONVERSION") {
+        job = BuildMediaProcessingJob(app, jobParams, /*isCompression=*/false,
+                                       std::move(onArtifactLocation));
+    } else if (typeWire == "COMPRESSION") {
+        job = BuildMediaProcessingJob(app, jobParams, /*isCompression=*/true,
+                                       std::move(onArtifactLocation));
+    } else if (typeWire == "TEST") {
+        job = std::make_unique<jobs::TestJob>();
+    } else {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
             "Only TEST, DOWNLOAD, CONVERSION and COMPRESSION jobs are implemented so far -- " +
@@ -521,10 +703,41 @@ json HandleCreateJob(AppContext& app, const json& params) {
             "", false));
     }
 
-    auto job = std::make_unique<jobs::TestJob>();
     ApplySchedulingParams(*job, jobParams);
+    job->SetAttemptCount(attempts);
     const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
+    *idHolder = id;
+
+    jobs::JobSpec spec;
+    spec.id = id;
+    spec.type = job->Type();
+    spec.params = jobParams;
+    spec.createdAt = job->CreatedAt();
+    spec.recoveryCount = recoveryCount;
+    spec.attempts = attempts;
+    // Persisted BEFORE the submission, not after: a crash in between then re-queues a job
+    // that never ran, which is the harmless direction. The other order can lose a job
+    // that is already running.
+    app.inProgressJobStore.Put(spec);
+
+    try {
+        app.jobManager.SubmitJob(std::move(job));
+    } catch (...) {
+        // The scheduler refused it (an unknown or already-failed dependency), so there is
+        // no job to recover -- the record would otherwise be resurrected on every launch.
+        app.inProgressJobStore.Remove(id);
+        throw;
+    }
+    return id;
+}
+
+json HandleCreateJob(AppContext& app, const json& params) {
+    const std::string typeWire = RequireNonEmptyString(params, "type");
+    // Absent/empty job params are legitimate for TEST; the per-type builders require
+    // whatever they actually need out of this object.
+    const json& jobParams = OptionalObject(params, "params");
+
+    const jobs::JobId id = SubmitJobOfType(app, typeWire, jobParams);
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
     return {{"jobId", id}};
 }
@@ -608,7 +821,17 @@ json HandleInspectFile(AppContext& app, const json& params) {
 json HandleGetCapabilities(AppContext& app, const json& params) {
     const std::string path = RequireNonEmptyString(params, "path");
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
-    return {{"capabilities", filesystem::CapabilitiesFor(info.category, info.extension)}};
+    // `capabilities` is what will actually be attempted; `deferredCapabilities` is what
+    // applies to this file but cannot run yet, each with a reason the UI can show on a
+    // disabled control. Attempting one is guaranteed to fail with E_NOT_IMPLEMENTED --
+    // see core/media/DeferredOperations.h.
+    json deferred = json::array();
+    for (const filesystem::DeferredCapability& capability :
+         filesystem::DeferredCapabilitiesFor(info.category, info.extension)) {
+        deferred.push_back(capability.ToJson());
+    }
+    return {{"capabilities", filesystem::CapabilitiesFor(info.category, info.extension)},
+            {"deferredCapabilities", std::move(deferred)}};
 }
 
 json HandleGetSettings(AppContext& app, const json&) {
@@ -621,6 +844,10 @@ json HandleUpdateSettings(AppContext& app, const json& params) {
     settings::Settings updated = settings::Settings::FromJson(merged);
     app.settingsStore.Save(updated);
     return {{"settings", updated.ToJson()}};
+}
+
+json HandleGetDownloaderInfo(AppContext& app, const json&) {
+    return {{"downloaderInfo", DownloaderInfoCached(app).ToJson()}};
 }
 
 json HandleGetHardwareInfo(AppContext& app, const json&) {
@@ -734,6 +961,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
         {"getHardwareInfo", HandleGetHardwareInfo},
+        {"getDownloaderInfo", HandleGetDownloaderInfo},
         {"getMediaEngineCapabilities", HandleGetMediaEngineCapabilities},
         {"listPresets", HandleListPresets},
         {"savePreset", HandleSavePreset},
@@ -790,6 +1018,87 @@ json ExecuteRequest(AppContext& app, const std::string& id, const std::string& c
     }
 }
 
+// Rebuilds the jobs an earlier run did not finish.
+//
+// What this restores is INTENT, not progress. A job that was RUNNING when the process
+// died is re-queued from the start: its ffmpeg or yt-dlp child died with it, its partial
+// output is not a checkpoint, and neither subprocess has a resume protocol this app could
+// drive. What the user actually loses today is the queue itself -- twenty things lined up
+// and nothing to say what they were -- and that is what comes back.
+//
+// Order matters in three places:
+//   * Specs are replayed in submission order, so a `dependsOn` edge still points at a job
+//     that was submitted before it.
+//   * Each job's leftovers are deleted BEFORE it is resubmitted, so the re-run allocates a
+//     clean filename instead of tripping over a half-written file from the run that died.
+//   * The store is cleared first and each replayed job re-adds itself through the normal
+//     submission path, so a spec that can no longer be built (its input file is gone, say)
+//     does not sit in the file being retried on every launch forever.
+// The gap that leaves is a crash DURING recovery, which loses the specs not yet replayed.
+// Narrowing it would mean a write per spec; a crash inside the recovery pass is not the
+// failure this exists to survive.
+void RecoverInProgressJobs(AppContext& app) {
+    const std::vector<jobs::JobSpec> specs = app.inProgressJobStore.Load();
+    if (specs.empty()) {
+        return;
+    }
+    app.inProgressJobStore.Clear();
+
+    logging::Log::Info("recovery", "Rebuilding " + std::to_string(specs.size()) +
+                                        " job(s) left unfinished by a previous run.");
+
+    // Ids are generated per Job object, so a rebuilt job is a new id. Dependencies are
+    // remapped through this as we go; an id that is NOT in here belonged to a job that
+    // already reached a terminal state (its record was dropped then), so the edge is
+    // either already satisfied or points at something that can never report an outcome --
+    // in both cases dropping it is what lets the dependent run at all.
+    std::unordered_map<jobs::JobId, jobs::JobId> rebuiltIds;
+
+    for (const jobs::JobSpec& spec : specs) {
+        if (spec.recoveryCount >= jobs::kMaxRecoveryAttempts) {
+            logging::Log::Warning("recovery",
+                                   "Giving up on job " + spec.id + " after " +
+                                       std::to_string(spec.recoveryCount) +
+                                       " recovery attempts; it is not being re-queued.");
+            continue;
+        }
+
+        if (spec.artifact) {
+            // The orphan case: files a killed run wrote and no live job owns. Scoped by
+            // filenameBase through the same IsJobArtifactOf match every failure path uses,
+            // so it is never a bare prefix delete and never recursive.
+            jobs::CleanupJobArtifacts(app.fileSystem, spec.artifact->outputDirectory,
+                                       spec.artifact->filenameBase);
+        }
+
+        json jobParams = spec.params;
+        if (jobParams.contains("dependsOn") && jobParams.at("dependsOn").is_array()) {
+            json remapped = json::array();
+            for (const auto& dependency : jobParams.at("dependsOn")) {
+                if (!dependency.is_string()) continue;
+                auto rebuilt = rebuiltIds.find(dependency.get<std::string>());
+                if (rebuilt != rebuiltIds.end()) remapped.push_back(rebuilt->second);
+            }
+            jobParams["dependsOn"] = std::move(remapped);
+        }
+
+        try {
+            const jobs::JobId id =
+                SubmitJobOfType(app, jobs::ToWireString(spec.type), jobParams,
+                                 spec.recoveryCount + 1, spec.attempts);
+            rebuiltIds.emplace(spec.id, id);
+            app.eventBus.Publish(
+                events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+        } catch (const errors::MediaToolException& e) {
+            // A job whose input has since been deleted, whose output directory is gone, or
+            // whose params a newer build rejects. Dropped with a reason rather than
+            // retried forever.
+            logging::Log::Warning("recovery", "Could not rebuild job " + spec.id + ": " +
+                                                   e.Info().code + " " + e.Info().message);
+        }
+    }
+}
+
 void RunIpcLoop(AppContext& app) {
     app.jobManager.OnJobStateChanged(
         [&app](const jobs::JobId& id, jobs::JobState state) { PublishJobStateChanged(app, id, state); });
@@ -799,6 +1108,11 @@ void RunIpcLoop(AppContext& app) {
     logging::Logger::SetEventSink([&app](events::Event event) { app.eventBus.Publish(event); });
 
     logging::Log::Info("mediatool-core", "IPC loop starting");
+
+    // After the callbacks and the event sink are wired, so a recovered job publishes the
+    // same jobCreated/jobStarted/jobProgress stream a fresh one does -- and before the
+    // read loop, so the frontend's first listJobs already includes them.
+    RecoverInProgressJobs(app);
 
     // Declared here, so it is torn down (and its threads joined) when this function
     // returns -- before AppContext, which its queued tasks reference.
@@ -938,7 +1252,7 @@ void RunSelfTest(AppContext& app) {
     try {
         std::vector<std::string> stdoutLines;
         auto proc = app.processRunner.Start(
-            ResolvePythonExecutable(), {ResolveDownloaderScript(), "--selftest"}, {},
+            app.pythonTool.path, {app.downloaderScriptTool.path, "--selftest"}, {},
             [&stdoutLines](const std::string& line) { stdoutLines.push_back(line); },
             [](const std::string& line) { std::cout << "  [python stderr] " << line << "\n"; });
         const auto result = proc->Wait();

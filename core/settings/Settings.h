@@ -48,6 +48,12 @@ struct ProcessingSettings {
     std::string defaultCompressionQuality = "medium";
     std::string defaultOutputFormat;
     int concurrentJobs = 1;
+    // TOTAL attempts for a job that fails recoverably, including the first -- so 1
+    // disables automatic retry and 3 means "the original plus two retries". Lives beside
+    // concurrentJobs rather than under `advanced` because, like concurrentJobs, it is a
+    // JobManager-wide policy rather than anything specific to media processing. See
+    // core/jobs/RetryPolicy.h for which failures are eligible at all.
+    int maxRetryAttempts = 3;
 };
 
 struct PrivacySettings {

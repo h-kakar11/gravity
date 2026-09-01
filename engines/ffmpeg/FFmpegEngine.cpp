@@ -3,13 +3,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <system_error>
 #include <utility>
 #include <vector>
 
 #include "core/errors/MediaToolException.h"
+#include "core/media/DeferredOperations.h"
+#include "engines/ffmpeg/FFmpegErrorClassifier.h"
 #include "engines/ffmpeg/FFmpegArgBuilder.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
 #include "engines/ffmpeg/FFmpegProgressParser.h"
@@ -144,9 +148,12 @@ filesystem::FileInfo FFmpegEngine::Probe(const std::string& path) {
     }
 
     if (capture.exitCode != 0) {
-        throw MediaToolException(ErrorInfo::Make(
-            "E_FFPROBE_FAILED", ErrorCategory::InvalidFile,
-            "ffprobe could not analyze this file", JoinLines(capture.stderrLines)));
+        // Same table as a failed conversion, different default: ffprobe being unable to
+        // read a file IS "this is not a media file", so an unrecognized probe failure is
+        // E_INVALID_FILE rather than a generic engine failure. It also used to report the
+        // same code whether the file was corrupt, missing, or unreadable by permission.
+        throw MediaToolException(
+            ClassifyFfprobeFailure(JoinLines(capture.stderrLines), capture.exitCode));
     }
 
     nlohmann::json parsed;
@@ -236,11 +243,10 @@ filesystem::FileInfo FFmpegEngine::Probe(const std::string& path) {
 }
 
 void FFmpegEngine::ThrowNotImplemented(const std::string& operation) const {
-    throw MediaToolException(ErrorInfo::Make(
-        "E_NOT_IMPLEMENTED", ErrorCategory::UnsupportedFormat,
-        operation + " is not implemented",
-        "FFmpegEngine::" + operation + " is intentionally out of scope for now",
-        /*recoverable=*/false));
+    // Code, category and wording all come from the one deferral table
+    // (core/media/DeferredOperations.h) so this error is byte-for-byte the one
+    // filesystem::DeferredCapabilitiesFor() already told the frontend to expect.
+    throw MediaToolException(MakeNotImplementedError(operation));
 }
 
 const std::set<std::string>& FFmpegEngine::AvailableEncoders() const {
@@ -299,11 +305,24 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
             onProgress(*progress);
         }
     };
-    auto ignoreStderr = [](const std::string&) {};
+    // ffmpeg's stderr used to be discarded outright, which is why every failure came back
+    // as one code and an exit status. It is the only place ffmpeg says WHY it failed --
+    // "No space left on device", "Permission denied", "moov atom not found", "Unknown
+    // encoder" -- so a bounded tail is kept and classified (FFmpegErrorClassifier.h).
+    // Bounded because ffmpeg on a bad input can produce a line per frame, and the last few
+    // lines are the ones that carry the failure.
+    std::mutex stderrMutex;
+    std::deque<std::string> stderrRing;
+    static constexpr std::size_t kMaxStderrLines = 20;
+    auto captureStderr = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(stderrMutex);
+        stderrRing.push_back(line);
+        if (stderrRing.size() > kMaxStderrLines) stderrRing.pop_front();
+    };
 
     process::ProcessOptions processOptions;
     std::unique_ptr<process::IProcess> child =
-        runner_.Start(*ffmpegPath, args, processOptions, handleStdout, ignoreStderr);
+        runner_.Start(*ffmpegPath, args, processOptions, handleStdout, captureStderr);
     if (!child) {
         throw MediaToolException(ErrorInfo::Make(
             "E_FFMPEG_LAUNCH_FAILED", ErrorCategory::EngineFailure,
@@ -334,10 +353,21 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     }
 
     if (result.exitCode != 0) {
-        throw MediaToolException(ErrorInfo::Make(
-            "E_FFMPEG_FAILED", ErrorCategory::EngineFailure,
-            "ffmpeg exited with an error while processing this file.",
-            "exitCode=" + std::to_string(result.exitCode)));
+        std::string stderrTail;
+        {
+            std::lock_guard<std::mutex> lock(stderrMutex);
+            for (const std::string& line : stderrRing) stderrTail += line + "\n";
+        }
+        // Free space at the OUTPUT location, and only to make a disk-full message
+        // concrete. Measured after the fact, so it is never what decides the
+        // classification -- see ClassifyFfmpegFailure.
+        std::optional<std::uint64_t> availableBytes;
+        std::error_code spaceError;
+        const auto space = fs::space(fs::path(outputPath).parent_path(), spaceError);
+        if (!spaceError) availableBytes = static_cast<std::uint64_t>(space.available);
+
+        throw MediaToolException(
+            ClassifyFfmpegFailure(stderrTail, result.exitCode, availableBytes));
     }
 }
 
@@ -358,12 +388,12 @@ void FFmpegEngine::Compress(const std::string& inputPath, const std::string& out
 
 void FFmpegEngine::ExtractAudio(const std::string&, const std::string&, ProgressCallback,
                                 CancelledCallback) {
-    ThrowNotImplemented("ExtractAudio");
+    ThrowNotImplemented(kExtractAudioOperation);
 }
 
 void FFmpegEngine::ExtractFrames(const std::string&, const std::string&, const nlohmann::json&,
                                  ProgressCallback, CancelledCallback) {
-    ThrowNotImplemented("ExtractFrames");
+    ThrowNotImplemented(kExtractFramesOperation);
 }
 
 }  // namespace mediatool::media

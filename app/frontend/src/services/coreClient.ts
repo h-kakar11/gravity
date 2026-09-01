@@ -143,6 +143,7 @@ export const createConversionJob = (params: MediaProcessingJobParams) =>
 export const createCompressionJob = (params: MediaProcessingJobParams) =>
   sendCommand("createJob", { type: "COMPRESSION", params: params as unknown as Record<string, unknown> });
 export const getCapabilities = (path: string) => sendCommand("getCapabilities", { path });
+export const getDownloaderInfo = () => sendCommand("getDownloaderInfo", {});
 export const getSettings = () => sendCommand("getSettings", {});
 export const updateSettings = (settings: CommandParams["updateSettings"]["settings"]) =>
   sendCommand("updateSettings", { settings });

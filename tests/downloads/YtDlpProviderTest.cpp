@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -390,4 +391,77 @@ TEST(YtDlpProvider, InspectThrowsEngineFailureWhenProcessExitsWithoutMetadataOrE
         EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::EngineFailure);
     }
     EXPECT_TRUE(threw);
+}
+
+TEST(YtDlpProvider, InspectStopsAHungChildAtItsDeadlineAndFailsRecoverably) {
+    // downloader.py already sets yt-dlp's socket_timeout, but that bounds ONE socket
+    // operation, not the fetch: a child that stops making progress without any single
+    // socket call timing out holds this thread forever. `staysRunning` is exactly that
+    // child -- it never reports an exit on its own.
+    FakeProcessRunner runner({}, 0, /*staysRunning=*/true);
+    mediatool::downloader::DownloaderTimeouts timeouts;
+    timeouts.inspect = std::chrono::milliseconds(1);
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py", "",
+                                                   timeouts);
+
+    try {
+        provider.Inspect("https://example.com/watch?v=abc123", []() { return false; });
+        FAIL() << "expected the deadline to fire";
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        EXPECT_EQ(ex.Info().code, "E_INSPECT_TIMEOUT");
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::NetworkError);
+        // Recoverable: a probe that wedged once is the archetypal case that succeeds on a
+        // second attempt, and Phase C's retry policy keys off this flag.
+        EXPECT_TRUE(ex.Info().recoverable);
+    }
+
+    // The point of the deadline is releasing the thread AND the process. Timing out while
+    // leaving the child alive would just move the leak.
+    ASSERT_NE(runner.lastProcessState, nullptr);
+    EXPECT_TRUE(runner.lastProcessState->terminated);
+    EXPECT_FALSE(runner.lastProcessState->running);
+}
+
+TEST(YtDlpProvider, CancellationStillWinsOverAnExpiredDeadline) {
+    // Both conditions are true on the same poll iteration here (deadline 1ms, cancel
+    // always true). The user asked to stop, so they get E_INSPECT_CANCELLED -- being told
+    // "the site timed out" for a fetch you cancelled yourself is a lie about what happened.
+    FakeProcessRunner runner({}, 0, /*staysRunning=*/true);
+    mediatool::downloader::DownloaderTimeouts timeouts;
+    timeouts.inspect = std::chrono::milliseconds(0);
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py", "",
+                                                   timeouts);
+
+    try {
+        provider.Inspect("https://example.com/watch?v=abc123", []() { return true; });
+        FAIL() << "expected cancellation";
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        EXPECT_EQ(ex.Info().code, "E_INSPECT_CANCELLED");
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::Cancelled);
+    }
+}
+
+TEST(YtDlpProvider, DownloadRefusesAnUnsafeFormatIdWithoutStartingAProcess) {
+    // The frontend is gated too (see app/core/main.cpp), but this is the last point at
+    // which the value is still ours: every path into yt-dlp's -f goes through here.
+    FakeProcessRunner runner({});
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    auto options = MakeOptions();
+    options.formatId = "bestvideo[height<=1080]/best";
+
+    try {
+        provider.Download(
+            options, [](const mediatool::downloads::DownloadMetadata&) {},
+            [](const mediatool::jobs::Progress&) {}, [](const std::string&) {},
+            []() { return false; });
+        FAIL() << "expected the selector to be rejected";
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        EXPECT_EQ(ex.Info().code, "E_INVALID_FORMAT_ID");
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::UnsupportedFormat);
+    }
+
+    // Rejected before the spawn, not after: no process was ever started.
+    EXPECT_TRUE(runner.lastExecutable.empty());
+    EXPECT_EQ(runner.lastProcessState, nullptr);
 }

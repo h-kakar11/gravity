@@ -6,6 +6,7 @@
 // values. Everything outside this file talks to IDownloadProvider only -- do not treat
 // yt-dlp as synonymous with the download architecture (spec section 19).
 
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,29 @@
 
 namespace mediatool::downloader {
 
+// Wall-clock bounds on a whole downloader.py run, as opposed to the per-socket
+// `socket_timeout` downloader.py already sets.
+//
+// Those are not the same guarantee and only one of them is a bound on the caller.
+// `socket_timeout` limits ONE connect/read; a metadata fetch is many of them, yt-dlp
+// retries each one on its own schedule, and an extractor that keeps returning data
+// slowly never trips it at all. Inspect() runs synchronously on a job worker (and, for
+// inspectDownloadUrl, with the user staring at a spinner), so "eventually, probably"
+// is not good enough: without a deadline here a wedged child holds that thread until
+// the process exits, and nothing in the app can tell the user why.
+//
+// A deadline is deliberately NOT applied to Download(): a legitimate 4K download runs
+// for as long as it runs, and killing it on a clock would be a bug, not a safeguard.
+struct DownloaderTimeouts {
+    // Generous relative to a healthy probe (typically a second or two) because it has
+    // to survive yt-dlp's own internal retries without cutting off a slow-but-working
+    // extractor -- it exists to bound a hang, not to enforce a latency target.
+    std::chrono::milliseconds inspect{std::chrono::seconds(60)};
+    // The version probe touches no network at all, so anything beyond interpreter startup
+    // means something is wrong and waiting longer will not help.
+    std::chrono::milliseconds version{std::chrono::seconds(15)};
+};
+
 class YtDlpProvider : public downloads::IDownloadProvider {
 public:
     // `pythonExecutable` and `scriptPath` are injected rather than hardcoded so tests and
@@ -30,12 +54,18 @@ public:
     // than letting yt-dlp run its own independent discovery (docs/decisions.md "Video/audio
     // merge strategy"). Empty means "let yt-dlp fall back to its own PATH search."
     YtDlpProvider(process::IProcessRunner& processRunner, std::string pythonExecutable,
-                  std::string scriptPath, std::string ffmpegLocation = "");
+                  std::string scriptPath, std::string ffmpegLocation = "",
+                  DownloaderTimeouts timeouts = DownloaderTimeouts{});
 
     // True for anything that looks like an http/https URL -- deliberately not
     // youtube.com-only, so this extends to other yt-dlp-supported sites later (spec
     // section 20). yt-dlp itself rejects what it can't actually handle.
     bool CanHandle(const std::string& url) const override;
+
+    // Runs downloader.py's "version" command. Never throws: an interpreter that will not
+    // start, a script that is not there, or a missing yt_dlp all come back as
+    // `available = false`, which is the answer the caller asked for.
+    downloads::DownloaderInfo Info() override;
 
     downloads::DownloadMetadata Inspect(const std::string& url,
                                          downloads::CancelledCallback isCancelled) override;
@@ -65,15 +95,27 @@ private:
         std::string stderrTail;
     };
 
+    // `deadline` (nullopt = none) bounds the whole run; on expiry the child is stopped
+    // the same way a cancellation stops it and a MediaToolException carrying
+    // `timeoutCode`/`timeoutMessage` is thrown. Cancellation is still checked first --
+    // a user who cancelled during the last poll interval gets E_*_CANCELLED, not a
+    // timeout they never saw.
     RunOutcome RunPythonCommand(
         const nlohmann::json& command,
         const std::function<void(downloads::DownloaderEventType, const nlohmann::json& data)>& onEvent,
-        downloads::CancelledCallback isCancelled, const char* cancelCode, const char* cancelMessage);
+        downloads::CancelledCallback isCancelled, const char* cancelCode, const char* cancelMessage,
+        std::optional<std::chrono::milliseconds> deadline = std::nullopt,
+        const char* timeoutCode = "", const char* timeoutMessage = "");
+
+    // Stops `child` the way both cancellation and a timeout need it stopped: ask
+    // politely, wait briefly, kill if it is still there.
+    static void StopChild(process::IProcess& child);
 
     process::IProcessRunner& processRunner_;
     std::string pythonExecutable_;
     std::string scriptPath_;
     std::string ffmpegLocation_;
+    DownloaderTimeouts timeouts_;
 };
 
 }  // namespace mediatool::downloader

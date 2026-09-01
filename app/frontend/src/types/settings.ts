@@ -28,6 +28,8 @@ export interface ProcessingSettings {
   defaultCompressionQuality: "lowest" | "low" | "medium" | "high" | "ultra";
   defaultOutputFormat: string;
   concurrentJobs: number;
+  // Total attempts for a recoverably-failed job, including the first; 1 disables retry.
+  maxRetryAttempts: number;
 }
 
 export interface PrivacySettings {

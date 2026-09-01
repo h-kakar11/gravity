@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -96,20 +97,32 @@ downloads::DownloadMetadata ParseDownloadMetadata(const nlohmann::json& data) {
 }  // namespace
 
 YtDlpProvider::YtDlpProvider(process::IProcessRunner& processRunner, std::string pythonExecutable,
-                              std::string scriptPath, std::string ffmpegLocation)
+                              std::string scriptPath, std::string ffmpegLocation,
+                              DownloaderTimeouts timeouts)
     : processRunner_(processRunner),
       pythonExecutable_(std::move(pythonExecutable)),
       scriptPath_(std::move(scriptPath)),
-      ffmpegLocation_(std::move(ffmpegLocation)) {}
+      ffmpegLocation_(std::move(ffmpegLocation)),
+      timeouts_(timeouts) {}
 
 bool YtDlpProvider::CanHandle(const std::string& url) const {
     return StartsWithCaseInsensitive(url, "http://") || StartsWithCaseInsensitive(url, "https://");
 }
 
+void YtDlpProvider::StopChild(process::IProcess& child) {
+    child.Terminate();
+    if (!child.WaitFor(2000)) {
+        child.Kill();
+        (void)child.Wait();
+    }
+}
+
 YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
     const nlohmann::json& command,
     const std::function<void(downloads::DownloaderEventType, const nlohmann::json&)>& onEvent,
-    downloads::CancelledCallback isCancelled, const char* cancelCode, const char* cancelMessage) {
+    downloads::CancelledCallback isCancelled, const char* cancelCode, const char* cancelMessage,
+    std::optional<std::chrono::milliseconds> deadline, const char* timeoutCode,
+    const char* timeoutMessage) {
     // IProcessRunner may deliver stdout lines from a background thread while this
     // function polls WaitFor() on the caller's thread -- guard the two flags shared
     // between them.
@@ -159,19 +172,32 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
     child->WriteLine(command.dump());
     child->CloseStdin();
 
+    // steady_clock, not system_clock: a deadline must not be shortened or extended by an
+    // NTP correction or a DST change landing mid-fetch.
+    const std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
+
     process::ProcessResult result;
     bool finished = false;
     while (!finished) {
         if (isCancelled && isCancelled()) {
-            child->Terminate();
-            if (auto terminated = child->WaitFor(2000)) {
-                result = *terminated;
-            } else {
-                child->Kill();
-                result = child->Wait();
-            }
+            StopChild(*child);
             throw errors::MediaToolException(errors::ErrorInfo::Make(
                 cancelCode, errors::ErrorCategory::Cancelled, cancelMessage, "", /*recoverable=*/true));
+        }
+
+        if (deadline.has_value() && std::chrono::steady_clock::now() - startedAt >= *deadline) {
+            StopChild(*child);
+            // Recoverable on purpose: a probe that wedged once is exactly the kind of
+            // failure that succeeds on a second attempt, and Phase C's retry policy keys
+            // off this flag. NetworkError rather than EngineFailure because the thing
+            // that stalled is a network fetch, not the interpreter running it.
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                timeoutCode, errors::ErrorCategory::NetworkError, timeoutMessage,
+                "downloader.py exceeded its " +
+                    std::to_string(
+                        std::chrono::duration_cast<std::chrono::seconds>(*deadline).count()) +
+                    "s deadline and was stopped.",
+                /*recoverable=*/true));
         }
 
         if (auto finishedResult = child->WaitFor(200)) {
@@ -193,6 +219,42 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
     return outcome;
 }
 
+downloads::DownloaderInfo YtDlpProvider::Info() {
+    downloads::DownloaderInfo info;  // available = false until the probe says otherwise
+
+    nlohmann::json command;
+    command["command"] = "version";
+    command["params"] = nlohmann::json::object();
+
+    auto onEvent = [&info](downloads::DownloaderEventType type, const nlohmann::json& data) {
+        // downloader.py emits this as its own event kind, which GetDownloaderEventType
+        // does not know -- the generic branch is where forward-compatible event types
+        // land, and reading the payload shape is enough to identify it.
+        if (type != downloads::DownloaderEventType::Unknown) return;
+        if (!data.contains("available")) return;
+        info.available = data.value("available", false);
+        info.version = OptionalString(data, "ytDlpVersion");
+        info.ageDays = OptionalInt(data, "ageDays");
+        info.stale = data.value("stale", false);
+    };
+
+    try {
+        const RunOutcome outcome =
+            RunPythonCommand(command, onEvent, nullptr, "E_VERSION_CANCELLED",
+                              "Version probe was cancelled.", timeouts_.version,
+                              "E_VERSION_TIMEOUT", "Timed out probing the downloader.");
+        if (!outcome.completedReceived) {
+            info.available = false;
+        }
+    } catch (const errors::MediaToolException&) {
+        // A python that will not start, a script that is not there, a probe that hung.
+        // "Not usable" is the answer, not an error to propagate -- the caller asked
+        // whether the downloader works, and it does not.
+        info.available = false;
+    }
+    return info;
+}
+
 downloads::DownloadMetadata YtDlpProvider::Inspect(const std::string& url,
                                                     downloads::CancelledCallback isCancelled) {
     nlohmann::json params;
@@ -208,8 +270,11 @@ downloads::DownloadMetadata YtDlpProvider::Inspect(const std::string& url,
         }
     };
 
-    const RunOutcome outcome =
-        RunPythonCommand(command, onEvent, isCancelled, "E_INSPECT_CANCELLED", "Inspection was cancelled.");
+    const RunOutcome outcome = RunPythonCommand(
+        command, onEvent, isCancelled, "E_INSPECT_CANCELLED", "Inspection was cancelled.",
+        timeouts_.inspect, "E_INSPECT_TIMEOUT",
+        "Timed out fetching information about this link. The site may be unreachable or "
+        "very slow right now.");
 
     if (outcome.error) {
         throw *outcome.error;
@@ -240,6 +305,15 @@ void YtDlpProvider::Download(const downloads::DownloadOptions& options,
     // issue #31) always wins over the quality preset -- yt-dlp's -f selector accepts a raw
     // format id (or "id1+id2" combo) verbatim, same as any other selector string, so no
     // downloader.py change is needed here.
+    if (options.formatId.has_value() && !IsSafeFormatSelector(*options.formatId)) {
+        // Checked here, before the process starts, as well as at job creation: this is
+        // the last point where the value is still ours, and every path into -f goes
+        // through it. See IsSafeFormatSelector for what -f actually accepts.
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_FORMAT_ID", errors::ErrorCategory::UnsupportedFormat,
+            "That stream selection is not a valid format id.",
+            "formatId=" + *options.formatId, /*recoverable=*/false));
+    }
     params["formatSelector"] =
         options.formatId.has_value() ? *options.formatId : FormatSelectorForQuality(options.quality);
     params["filenameBase"] = options.filenameBase;

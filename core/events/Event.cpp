@@ -24,6 +24,8 @@ std::string ToWireString(EventType type) {
             return "jobFailed";
         case EventType::JobCancelled:
             return "jobCancelled";
+        case EventType::JobRetrying:
+            return "jobRetrying";
         case EventType::FileDetected:
             return "fileDetected";
         case EventType::HardwareDetected:

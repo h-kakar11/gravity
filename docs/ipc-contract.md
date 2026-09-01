@@ -97,7 +97,8 @@ verified without hitting a real URL.
 | `retryJob` | `{jobId: string}` | `{}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
-| `getCapabilities` | `{path: string}` | `{capabilities: string[]}` |
+| `getCapabilities` | `{path: string}` | `{capabilities: string[], deferredCapabilities: {capability: string, reason: string}[]}` |
+| `getDownloaderInfo` | `{}` | `{downloaderInfo: DownloaderInfo}` |
 | `getSettings` | `{}` | `{settings: Settings}` |
 | `updateSettings` | `{settings: object}` (partial) | `{settings: Settings}` |
 | `getHardwareInfo` | `{}` | `{hardwareInfo: HardwareInfo}` |
@@ -122,12 +123,17 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
   Responses are still correlated by `id`; as stated above, requests may complete out of
   order. If that pool is saturated the request is answered with `E_CORE_BUSY`
   (`recoverable: true`), never queued without limit.
+- **`inspectDownloadUrl` and `createJob{type: "DOWNLOAD"}` check that the Python downloader
+  is actually present** before doing anything else, and answer `E_DOWNLOADER_NOT_FOUND`
+  with every candidate path that was tried in `error.details` if it isn't (issue #79).
+  A missing interpreter does not stop the core from starting or from running conversion,
+  compression and settings commands.
 
 ### `createJob` params by `type`
 
 | `type` | `params` |
 |---|---|
-| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[]}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31) |
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[]}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31, and is validated before the job is accepted: see "Format id validation" below) |
 | `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number, dependsOn?: string[]}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
 | `"TEST"` | `{priority?: number, dependsOn?: string[]}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
@@ -151,7 +157,156 @@ its `state` becomes `CANCELLED` with no `error` field, and the reason is in the 
 
 `{outputFormat: string, quality?: "low"|"medium"|"high"|"lossless", videoCodec?: "auto"|"h264"|"h265"|"vp9"|"av1", hardwareAcceleration?: "auto"|"none"|"nvenc"|"amf"|"qsv", resolution?: {width: number, height: number}, trim?: {startSeconds?: number, endSeconds?: number}, watermark?: {imagePath: string, position: "top-left"|"top-right"|"bottom-left"|"bottom-right"|"center", opacity: number}, audioBitrateKbps?: number}`
 
-`outputFormat` is required (rejected with `E_MISSING_PARAM` if absent, `E_INVALID_PARAM_VALUE` if empty). `quality: "lossless"` is rejected unconditionally with `E_PRO_FEATURE_LOCKED` — there is no Pro entitlement system yet, so this is a hard server-side gate, not a toggle; the frontend must never offer it as a selectable value. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
+`outputFormat` is required (rejected with `E_MISSING_PARAM` if absent, `E_INVALID_PARAM_VALUE` if empty). `quality`, when present, must be one of `lowest` | `low` | `medium` | `high` | `ultra` | `lossless` — anything else is rejected with `E_INVALID_PARAM_VALUE` rather than silently degraded to `medium` as it was before (issue #83). `lossless` used to be rejected unconditionally as a Pro-tier value; issue #82 removed the tier, so it is now an ordinary selectable quality. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
+
+A `COMPRESSION` job additionally probes its input before encoding and derives an explicit video (or, for an audio-only target, audio) bitrate from the source's own bitrate, scaled by the quality tier. This is what makes compression mean "smaller than the input" rather than "re-encoded at a fixed perceptual quality" — the latter routinely produced a *larger* file, which is issue #80. Callers do not supply the target and cannot override it; an explicit `audioBitrateKbps` is still honoured as-is.
+
+#### Format id validation
+
+`formatId` reaches yt-dlp's `-f` verbatim, and `-f` is a small expression language
+(filters, fallbacks, arithmetic, `all`), not a name. It is therefore held to the shape of
+an actual format id: up to eight `+`-joined ids, each 1–64 characters of `[A-Za-z0-9_.-]`,
+with `all` and `mergeall` rejected by name because they change how many streams get
+downloaded. Anything else is rejected with `E_INVALID_FORMAT_ID`
+(`category: "UNSUPPORTED_FORMAT"`) synchronously from `createJob`, before any process is
+started. The provider re-checks the same rule immediately before spawning, so every path
+into `-f` is covered. The selectors derived from `QualityPreset` are built in C++ and are
+deliberately *not* subject to this rule — they legitimately use the expression syntax.
+
+#### Deferred operations
+
+`getCapabilities` answers two disjoint lists. Everything in `capabilities` will be
+attempted for real. Everything in `deferredCapabilities` applies to the file but cannot
+run in this build; each entry carries a `reason` that is user-facing and safe to render
+verbatim next to a disabled control. Attempting a deferred operation fails with
+`E_NOT_IMPLEMENTED` (`category: "UNSUPPORTED_FORMAT"`, `recoverable: false`) and never
+partially runs, at every layer, with `message` equal to that same `reason`.
+
+Today that means `extractAudio` and `extractFrames` on video files. They used to be
+reported as ordinary capabilities, so the only way to discover they do not run was to
+start a job and read the failure. `core/media/DeferredOperations.h` is the single table
+both lists are derived from.
+
+#### Downloader failure codes
+
+Beyond the download failures already classified (`E_VIDEO_PRIVATE`, `E_GEO_RESTRICTED`,
+`E_FORMAT_UNAVAILABLE`, …), the merge/post-processing stage — yt-dlp's own ffmpeg step,
+which runs *after* the bytes are on disk — reports:
+
+| code | category | `recoverable` | meaning |
+|---|---|---|---|
+| `E_MERGE_TOOL_MISSING` | `ENGINE_FAILURE` | `false` | yt-dlp could not find ffmpeg/ffprobe to merge the streams |
+| `E_MERGE_FAILED` | `ENGINE_FAILURE` | `false` | the merge or a post-processor ran and failed |
+| `E_FRAGMENT_DOWNLOAD_FAILED` | `NETWORK_ERROR` | `true` | a fragment could not be transferred |
+| `E_FRAGMENT_MISSING` | `DOWNLOAD_FAILURE` | `false` | a fragment the manifest names does not exist |
+
+`E_INSPECT_TIMEOUT` (`NETWORK_ERROR`, `recoverable: true`) is reported when a metadata
+fetch exceeds its wall-clock deadline (60s by default). This is a bound on the *caller*,
+which yt-dlp's own `socket_timeout` is not: that limits one connect/read, while a fetch is
+many of them and a child that stalls without any single socket call timing out would
+otherwise hold a worker thread indefinitely. The child is stopped before the error is
+reported. Downloads deliberately have no such deadline — a legitimately long download is
+not a hang.
+
+### Automatic retry
+
+A job that fails is retried automatically when — and only when — **both** of these hold:
+
+* the layer that produced the failure set `error.recoverable`, and
+* the failure's category is not one where a second attempt cannot help. `FILE_NOT_FOUND`,
+  `INVALID_FILE`, `UNSUPPORTED_FORMAT`, `PERMISSION_ERROR`, `DISK_SPACE_ERROR` and
+  `CANCELLED` are never retried, whatever `recoverable` says.
+
+Either signal alone gets a class of failures wrong, which is why both are required: a
+provider that mislabels a full disk as recoverable would otherwise turn one clear failure
+into three identical ones seconds apart, and a `NETWORK_ERROR` for a hostname that does not
+resolve fails the same way forever. See `core/jobs/RetryPolicy.h`.
+
+The budget is `settings.processing.maxRetryAttempts` (1–10, default 3), counting the first
+attempt — so `1` disables retry entirely. Waits are exponential (2s, then 4s, …, capped at
+60s). A retried job transitions `RUNNING → RETRYING → RUNNING`, **never through `FAILED`**:
+entering a terminal state would cancel every job that `dependsOn` it and write a failure
+into `listJobHistory`, both for an attempt that is about to be repeated. Only a job that has
+exhausted its attempts, or failed in a way that is not retryable, reaches `FAILED`.
+
+A job sitting out a backoff is fully cancellable — `cancelJob` finalizes it immediately
+rather than waiting out the timer.
+
+Every job snapshot carries `attempts`: the attempts that have already run, including the
+one in progress. Compare it against `settings.processing.maxRetryAttempts` to render
+"attempt 2 of 3". The count survives a restart, so a job rebuilt by crash recovery does not
+get a fresh budget.
+
+### Engine failure codes
+
+An ffmpeg or ffprobe failure used to report one code (`E_FFMPEG_FAILED`) and an exit
+status, because the child's stderr was discarded. It is now kept as a bounded tail and
+classified, so the four failures a user can actually act on are distinguishable:
+
+| code | category | meaning |
+|---|---|---|
+| `E_DISK_FULL` | `DISK_SPACE_ERROR` | out of space; the message names the free space at the output location |
+| `E_PERMISSION_DENIED` | `PERMISSION_ERROR` | cannot write there; the message suggests a user-profile folder and antivirus |
+| `E_INVALID_FILE` | `INVALID_FILE` | the input is corrupt or is not a media file |
+| `E_UNSUPPORTED_CODEC` | `UNSUPPORTED_FORMAT` | this ffmpeg build has no such encoder/decoder |
+
+Anything unrecognized keeps `E_FFMPEG_FAILED` with the stderr tail in `details` rather than
+being guessed at. A failed **probe** defaults to `E_INVALID_FILE` instead, since ffprobe
+being unable to read a file is what "not a media file" means. The categories are load-bearing
+beyond display: the retry policy vetoes `DISK_SPACE_ERROR`, `PERMISSION_ERROR`,
+`INVALID_FILE` and `UNSUPPORTED_FORMAT` outright.
+
+`E_NETWORK_TIMEOUT` (`NETWORK_ERROR`, `recoverable: true`) is now distinct from `E_NETWORK`
+in the downloader for the same reason: a timeout is the network failure most likely to
+succeed on a retry. Every yt-dlp call uses a 30-second per-socket timeout, which is a bound
+on one connect/read, not on a fetch — the wall-clock deadline above is what bounds a fetch.
+
+`E_INSUFFICIENT_DISK_SPACE` (`DISK_SPACE_ERROR`) is a coarse 100 MB floor checked at
+`createJob` for `DOWNLOAD`, `CONVERSION` and `COMPRESSION` alike — "the drive is already
+essentially full", caught before an encode runs for an hour and then fails.
+
+### Long-running jobs
+
+One attempt at a job may run for at most 12 hours. Past that the core requests
+cancellation, which is genuinely effective: both job types poll it and both engines
+terminate (then kill) their child process on seeing it. If the job has not stopped 30
+seconds later it is reported in the log as unresponsive and left alone — the core cannot
+take back a thread whose `Execute()` ignores cancellation, and marking such a job `FAILED`
+while its worker still runs would misreport a slot that is not free.
+
+The limit measures the **current attempt**, not the job's lifetime, so a job on its third
+retry has not accumulated the first two.
+
+### `DownloaderInfo`
+
+```ts
+{
+  available: boolean;   // false = yt-dlp cannot be loaded at all; everything below is unset
+  backend: string;      // "yt-dlp"
+  version: string | null;
+  ageDays: number | null;   // null when the version string carries no release date
+  stale: boolean;           // ageDays > 730
+}
+```
+
+Probed at most once per process, on first use rather than at startup — a probe starts a
+process, and doing it eagerly would slow a cold start for information most sessions never
+need. `stale` matters because yt-dlp's site extractors break within weeks: an old build
+fails on real URLs with messages that blame the video rather than the tool.
+
+### Crash recovery
+
+Unfinished jobs are persisted as the `createJob` request that produced them and replayed on
+the next launch through the same submission path a fresh request takes. The guarantee is
+deliberately the weak one: **a job interrupted by a crash is rebuilt and re-run from the
+start, not resumed** — its subprocess died with the process, and neither yt-dlp nor ffmpeg
+offers a resume protocol to drive. Artifacts the killed run left in the output directory are
+deleted before the rebuilt job starts.
+
+A rebuilt job is a new `Job` and therefore has a **new job id**; `dependsOn` edges are
+remapped across the replay, and an edge naming a job that already finished is dropped
+(it is either satisfied or unsatisfiable). Recovery is capped at three attempts per job, so
+a job that takes the core down cannot re-queue itself on every launch.
 
 ## Events (core -> ... -> React)
 
@@ -160,6 +315,12 @@ its `state` becomes `CANCELLED` with no `error` field, and the reason is in the 
 `jobCreated`, `jobStarted`, `jobProgress`, `jobPaused`, `jobResumed`, `jobCompleted`,
 `jobFailed`, `jobCancelled` — all carry `jobId` and a `data` object that is at minimum
 `{state: JobState}` and, for `jobProgress`, the full `Progress` object.
+
+`jobRetrying` — `data: {state: "RETRYING", attempt: number, maxAttempts: number,
+retryInMs: number, error: ErrorInfo}`. **Not a terminal event and deliberately not a
+`jobFailed`:** the attempt failed, the job did not. A job that will be retried never enters
+`FAILED` at all (see "Automatic retry" below), so a listener that treats `jobFailed` as
+"this job is over" stays correct.
 
 `logEvent` — `data: {level: "DEBUG"|"INFO"|"WARNING"|"ERROR", message: string, subsystem: string}`,
 forwarded from `Logger::SetEventSink` (`app/core/main.cpp`).
@@ -353,6 +514,9 @@ Grouped exactly as in the product spec: `general`, `downloads`, `processing`, `p
   // Scheduling priority (issue #17): higher runs before lower among jobs still Queued;
   // FIFO among equal priorities. Defaults to 0 if not set at createJob time.
   priority: number;
+  // Attempts that have already run, including the one in progress: 1 on a first run, 2
+  // while retrying after one failure. See "Automatic retry" above.
+  attempts: number;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

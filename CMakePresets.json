@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "windows-mingw-debug",
@@ -24,17 +28,75 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "sanitizers-debug",
+      "displayName": "Sanitizers (ASan + UBSan, Debug)",
+      "inherits": "windows-mingw-debug",
+      "binaryDir": "${sourceDir}/build/sanitizers-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MEDIATOOL_ENABLE_SANITIZERS": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows-mingw-debug", "configurePreset": "windows-mingw-debug" },
-    { "name": "windows-mingw-release", "configurePreset": "windows-mingw-release" }
+    {
+      "name": "windows-mingw-debug",
+      "configurePreset": "windows-mingw-debug"
+    },
+    {
+      "name": "windows-mingw-release",
+      "configurePreset": "windows-mingw-release"
+    },
+    {
+      "name": "sanitizers-debug",
+      "configurePreset": "sanitizers-debug"
+    }
   ],
   "testPresets": [
     {
       "name": "windows-mingw-debug",
       "configurePreset": "windows-mingw-debug",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "exclude": {
+          "label": "integration|stress"
+        }
+      }
+    },
+    {
+      "name": "windows-mingw-debug-integration",
+      "configurePreset": "windows-mingw-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "integration"
+        }
+      }
+    },
+    {
+      "name": "windows-mingw-debug-stress",
+      "configurePreset": "windows-mingw-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "stress"
+        }
+      }
+    },
+    {
+      "name": "sanitizers-debug",
+      "configurePreset": "sanitizers-debug",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

@@ -5,24 +5,41 @@
 ; ProgID) so entries apply per-extension regardless of whatever program is currently the
 ; registered handler for that file type, and don't add noise to every file's context menu.
 ;
-; $INSTDIR\Gravity.exe is the Tauri shell binary itself (not the bundled mediatool-core.exe
-; sidecar) -- it parses --convert/--compress via app/desktop/src-tauri/src/cli.rs and, if
-; already running, tauri-plugin-single-instance hands the args to that instance instead of
-; starting a second one.
+; $INSTDIR\${MAINBINARYNAME}.exe is the Tauri shell binary itself (not the bundled
+; mediatool-core.exe sidecar) -- it parses --convert/--compress via
+; app/desktop/src-tauri/src/cli.rs and, if already running, tauri-plugin-single-instance
+; hands the args to that instance instead of starting a second one.
+;
+; ${MAINBINARYNAME}, NOT a literal "Gravity" (issue #85). Tauri names the installed
+; executable after `mainBinaryName` in tauri.conf.json, which defaults to the CARGO PACKAGE
+; NAME -- "gravity-desktop" here -- not to productName. (Tauri's own template carries the
+; comment "We used to use product name as MAINBINARYNAME" over its shortcut-migration
+; code, which is where the older convention this file was written against comes from.)
+; So these keys used to register a command pointing at $INSTDIR\Gravity.exe, a file the
+; installer never creates: every verb was dead on arrival, and Explorer answered a click on
+; one with its generic "How do you want to open this file?" chooser -- issue #85's exact
+; symptom, and why #52 kept reproducing after the installer was supposedly fixed.
+;
+; Tauri !include's this file (line ~35 of its installer.nsi) BEFORE it !define's
+; MAINBINARYNAME (line ~52), which is fine and deliberate: NSIS expands ${...} inside a
+; macro body when the macro is INSERTED, not when it is defined, and the insertion points
+; are in sections far below the define. Verified by compiling this file against a harness
+; that reproduces that exact ordering -- makensis emitted
+; `\gravity-desktop.exe" --convert "%1"` with no warnings.
 ;
 ; Idempotent by construction: WriteRegStr overwrites rather than erroring if the key
 ; already exists, so re-running on upgrade is safe without any existence checks.
 
 !macro GravityAddConvertEntry Ext
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityConvert" "" "Convert with Gravity"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityConvert" "Icon" "$INSTDIR\Gravity.exe,0"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityConvert\command" "" '"$INSTDIR\Gravity.exe" --convert "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityConvert" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityConvert\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" --convert "%1"'
 !macroend
 
 !macro GravityAddCompressEntry Ext
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityCompress" "" "Compress with Gravity"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityCompress" "Icon" "$INSTDIR\Gravity.exe,0"
-  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityCompress\command" "" '"$INSTDIR\Gravity.exe" --compress "%1"'
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityCompress" "Icon" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  WriteRegStr HKCU "Software\Classes\SystemFileAssociations\${Ext}\shell\GravityCompress\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" --compress "%1"'
 !macroend
 
 !macro GravityRemoveConvertEntry Ext

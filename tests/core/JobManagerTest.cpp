@@ -395,3 +395,297 @@ TEST(JobManager, AJobStillDependedOnCannotBeRemoved) {
     EXPECT_NO_THROW(manager.RemoveJob(blocker));
     EXPECT_NO_THROW(manager.RemoveJob(dependent));
 }
+
+// --- Automatic retry (Phase C) --------------------------------------------------------
+
+namespace {
+
+// Fails with a scripted error for its first `failuresBeforeSuccess` attempts, then
+// succeeds. Records the exact instants each attempt started so a test can assert the
+// backoff actually elapsed rather than assuming it did.
+class FlakyJob final : public mediatool::jobs::Job {
+public:
+    FlakyJob(int failuresBeforeSuccess, ErrorInfo error)
+        : Job(JobType::Test), failuresBeforeSuccess_(failuresBeforeSuccess),
+          error_(std::move(error)) {}
+
+    void Execute() override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            startTimes_.push_back(std::chrono::steady_clock::now());
+        }
+        if (++started_ <= failuresBeforeSuccess_) {
+            throw MediaToolException(error_);
+        }
+    }
+
+    int TimesStarted() const { return started_; }
+    std::vector<std::chrono::steady_clock::time_point> StartTimes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return startTimes_;
+    }
+
+private:
+    std::atomic<int> started_{0};
+    int failuresBeforeSuccess_;
+    ErrorInfo error_;
+    mutable std::mutex mutex_;
+    std::vector<std::chrono::steady_clock::time_point> startTimes_;
+};
+
+mediatool::jobs::RetryPolicy FastRetryPolicy(int maxAttempts) {
+    mediatool::jobs::RetryPolicy policy;
+    policy.maxAttempts = maxAttempts;
+    // Short enough to keep the test quick, long enough to be measurable -- the backoff
+    // assertion below would be meaningless at zero.
+    policy.initialBackoff = std::chrono::milliseconds(40);
+    policy.backoffMultiplier = 2.0;
+    policy.maxBackoff = std::chrono::milliseconds(200);
+    return policy;
+}
+
+}  // namespace
+
+TEST(JobManagerRetry, ARecoverableFailureIsRetriedUntilItSucceeds) {
+    JobManager manager(1, FastRetryPolicy(3));
+    auto job = std::make_unique<FlakyJob>(
+        2, ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "flaky", "", true));
+    FlakyJob* raw = job.get();
+    const auto id = manager.SubmitJob(std::move(job));
+
+    const JobState final = WaitForState(manager, id, std::chrono::seconds(5),
+                                         [](JobState s) { return s == JobState::Completed; });
+    EXPECT_EQ(final, JobState::Completed);
+    EXPECT_EQ(raw->TimesStarted(), 3);
+    // The snapshot reports attempts, so a UI can say "attempt 3 of 3" rather than
+    // silently re-running a job the user watched fail.
+    EXPECT_EQ(manager.GetJob(id).attempts, 3);
+}
+
+TEST(JobManagerRetry, EachRetryWaitsOutAnIncreasingBackoff) {
+    JobManager manager(1, FastRetryPolicy(3));
+    auto job = std::make_unique<FlakyJob>(
+        2, ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "flaky", "", true));
+    FlakyJob* raw = job.get();
+    const auto id = manager.SubmitJob(std::move(job));
+
+    ASSERT_EQ(WaitForState(manager, id, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Completed; }),
+               JobState::Completed);
+
+    const auto starts = raw->StartTimes();
+    ASSERT_EQ(starts.size(), 3u);
+    const auto firstGap =
+        std::chrono::duration_cast<std::chrono::milliseconds>(starts[1] - starts[0]);
+    const auto secondGap =
+        std::chrono::duration_cast<std::chrono::milliseconds>(starts[2] - starts[1]);
+    // Lower bounds only. Asserting an upper bound would make this a timing test that a
+    // loaded CI box fails for no good reason; what matters is that the wait happened and
+    // that it grew.
+    EXPECT_GE(firstGap, std::chrono::milliseconds(35));
+    EXPECT_GE(secondGap, std::chrono::milliseconds(75));
+}
+
+TEST(JobManagerRetry, RetryingIsNotTerminalSoDependentsAreNotCancelled) {
+    // The reason RUNNING -> RETRYING exists as its own transition. Routing an automatic
+    // retry through FAILED tells the scheduler the job ended, which cancels every job
+    // waiting on it -- an entire dependent chain torn down by one transient blip that was
+    // about to be retried anyway.
+    JobManager manager(1, FastRetryPolicy(3));
+    auto flaky = std::make_unique<FlakyJob>(
+        1, ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "flaky", "", true));
+    const auto firstId = manager.SubmitJob(std::move(flaky));
+
+    auto dependent = std::make_unique<InstantJob>();
+    dependent->SetDependsOn({firstId});
+    const auto dependentId = manager.SubmitJob(std::move(dependent));
+
+    EXPECT_EQ(WaitForState(manager, firstId, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Completed; }),
+               JobState::Completed);
+    EXPECT_EQ(WaitForState(manager, dependentId, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Completed; }),
+               JobState::Completed);
+}
+
+TEST(JobManagerRetry, APermanentFailureIsNotRetriedAtAll) {
+    JobManager manager(1, FastRetryPolicy(3));
+    auto job = std::make_unique<FlakyJob>(
+        99, ErrorInfo::Make("E_DISK_FULL", ErrorCategory::DiskSpaceError, "full", "", true));
+    FlakyJob* raw = job.get();
+    const auto id = manager.SubmitJob(std::move(job));
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Failed; }),
+               JobState::Failed);
+    // Exactly once. A recoverable flag on a disk-full error must not turn one clear
+    // failure into three identical ones several seconds apart.
+    EXPECT_EQ(raw->TimesStarted(), 1);
+}
+
+TEST(JobManagerRetry, RetriesStopAtTheLimitAndTheJobEndsFailedWithItsLastError) {
+    JobManager manager(1, FastRetryPolicy(2));
+    auto job = std::make_unique<FlakyJob>(
+        99, ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "always flaky", "", true));
+    FlakyJob* raw = job.get();
+    const auto id = manager.SubmitJob(std::move(job));
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Failed; }),
+               JobState::Failed);
+    EXPECT_EQ(raw->TimesStarted(), 2);  // the original plus one retry
+    const auto snapshot = manager.GetJob(id);
+    ASSERT_TRUE(snapshot.error.has_value());
+    EXPECT_EQ(snapshot.error->code, "E_NETWORK");
+    EXPECT_EQ(snapshot.attempts, 2);
+}
+
+TEST(JobManagerRetry, ASeededAttemptCountIsNotAFreshBudget) {
+    // What makes the retry budget survive a crash: a job rebuilt with two attempts already
+    // spent gets the third and stops, rather than three more.
+    JobManager manager(1, FastRetryPolicy(3));
+    auto job = std::make_unique<FlakyJob>(
+        99, ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "flaky", "", true));
+    job->SetAttemptCount(2);
+    FlakyJob* raw = job.get();
+    const auto id = manager.SubmitJob(std::move(job));
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Failed; }),
+               JobState::Failed);
+    EXPECT_EQ(raw->TimesStarted(), 1);
+    EXPECT_EQ(manager.GetJob(id).attempts, 3);
+}
+
+TEST(JobManagerRetry, AJobWaitingOutABackoffCanStillBeCancelled) {
+    // A backoff is exactly when a user gives up. Waiting out the timer first would make
+    // Cancel feel broken.
+    mediatool::jobs::RetryPolicy policy = FastRetryPolicy(3);
+    policy.initialBackoff = std::chrono::seconds(30);
+    policy.maxBackoff = std::chrono::seconds(30);
+    JobManager manager(1, policy);
+
+    auto job = std::make_unique<FlakyJob>(
+        99, ErrorInfo::Make("E_NETWORK", ErrorCategory::NetworkError, "flaky", "", true));
+    const auto id = manager.SubmitJob(std::move(job));
+
+    ASSERT_EQ(WaitForState(manager, id, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Retrying; }),
+               JobState::Retrying);
+    manager.CancelJob(id);
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(5),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+// --- Stuck-job watchdog (Phase E) -----------------------------------------------------
+
+namespace {
+
+// Runs until cancelled, then stops -- a well-behaved long job, which is what the watchdog
+// is supposed to be able to stop.
+class RunsUntilCancelledJob final : public mediatool::jobs::Job {
+public:
+    RunsUntilCancelledJob() : Job(JobType::Test) {}
+    void Execute() override {
+        while (!IsCancellationRequested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        throw MediaToolException(
+            ErrorInfo::Make("E_TEST_CANCELLED", ErrorCategory::Cancelled, "cancelled"));
+    }
+};
+
+mediatool::jobs::JobWatchdogPolicy ImpatientWatchdog() {
+    mediatool::jobs::JobWatchdogPolicy policy;
+    policy.maxJobDuration = std::chrono::milliseconds(50);
+    policy.cancellationGrace = std::chrono::milliseconds(50);
+    policy.checkInterval = std::chrono::milliseconds(10);
+    return policy;
+}
+
+mediatool::jobs::RetryPolicy NoRetryPolicy() {
+    mediatool::jobs::RetryPolicy policy;
+    policy.maxAttempts = 1;
+    return policy;
+}
+
+}  // namespace
+
+TEST(JobManagerWatchdog, AJobThatRunsPastItsLimitIsCancelled) {
+    // The whole point: a job wedged on a network read or a hung ffmpeg does not hold a
+    // worker slot forever. Cancellation is genuinely effective here because both real job
+    // types propagate it to their child process.
+    JobManager manager(1, NoRetryPolicy(), ImpatientWatchdog());
+    const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>());
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+TEST(JobManagerWatchdog, AShortJobIsNeverTouchedByTheWatchdog) {
+    // The limit is a backstop, not a scheduling policy. A job that finishes normally must
+    // never be affected by it, and the watchdog must forget it rather than accumulating
+    // state for every job that ever ran.
+    JobManager manager(1, NoRetryPolicy(), ImpatientWatchdog());
+    const auto id = manager.SubmitJob(std::make_unique<InstantJob>());
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Completed; }),
+               JobState::Completed);
+    // Still Completed a few watchdog ticks later -- nothing cancels it after the fact.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(manager.GetJob(id).state, JobState::Completed);
+}
+
+TEST(JobManagerWatchdog, AZeroLimitDisablesTheWatchdogEntirely) {
+    mediatool::jobs::JobWatchdogPolicy disabled;
+    disabled.maxJobDuration = std::chrono::steady_clock::duration::zero();
+    JobManager manager(1, NoRetryPolicy(), disabled);
+
+    const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>());
+    // Long enough that an enabled watchdog at any sane interval would have fired.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(manager.GetJob(id).state, JobState::Running);
+
+    manager.CancelJob(id);
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+TEST(JobManagerWatchdog, ShutdownJoinsTheWatchdogPromptlyRatherThanWaitingOutItsInterval) {
+    // The watchdog sleeps on the same condition variable the workers use, so `stopping_`
+    // wakes it immediately. Sleeping on a bare timer instead would add its whole interval
+    // to every shutdown.
+    mediatool::jobs::JobWatchdogPolicy slowInterval;
+    slowInterval.maxJobDuration = std::chrono::hours(12);
+    slowInterval.checkInterval = std::chrono::seconds(30);
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    {
+        JobManager manager(1, NoRetryPolicy(), slowInterval);
+        (void)manager.SubmitJob(std::make_unique<InstantJob>());
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - startedAt, std::chrono::seconds(5));
+}
+
+TEST(JobManagerWatchdog, RunningForIsPerAttemptAndUnsetWhenNotRunning) {
+    // The watchdog measures the CURRENT attempt, not the job's lifetime: a job that has
+    // been retried twice has not been running for the sum of its attempts, and treating it
+    // that way would cancel healthy retries.
+    mediatool::jobs::TestJob job;
+    EXPECT_FALSE(job.RunningFor().has_value());  // still Queued
+
+    ASSERT_EQ(job.MarkStarting(), mediatool::jobs::TransitionResult::Success);
+    EXPECT_FALSE(job.RunningFor().has_value());  // Starting is not Running
+
+    ASSERT_EQ(job.MarkRunning(), mediatool::jobs::TransitionResult::Success);
+    ASSERT_TRUE(job.RunningFor().has_value());
+    EXPECT_GE(*job.RunningFor(), std::chrono::steady_clock::duration::zero());
+
+    ASSERT_EQ(job.MarkCompleted(), mediatool::jobs::TransitionResult::Success);
+    EXPECT_FALSE(job.RunningFor().has_value());
+}
+

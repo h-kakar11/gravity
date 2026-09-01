@@ -233,8 +233,8 @@ section 47. Newest entries at the bottom of each phase's section.
   begin with. Everything that crosses a process or IPC boundary in this app (React <->
   Rust <-> C++ core <-> engines) is small JSON control/progress messages — job parameters,
   `-progress pipe:1` lines, NDJSON events — never raw audio/video/image bytes.
-- **Choice:** treat this as not applicable rather than build a placeholder or a
-  Pro-locked stub for it. There is no raw-media copy anywhere in the pipeline to
+- **Choice:** treat this as not applicable rather than build a placeholder or an inert
+  stub for it. There is no raw-media copy anywhere in the pipeline to
   eliminate, so there is nothing a "zero-copy" mode could actually turn off.
 - **Consequences:** no code, no UI affordance, no IPC surface for this item — this
   paragraph is the entire close-out. If a future architecture change ever did route raw
@@ -303,8 +303,7 @@ section 47. Newest entries at the bottom of each phase's section.
 - **Choice:** asked directly (proprietary/all-rights-reserved vs. source-available vs.
   permissive open source vs. skip) — the user chose to skip it for this pass.
 - **Consequences:** no root `LICENSE` file exists. The repository's default legal state
-  ("all rights reserved," matching the Pro-tier commercial model) applies by absence of a
-  file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
+  ("all rights reserved") applies by absence of a file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
   mistaken for a deliberate "we chose all-rights-reserved" decision later. Revisit before
   any public source distribution.
 
@@ -382,3 +381,421 @@ policy tangled up in the thing that owns the threads. See `docs/concurrency-mode
   correct (something strictly newer is already displayed) but it does mean a snapshot fetch
   can be wasted work; the alternative is showing the user a state their app has already
   moved past.
+
+## Defect investigation pass (issues #79-#86)
+
+### Compression is a bitrate target derived from the source, not a CRF quality target
+- **Context:** issue #80 -- a 1.17 MB file compressed to 3.46 MB, identically at *both*
+  high and low quality. Two independent causes, both reproduced with a real ffmpeg here:
+  1. `-crf` is a *quality* target, not a *size* target. "Compress" was byte-for-byte the
+     same ffmpeg invocation as "Convert", with no reference to the input's size at all.
+     Measured on a 1.19 MB 640x360 H.264 clip: CRF 23 ("medium") returned 1.03x the
+     original, CRF 18 ("high") returned 1.41x. Re-encoding already-compressed material at
+     a fixed CRF inflates it routinely, not exceptionally.
+  2. `libopenh264` -- the bundled default H.264 encoder, and therefore the one almost
+     every install uses -- **defines no `crf` AVOption**. ffmpeg does not fail on the flag:
+     it logs "Codec AVOption crf ... has not been used for any stream" at `AV_LOG_WARNING`,
+     which this codebase's own `-loglevel error` suppresses, and exits 0. The encode then
+     runs at `TARGET_BITRATE_DEFAULT` (2 Mbps, hardcoded in ffmpeg's `libopenh264enc.c`)
+     for every quality tier alike. 2 Mbps over the reported clip length is ~3.46 MB, and
+     it is identical at high and low quality -- exactly the reported symptom.
+- **Options considered:** (a) lower the CRF values for compression -- rejected, it cannot
+  *promise* anything about size and does nothing at all on libopenh264; (b) switch the
+  bundled encoder -- rejected, the libopenh264 choice is licensing-load-bearing
+  (`docs/licensing.md`) and unrelated to this bug; (c) derive an explicit bitrate from the
+  source.
+- **Choice:** (c). `MediaProcessingJob` probes the input before encoding and passes
+  `videoBitrateKbps` (or, for an audio-only target, `audioBitrateKbps`) computed as
+  source bitrate x a per-tier factor -- 0.20x at "lowest" up to 0.75x at "ultra" for a
+  compression job. `BuildFfmpegArgs` emits `-b:v/-maxrate/-bufsize` when a target is
+  present, and emits `-crf` only for an encoder that actually implements it
+  (`EncoderSupportsCrf`), never both.
+- **Consequences:** compression is smaller than its input by construction rather than by
+  luck. Measured end-to-end against the same 1.19 MB source: 0.24x / 0.29x / 0.44x / 0.59x
+  / 0.75x across the five tiers. A source ffprobe reports no bitrate for gets no target at
+  all -- prior behavior, rather than a number invented from one we don't have. The quality
+  tier now also has an effect on the libopenh264 path, which it never did before.
+
+### The downloader's Python paths are anchored to the executable, not the working directory
+- **Context:** issue #79 -- `E_PROCESS_LAUNCH_FAILED` / "The system cannot find the file
+  specified" naming a `python.exe` that exists. Both the interpreter and `downloader.py`
+  were resolved as an env var *or* a CWD-relative literal
+  (`python/downloader/.venv/Scripts/python.exe`), handed straight to `CreateProcess`, and
+  never checked. The core's working directory is whatever the Tauri shell inherited --
+  `app/desktop/src-tauri` under `tauri dev`, the shortcut's "Start in" for an installed
+  build -- essentially never the repository root that literal was written against.
+- **Choice:** `core/filesystem/ToolPathResolver` builds an ordered candidate list (explicit
+  env override, then each relative candidate against the core executable's own directory
+  and its ancestors, then the legacy CWD-relative form last so nothing that resolved before
+  stops resolving), existence-checks each one, and cleans surrounding quotes off env values
+  (`set VAR="C:\..."` in a batch file stores them, and they then reach `CreateProcess` as
+  part of the filename while `echo` still looks correct).
+- **Consequences:** a missing interpreter no longer aborts startup -- downloading is one
+  feature among several -- but the next download or inspect fails with
+  `E_DOWNLOADER_NOT_FOUND` listing every path that was tried. **Not verified on Windows
+  from this environment**; the CWD-anchoring defect is verified by unit test, and the other
+  candidate causes are converted from silent failures into named ones rather than proven
+  absent.
+
+### Context-menu entries reference Tauri's `${MAINBINARYNAME}`, never a literal
+- **Context:** issues #85 and #52 -- right-click "Convert"/"Compress" showed Windows'
+  generic "How do you want to open this file?" chooser. Two prior passes reviewed
+  `hooks.nsh` and `cli.rs` and found nothing, concluding a Windows machine was required.
+- **Root cause:** `hooks.nsh` registered `"$INSTDIR\Gravity.exe" --convert "%1"`, but Tauri
+  names the installed binary after `mainBinaryName`, which defaults to the **Cargo package
+  name** (`gravity-desktop`), not `productName` (`Gravity`) -- `mainBinaryName` is unset
+  here, and `cargo metadata` confirms the produced bin target is `gravity-desktop`. Every
+  verb pointed at a file the installer never creates, so Explorer fell back to the chooser.
+  Tauri's own template still carries the comment "We used to use product name as
+  MAINBINARYNAME" over its shortcut-migration code, which is where the stale convention
+  came from.
+- **Choice:** reference `$INSTDIR\${MAINBINARYNAME}.exe`, the define Tauri itself uses, so
+  the two can never drift. Tauri `!include`s the hook file *before* it `!define`s
+  `MAINBINARYNAME`, which is fine: NSIS expands `${...}` in a macro body at
+  `!insertmacro` time. Verified by compiling this exact file with `makensis` against a
+  harness reproducing that ordering -- the emitted string is
+  `\gravity-desktop.exe" --convert "%1"`, with no warnings.
+- **Consequences:** a Rust unit test now fails if any `$INSTDIR` line in `hooks.nsh`
+  hardcodes a binary filename again. Still unverified against a real installed build on
+  Windows.
+
+### "Open folder" passes explorer.exe a raw argument
+- **Context:** issue #84 -- "Open folder" could not locate a completed job's output. Issue
+  #38 had wrapped the path in quotes (explorer parses `/select,<path>` by its own rules, so
+  a comma in a filename selects the wrong item). But Rust's Windows argument encoder
+  escapes every `"` in a regular argument *unconditionally* -- `append_arg` in std's
+  `sys::args::windows` inserts a backslash before each one whether or not the argument gets
+  quoted -- so `Command::arg` turned `/select,"C:\out\clip.mp4"` into a command line
+  reading `/select,\"C:\out\clip.mp4\"`. Explorer received a path with literal
+  backslash-quotes and could not find it. The #38 fix defeated itself.
+- **Choice:** `CommandExt::raw_arg`, which appends the fragment verbatim with no quoting or
+  escaping -- the documented escape hatch for exactly this. Separators are also normalized
+  to backslashes, since an output directory typed as `D:/Converted` reaches the command as
+  typed and explorer will not select through a forward slash.
+
+### The "Pro" tier is removed rather than left inert
+- **Context:** issue #82. `idealist.md` had called for Pro affordances built
+  "visibly-present-but-inert", and the code followed: a `ProLockedBadge` component, four
+  disabled stub controls on the Convert page, and a server-side `E_PRO_FEATURE_LOCKED`
+  rejection of `quality: "lossless"`.
+- **Choice:** delete all of it. The badge component and the batch/trim/watermark stubs are
+  gone (they were wired to nothing), and `lossless` is now an ordinary selectable quality.
+  The vision text in `idealist.md` is marked superseded rather than deleted -- the feature
+  ideas still stand, only the tiering framing is gone.
+- **Consequences:** with the badge removed, an inert control would read as a broken one, so
+  the stubs had to go with it rather than being left unlabelled. Trim and watermark remain
+  implemented in `BuildFfmpegArgs` with no UI to reach them; that is a roadmap gap now
+  rather than a fake paywall.
+
+
+## Hardening & feature-completion pass (phases A-F)
+
+### A deferred operation is declared, not merely true
+
+`getCapabilities` advertised `extractAudio` and `extractFrames` for every video while both
+`FFmpegEngine` and `MockMediaEngine` threw `E_NOT_IMPLEMENTED` from them. Nothing was
+wrong with either half on its own; what was wrong is that they were two independent
+statements about the same fact, and only one of them reached the frontend. The only way to
+discover an operation did not run was to start a job and read the failure.
+
+`core/media/DeferredOperations.h` is now the single table, and both halves are derived from
+it: `filesystem::DeferredCapabilitiesFor()` reports the operation with a user-facing reason
+in a list disjoint from `CapabilitiesFor()`, and every engine throws
+`MakeNotImplementedError()`, whose `message` *is* that same reason. The deferral cannot rot
+into a lie because implementing an operation means deleting its table entry, which fails
+the tests that assert the deferral.
+
+The alternative — implementing `ExtractAudio` for real — was rejected as out of scope for
+this pass and, more importantly, as not the actual defect: `convert` to an audio format
+already does what a user means by "extract the audio", so the missing feature was costing
+far less than the dishonest capability list.
+
+### A metadata fetch gets a wall-clock deadline; a download does not
+
+`downloader.py` already sets yt-dlp's `socket_timeout`, and that is not a bound on the
+caller: it limits one connect/read, a fetch is many of them, and a child that keeps
+trickling data never trips it. `Inspect()` runs synchronously on a job worker, so a wedged
+child held that thread until the process exited.
+
+`YtDlpProvider` now enforces a `steady_clock` deadline (60s, injectable) around the whole
+run, stops the child, and reports `E_INSPECT_TIMEOUT` as recoverable. `Download()`
+deliberately gets no such deadline: a legitimate 4K download runs for as long as it runs,
+and a clock that kills it is a bug, not a safeguard. Bounding a download is about
+*silence*, not duration, which is a different mechanism (see the long-running-job timeout).
+
+### `formatId` is validated as a name because `-f` is a language
+
+`downloads::DownloadOptions::formatId` comes from the frontend and reached yt-dlp's `-f`
+verbatim. `-f` accepts filter expressions, fallback chains, arithmetic and the `all`
+keyword — so an unvalidated value there is not a free-text field, it is code: `all`
+downloads every stream on the page and a filter selects something the user never saw.
+
+It is now held to the shape of an actual format id (up to eight `+`-joined ids of
+`[A-Za-z0-9_.-]`), which is exactly what `Inspect()` reports and what a caller can build
+from two of them. The preset-derived selectors are ours and are explicitly *not* subject to
+this — they legitimately use the expression syntax. `all` and `mergeall` are rejected by
+name; the other bare keywords are not, because each still resolves to one stream of the
+same video and a site may legitimately name a format id after one of them.
+
+### Crash recovery restores intent, not progress
+
+`JobHistoryStore`'s header states that persisting in-flight jobs is a non-goal, and the
+reasoning it gives — that resuming an ffmpeg or yt-dlp process across a restart is high
+complexity for little value — is still correct. It is not, however, the same question as
+"should the queue survive a crash".
+
+`core/jobs/InProgressJobStore` persists a `JobSpec` — the `createJob` request that produced
+each unfinished job — and drops it the moment the job reaches a terminal state. On startup
+those specs are replayed through the same `SubmitJobOfType()` the live path uses, so a
+recovered job is constructed and validated identically to a fresh one instead of through a
+second path that can drift.
+
+The guarantee is deliberately the weak one, stated plainly: **a killed job is rebuilt and
+re-run from the start, not resumed.** Its subprocess died with the process, its partial
+output is not a checkpoint, and neither yt-dlp nor ffmpeg offers a resume protocol this app
+could drive. What a user actually loses today is the queue — twenty things lined up and
+nothing to say what they were — and that is what comes back.
+
+Three consequences worth recording:
+
+* **Ids change.** A rebuilt job is a new `Job` object with a new id, so `dependsOn` edges
+  are remapped during the replay. An id that is not in the remap belonged to a job that
+  already reached a terminal state, so the edge is either satisfied or unsatisfiable —
+  dropping it is what lets the dependent run at all.
+* **Recovery is capped.** A job that takes the process down on every attempt would
+  otherwise re-queue itself on every launch. `kMaxRecoveryAttempts` (3) stops it.
+* **The store is cleared before the replay**, and each job re-adds itself through the
+  normal submission path. A spec that can no longer be built — its input file is gone, say
+  — is then dropped with a logged reason rather than retried forever. The gap this leaves
+  is a crash *during* recovery, which is not the failure the file exists to survive.
+
+### Orphan cleanup targets output artifacts, not the unused temp directory
+
+The obvious reading of "orphaned temp-file cleanup" is a sweep of
+`%LOCALAPPDATA%\MediaTool\temp\job-*`. `core/filesystem/TempDirectory` is RAII and would
+indeed leak those across a kill — except that nothing in the codebase constructs one. A
+sweep there would clean up something that never exists.
+
+What a killed run actually leaves behind is in the user's *output* directory: yt-dlp
+`.part` files and half-written encodes. Their names are derived on the worker thread (from
+a video title, or an input stem, plus collision-avoidance suffixes), so nothing outside the
+run knows them. Both job types now report the reserved base name through an
+`onArtifactLocation` hook the instant they reserve it, the recovery store records it, and
+the recovery pass deletes those artifacts — through the same `IsJobArtifactOf` scoping every
+live failure path already uses, never a bare prefix match, never recursive — before
+resubmitting.
+
+### `JobManager` is declared last in `AppContext`, and that is load-bearing
+
+`~JobManager` cancels every queued job and joins the worker pool, which fires state-changed
+callbacks — and those callbacks touch `jobHistoryStore`, `inProgressJobStore`,
+`previousState` and `previousStateMutex`. Members are destroyed in reverse declaration
+order, so `JobManager` sat above the stores meant a shutdown with jobs still queued wrote
+history into a destroyed object. Moving it to the end of the struct is the whole fix, and
+the comment there says why nothing may be declared after it.
+
+### Artifact cleanup handlers catch `...`, not `MediaToolException`
+
+Both job types cleaned up after a failed engine/provider call under
+`catch (const errors::MediaToolException&)`. Anything else escaping — `std::bad_alloc`, a
+`nlohmann::json` exception, a `std::runtime_error` from a future provider — skipped cleanup
+entirely, which is precisely the case where the half-written file outlives every code path
+that still knows its name. The handler rethrows unchanged; only the cleanup is
+unconditional.
+
+### Automatic retry needs two signals, not one
+
+The obvious design keys retry off `ErrorInfo::recoverable` alone, which the plan called
+for. That gets one class of failures wrong in each direction, so the implemented rule
+requires both signals to agree.
+
+`recoverable` is set by the layer that produced the failure, and it is the only thing that
+can distinguish a 503 from a DNS name that will never resolve — a category cannot. But it
+is also the flag most likely to be set carelessly, and a provider that marks a full disk
+"recoverable" turns one clear failure into three identical ones several seconds apart. So
+category acts as a veto over deterministic failures — `FILE_NOT_FOUND`, `INVALID_FILE`,
+`UNSUPPORTED_FORMAT`, `PERMISSION_ERROR`, `DISK_SPACE_ERROR`, `CANCELLED` — regardless of
+the flag, and `recoverable` is the positive signal within the categories that remain.
+
+`CANCELLED` is in that veto list for a different reason than the others: retrying it is not
+wasted work, it is the app arguing with the user.
+
+### An automatic retry never passes through FAILED
+
+`JobState` already had `RETRYING`, reachable only from `FAILED` — the manual path, a user
+pressing Retry on a job that gave up. Reusing it for automatic retry would have meant a
+retried job briefly entering a terminal state, and `FAILED` is terminal in ways that are
+not cosmetic: `SchedulerCore::RecordTerminal` cancels every job that `dependsOn` it, and
+`JobHistoryStore` records the failure. An entire dependent chain torn down, and a permanent
+history entry written, for an attempt the next scheduling decision was about to repeat.
+
+So `RUNNING -> RETRYING` was added as its own transition. The job never becomes terminal, no
+dependent is stranded, no history is written, and the frontend gets a `jobRetrying` event
+carrying the attempt number, the limit and the error rather than watching a job flicker
+through `FAILED`. Only a job that exhausts its attempts — or fails in a way the policy will
+not retry — reaches `FAILED`, which is now the only terminal failure there is.
+
+`RETRYING -> CANCELLED` was added at the same time, and `Job::RequestCancel` now finalizes a
+`RETRYING` job on the spot the way it already did a `QUEUED` one. Both states have no worker
+thread inside `Execute()` to notice the cancellation flag, so nothing else would ever
+finalize them — and a backoff is exactly when a user gives up on a job, so having to wait
+out a 30-second timer before Cancel took effect would make it feel broken.
+
+### The backoff lives in the scheduler, not in a timer thread
+
+Waiting out a backoff needs something to wake up when it elapses. The obvious options were a
+dedicated timer thread or a sleeping worker, both of which add a second concurrency
+mechanism to a subsystem whose whole design is "one lock, one class that touches threads".
+
+Instead `SchedulerCore` gained a `notBefore` per pending entry and takes the current time as
+an *argument*: `TakeNextEligible(now)`, `HasEligible(now)`, `NextEligibleTime(now)`. It stays
+threadless and clockless, so the entire backoff schedule is testable as a sequence of
+function calls with no real waiting — the same property that made priorities and
+dependencies testable. `JobManager`'s workers then sleep with `wait_until(NextEligibleTime)`
+rather than `wait`, recomputing the deadline on every pass so a shorter backoff scheduled
+while a worker slept shortens the sleep.
+
+`TimePoint::max()` is the default `now`, meaning "time is not a constraint", so every
+existing call site and test that never schedules a backoff is unaffected and does not have
+to think about it.
+
+### `maxRetryAttempts` is read with `value()`, not `at()`
+
+Every other field in `Settings::FromJson` uses `at()`. That is fine for a field that has
+always existed and wrong for one being added: `LoadFrom` catches a parse failure by falling
+back to `Settings::Defaults()`, so a settings file written before this field existed — a
+completely normal thing to find on disk after an upgrade — would have silently discarded
+every setting the user had chosen. An additive field must default, not fail.
+
+### Integration and stress suites are separate binaries, not more files in `mediatool_tests`
+
+The unit suite is fast (about 15 seconds) and that is why it gets run constantly. Adding a
+suite that spawns real subprocesses, and another that submits hundreds of jobs across four
+worker threads, would have taken that away from every developer on every build to buy
+coverage that is only meaningful when run deliberately.
+
+So `mediatool_integration_tests` and `mediatool_stress_tests` are their own executables,
+gated behind `scripts/ci-local.ps1 -IntegrationTest` / `-StressTest`. CMake passes the
+built `mediatool-core` path into the integration binary as a compile definition
+(`$<TARGET_FILE:mediatool-core>`), so it always drives the binary that was just built
+rather than whatever happens to be on PATH.
+
+The integration tests redirect `LOCALAPPDATA` into a per-test temporary directory, so the
+child's settings file, job history and in-progress-job store are never the developer's
+real ones, and point `MEDIATOOL_PYTHON_PATH`/`MEDIATOOL_DOWNLOADER_SCRIPT` at real existing
+files so the downloader-availability gate passes and the validation behind it is reachable.
+
+What they cannot cover on a POSIX build host is recorded in the file itself: anything
+needing a path to survive `IsSafeUserSuppliedPath`, which requires a Windows-shaped
+absolute path by design. Those paths work on Windows and here can only be exercised in
+their rejecting direction.
+
+### The IPC integration tests found a real defect on their first run: `RealProcessRunner` writes
+
+`RealProcess`'s header states the invariant plainly -- reproc does not support two threads
+operating on one process handle, so **only** the drain thread may touch `process_`, which is
+why `Terminate()`/`Kill()` set a flag for that thread instead of acting directly.
+`WriteLine()` and `CloseStdin()` did not follow it: both called into `process_` from the
+caller's thread.
+
+The consequence was invisible in production and immediate under test. The only production
+caller, `YtDlpProvider::RunPythonCommand`, writes exactly one command line and then closes
+stdin, so a *second* write to a live child had never happened. The IPC integration tests
+write repeatedly, and the second write to a running `mediatool-core` fails with
+`REPROC_EINVAL` — reproducibly, from the first run of the first test.
+
+Writes and the stdin close are now queued and performed by the drain thread, with the
+caller blocking until the result is known so `WriteLine` keeps its synchronous
+"wrote it, or threw" contract. Two things fell out of the fix:
+
+* **Partial writes were being discarded.** `reproc::process::write()` reports how much it
+  managed to write, and the old code ignored that count, silently truncating anything the
+  pipe could not take in one go. The queued path loops until the buffer is written, which is
+  what makes the 4 MB oversized-line test meaningful rather than accidentally passing.
+* **The poll interval dropped from 200ms to 50ms.** A queued write waits at most one poll
+  interval, and the same interval already bounded how quickly `Terminate()`/`Kill()` take
+  effect — so the shorter window helps both. The integration suite went from 29s to 4.8s.
+
+### Stress tests assert outcomes, never durations
+
+There is exactly one timing assertion in the stress suite, and it is a 10-second ceiling on
+shutting down a manager with 500 queued jobs -- a bound that separates "cancelled the queue"
+from "ran the queue", not a performance target. Everything else asserts that every job
+reached a terminal state, that no job ran more times than the retry policy allows, and that
+no snapshot was ever torn.
+
+A stress test that fails on a loaded CI box teaches people to re-run it until it passes,
+which is worse than not having it.
+
+### ffmpeg's stderr was the missing information all along
+
+`RunFfmpegJob` passed a callback literally named `ignoreStderr`, so every ffmpeg failure
+became `E_FFMPEG_FAILED` plus an exit code. "The disk is full", "that folder is read-only",
+"this file is corrupt" and "your ffmpeg build has no such encoder" were the same error to
+the frontend, to the user, and to the retry policy — and the text distinguishing them was
+on the child's stderr the entire time, being thrown away.
+
+A bounded tail is now kept and run through `engines/ffmpeg/FFmpegErrorClassifier`, a
+substring table over ffmpeg's own prose. It is a heuristic, for the same reason
+`downloader.py`'s is: ffmpeg has no stable machine-readable error vocabulary, and exit codes
+carry even less. Strings were verified against ffmpeg 6.1.1's real output where they could
+be produced locally (a truncated mp4, an unknown encoder, a missing input); the
+errno-derived ones come from ffmpeg printing `strerror()` through `av_err2str`, the same
+path that produced the confirmed "No such file or directory". Anything unrecognized keeps
+the generic code and the stderr tail rather than being guessed at.
+
+Each classification decides three things the call site cannot: the code, the **category**
+— which is what `RetryPolicy` vetoes on, so getting `InvalidFile` rather than `EngineFailure`
+is what stops a corrupt file being re-encoded three times — and what the user should try
+instead. A failed *probe* uses the same table with a different default: ffprobe being unable
+to read a file is the definition of "not a media file", so an unrecognized probe failure is
+`E_INVALID_FILE`, not a generic engine failure.
+
+### The watchdog cancels; it does not force-kill, and says so
+
+The plan called for force-killing jobs past 12 hours after a 30-second grace period. Half of
+that is implementable and half is not, and it is worth being precise about which.
+
+Requesting cancellation is genuinely effective: `DownloadJob` and `MediaProcessingJob` poll
+`IsCancellationRequested()`, and both engines terminate — then kill — their child process on
+seeing it, so a wedged ffmpeg or yt-dlp really does die and the slot really is freed. What
+cannot be done is force a job whose `Execute()` ignores cancellation to return. That thread
+belongs to the job, and there is no portable way to reclaim it without killing the process.
+
+So after the grace period the watchdog logs the job as unresponsive and leaves it alone. The
+alternative — marking it `FAILED` while its worker thread is still running — would report a
+worker slot as free when it is not, which is a worse failure than the one being reported.
+
+The watchdog sleeps on the same condition variable the workers use, so `Shutdown()` wakes it
+immediately rather than waiting out its 30-second interval, and it measures the **current
+attempt** (`Job::RunningFor()`, on `steady_clock`) rather than the job's lifetime — a job on
+its third retry has not been running for the sum of its attempts, and treating it that way
+would cancel healthy retries.
+
+### The downloader health probe is lazy, and never fatal
+
+yt-dlp's extractors for the big sites break on a scale of weeks. A build a couple of years
+old does not fail cleanly — it fails on real URLs with "video unavailable", blaming the
+video for what is actually a stale tool. Since yt-dlp's version string is a release date,
+its own staleness is computable.
+
+The probe runs at most once per process and only when something asks, rather than at
+startup: it starts a process, which would slow every cold start for information most
+sessions never need, and it would run before the user has had a chance to point
+`advanced.ytDlpPath` somewhere that works. It is never fatal, in either direction — a
+missing yt_dlp comes back as `available: false` rather than an exception (that is the
+question being asked), and a stale one warns rather than refusing a download the user might
+well get.
+
+### The watchdog needs its own condition variable, not the workers'
+
+Adding the watchdog to `queueCv_` — the same variable the worker pool waits on — made it a
+competing waiter, and `SubmitJob`/`RetryJob` wake a worker with `notify_one`, which picks an
+arbitrary waiter. So a submission could wake the watchdog instead: it checked `stopping_`,
+found it false, went back to sleep, and had consumed the wakeup. The queued job then sat
+there until something else happened to notify.
+
+It failed loudly and immediately -- three retry tests and two IPC integration tests went
+from passing to timing out -- which is the argument for having written them. `watchdogCv_`
+uses the same `mutex_` (it reads `jobs_`) but is signalled only by `Shutdown()`, so the
+two wakeup paths cannot steal from each other.
