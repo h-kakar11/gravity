@@ -202,6 +202,14 @@ struct AppContext {
     jobs::InProgressJobStore inProgressJobStore{jobs::DefaultInProgressJobsFilePath()};
     settings::PresetStore presetStore{settings::DefaultPresetsFilePath()};
 
+    // The downloader health probe starts a process, so it runs at most once and only when
+    // something actually asks. Cached rather than probed at startup: a probe on every
+    // launch would slow a cold start for information most sessions never need, and it
+    // would run before the user has had a chance to point `advanced.ytDlpPath` somewhere
+    // that works.
+    std::once_flag downloaderInfoOnce;
+    downloads::DownloaderInfo downloaderInfo;
+
     // Tracks each job's previous state purely to classify the Running state as either
     // "resumed from pause" or "(re)started" when JobManager reports a transition -- see
     // the comment on PublishJobStateChanged below.
@@ -238,6 +246,29 @@ void EnsureDownloaderAvailable(const AppContext& app) {
     if (app.pythonTool.path.empty()) ThrowDownloaderToolMissing("Python interpreter", app.pythonTool);
     if (app.downloaderScriptTool.path.empty())
         ThrowDownloaderToolMissing("downloader.py script", app.downloaderScriptTool);
+}
+
+// Probes the downloader once per process and remembers the answer. The warning is logged
+// from here rather than from a startup path so it appears the first time it is relevant --
+// which is also the first time a user could act on it.
+const downloads::DownloaderInfo& DownloaderInfoCached(AppContext& app) {
+    std::call_once(app.downloaderInfoOnce, [&app] {
+        app.downloaderInfo = app.ytDlpProvider.Info();
+        if (!app.downloaderInfo.available) {
+            logging::Log::Warning("downloader",
+                                   "The downloader backend is not usable: yt-dlp could not be "
+                                   "loaded by the configured Python interpreter. Downloads will "
+                                   "fail until it is installed.");
+        } else if (app.downloaderInfo.stale) {
+            logging::Log::Warning(
+                "downloader",
+                "yt-dlp " + app.downloaderInfo.version.value_or("(unknown version)") + " is " +
+                    std::to_string(app.downloaderInfo.ageDays.value_or(0)) +
+                    " days old. Site extractors break within weeks, so downloads are likely to "
+                    "fail with errors that look like the video's fault. Update it.");
+        }
+    });
+    return app.downloaderInfo;
 }
 
 // --- event publishing from JobManager callbacks -----------------------------------------
@@ -489,6 +520,11 @@ std::unique_ptr<jobs::Job> BuildDownloadJob(AppContext& app, const json& jobPara
     // Fail here, with the candidate list, rather than letting the job start and die inside
     // a worker thread with CreateProcess's opaque message (issue #79).
     EnsureDownloaderAvailable(app);
+    // The paths exist; whether the backend behind them actually works is a separate
+    // question, and this is the first moment it matters. Probed once per process, and
+    // never fatal -- a stale yt-dlp still works for many sites, so this warns rather than
+    // refusing a download the user might well get.
+    (void)DownloaderInfoCached(app);
     // #11: reject traversal and (unless explicitly opted into) UNC output directories --
     // previously any string was accepted as-is.
     const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
@@ -590,6 +626,18 @@ std::unique_ptr<jobs::Job> BuildMediaProcessingJob(AppContext& app, const json& 
             "The output directory must be an absolute path with no \"..\" segments" +
                 std::string(allowNetworkPaths ? "." : ", and network (UNC) paths are not enabled."),
             "outputDirectory=" + outputDirectory));
+    }
+
+    // The same coarse floor DOWNLOAD already had. A conversion writes a file too, and
+    // running out of space mid-encode wastes however long the encode had been running --
+    // catching "the drive is already essentially full" here costs one stat call.
+    constexpr std::uint64_t kMinFreeBytesForProcessing = 100ull * 1024 * 1024;
+    if (auto available = app.fileSystem.GetAvailableDiskSpace(outputDirectory);
+        available && *available < kMinFreeBytesForProcessing) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INSUFFICIENT_DISK_SPACE", errors::ErrorCategory::DiskSpaceError,
+            "Not enough free disk space at the selected output directory.",
+            "available=" + std::to_string(*available) + " bytes"));
     }
 
     const json& processingOptions = OptionalObject(jobParams, "options");
@@ -798,6 +846,10 @@ json HandleUpdateSettings(AppContext& app, const json& params) {
     return {{"settings", updated.ToJson()}};
 }
 
+json HandleGetDownloaderInfo(AppContext& app, const json&) {
+    return {{"downloaderInfo", DownloaderInfoCached(app).ToJson()}};
+}
+
 json HandleGetHardwareInfo(AppContext& app, const json&) {
     return {{"hardwareInfo", app.hardwareDetector.Detect().ToJson()}};
 }
@@ -909,6 +961,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
         {"getHardwareInfo", HandleGetHardwareInfo},
+        {"getDownloaderInfo", HandleGetDownloaderInfo},
         {"getMediaEngineCapabilities", HandleGetMediaEngineCapabilities},
         {"listPresets", HandleListPresets},
         {"savePreset", HandleSavePreset},

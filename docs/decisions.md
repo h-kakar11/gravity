@@ -726,3 +726,76 @@ no snapshot was ever torn.
 
 A stress test that fails on a loaded CI box teaches people to re-run it until it passes,
 which is worse than not having it.
+
+### ffmpeg's stderr was the missing information all along
+
+`RunFfmpegJob` passed a callback literally named `ignoreStderr`, so every ffmpeg failure
+became `E_FFMPEG_FAILED` plus an exit code. "The disk is full", "that folder is read-only",
+"this file is corrupt" and "your ffmpeg build has no such encoder" were the same error to
+the frontend, to the user, and to the retry policy — and the text distinguishing them was
+on the child's stderr the entire time, being thrown away.
+
+A bounded tail is now kept and run through `engines/ffmpeg/FFmpegErrorClassifier`, a
+substring table over ffmpeg's own prose. It is a heuristic, for the same reason
+`downloader.py`'s is: ffmpeg has no stable machine-readable error vocabulary, and exit codes
+carry even less. Strings were verified against ffmpeg 6.1.1's real output where they could
+be produced locally (a truncated mp4, an unknown encoder, a missing input); the
+errno-derived ones come from ffmpeg printing `strerror()` through `av_err2str`, the same
+path that produced the confirmed "No such file or directory". Anything unrecognized keeps
+the generic code and the stderr tail rather than being guessed at.
+
+Each classification decides three things the call site cannot: the code, the **category**
+— which is what `RetryPolicy` vetoes on, so getting `InvalidFile` rather than `EngineFailure`
+is what stops a corrupt file being re-encoded three times — and what the user should try
+instead. A failed *probe* uses the same table with a different default: ffprobe being unable
+to read a file is the definition of "not a media file", so an unrecognized probe failure is
+`E_INVALID_FILE`, not a generic engine failure.
+
+### The watchdog cancels; it does not force-kill, and says so
+
+The plan called for force-killing jobs past 12 hours after a 30-second grace period. Half of
+that is implementable and half is not, and it is worth being precise about which.
+
+Requesting cancellation is genuinely effective: `DownloadJob` and `MediaProcessingJob` poll
+`IsCancellationRequested()`, and both engines terminate — then kill — their child process on
+seeing it, so a wedged ffmpeg or yt-dlp really does die and the slot really is freed. What
+cannot be done is force a job whose `Execute()` ignores cancellation to return. That thread
+belongs to the job, and there is no portable way to reclaim it without killing the process.
+
+So after the grace period the watchdog logs the job as unresponsive and leaves it alone. The
+alternative — marking it `FAILED` while its worker thread is still running — would report a
+worker slot as free when it is not, which is a worse failure than the one being reported.
+
+The watchdog sleeps on the same condition variable the workers use, so `Shutdown()` wakes it
+immediately rather than waiting out its 30-second interval, and it measures the **current
+attempt** (`Job::RunningFor()`, on `steady_clock`) rather than the job's lifetime — a job on
+its third retry has not been running for the sum of its attempts, and treating it that way
+would cancel healthy retries.
+
+### The downloader health probe is lazy, and never fatal
+
+yt-dlp's extractors for the big sites break on a scale of weeks. A build a couple of years
+old does not fail cleanly — it fails on real URLs with "video unavailable", blaming the
+video for what is actually a stale tool. Since yt-dlp's version string is a release date,
+its own staleness is computable.
+
+The probe runs at most once per process and only when something asks, rather than at
+startup: it starts a process, which would slow every cold start for information most
+sessions never need, and it would run before the user has had a chance to point
+`advanced.ytDlpPath` somewhere that works. It is never fatal, in either direction — a
+missing yt_dlp comes back as `available: false` rather than an exception (that is the
+question being asked), and a stale one warns rather than refusing a download the user might
+well get.
+
+### The watchdog needs its own condition variable, not the workers'
+
+Adding the watchdog to `queueCv_` — the same variable the worker pool waits on — made it a
+competing waiter, and `SubmitJob`/`RetryJob` wake a worker with `notify_one`, which picks an
+arbitrary waiter. So a submission could wake the watchdog instead: it checked `stopping_`,
+found it false, went back to sleep, and had consumed the wakeup. The queued job then sat
+there until something else happened to notify.
+
+It failed loudly and immediately -- three retry tests and two IPC integration tests went
+from passing to timing out -- which is the argument for having written them. `watchdogCv_`
+uses the same `mutex_` (it reads `jobs_`) but is signalled only by `Shutdown()`, so the
+two wakeup paths cannot steal from each other.

@@ -18,6 +18,7 @@
 // Phase 1, and a later integration pass bridges those callbacks into the EventBus.
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -75,6 +76,12 @@ public:
     // one transition every attempt goes through (MarkRunning), so it counts attempts
     // rather than transitions.
     int AttemptCount() const { return attemptCount_; }
+
+    // How long the CURRENT attempt has been running, or nullopt if this job is not
+    // running. steady_clock, so a wall-clock correction cannot make a job look hours old;
+    // StartedAt() stays the human-readable timestamp and is not a substitute, because it
+    // is a system_clock ISO string and is not reset per attempt.
+    std::optional<std::chrono::steady_clock::duration> RunningFor() const;
     // Seeds the counter for a job rebuilt after a crash, so a restart does not hand it a
     // fresh retry budget and let a permanently-broken job retry forever, three at a time,
     // for as long as the user keeps relaunching. Set before submission; never afterwards.
@@ -205,6 +212,9 @@ private:
     // JobManager's retry decision on a worker thread while an IPC thread may be building
     // a snapshot, and it needs no consistency with any other field.
     std::atomic<int> attemptCount_{0};
+    // Set on each transition into Running; guarded by mutex_ alongside state_ so "is it
+    // running, and since when" is answered from one consistent read.
+    std::optional<std::chrono::steady_clock::time_point> runningSince_;
     std::vector<JobId> dependsOn_;
 
     StateChangedCallback onStateChanged_;

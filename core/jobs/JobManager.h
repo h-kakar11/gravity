@@ -17,6 +17,7 @@
 // priority, dependencies and eligibility, with no threads of its own. JobManager calls
 // into it under mutex_ and never lets a Job callback fire while holding that lock.
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <map>
@@ -38,6 +39,22 @@
 #include "core/jobs/SchedulerCore.h"
 
 namespace mediatool::jobs {
+
+// Bounds how long one attempt at a job may run before the manager stops it. This is a
+// stuck-job backstop, not a scheduling policy -- the default is deliberately far longer
+// than any legitimate job (a 4K download on a slow line, an all-night transcode) so it
+// only ever fires on something that is genuinely wedged.
+struct JobWatchdogPolicy {
+    // Zero disables the watchdog entirely, which is what a test that wants a job to run
+    // as long as it likes should pass.
+    std::chrono::steady_clock::duration maxJobDuration = std::chrono::hours(12);
+    // After cancellation is requested, how long a job gets to notice and stop before
+    // the manager gives up on it and says so. There is deliberately nothing stronger
+    // to escalate to -- see the note on the watchdog in JobManager.cpp.
+    std::chrono::steady_clock::duration cancellationGrace = std::chrono::seconds(30);
+    // How often the watchdog looks. Also how long Shutdown() may wait for it.
+    std::chrono::steady_clock::duration checkInterval = std::chrono::seconds(30);
+};
 
 class JobManager {
 public:
@@ -80,7 +97,9 @@ public:
     // recoverable failure twice with exponential backoff. Pass `RetryPolicy{.maxAttempts
     // = 1}` to disable it entirely, which is what a test that wants a failure to stay
     // failed should do.
-    explicit JobManager(std::size_t maxConcurrentJobs = 1, RetryPolicy retryPolicy = RetryPolicy{});
+
+    explicit JobManager(std::size_t maxConcurrentJobs = 1, RetryPolicy retryPolicy = RetryPolicy{},
+                        JobWatchdogPolicy watchdogPolicy = JobWatchdogPolicy{});
     ~JobManager();
 
     JobManager(const JobManager&) = delete;
@@ -150,6 +169,10 @@ public:
 
 private:
     void WorkerLoop();
+    // Runs on its own thread: finds attempts that have exceeded the watchdog's limit,
+    // requests cancellation, and reports the ones that do not stop. Sleeps on the same
+    // condition variable the workers use, so Shutdown() wakes it immediately.
+    void WatchdogLoop();
     void RunJob(const JobId& id);
     // Runs the testing-only interleaving hook, then attempts this job's QUEUED ->
     // STARTING claim, returning that attempt's result.
@@ -177,8 +200,9 @@ private:
 
     // Not const: fixed up in the constructor body once the pool's real size is known.
     std::size_t maxConcurrentJobs_ = 0;
-    // Immutable after construction, so it needs no lock.
+    // Immutable after construction, so they need no lock.
     RetryPolicy retryPolicy_;
+    JobWatchdogPolicy watchdogPolicy_;
 
     mutable std::mutex mutex_;
     std::map<JobId, std::unique_ptr<Job>> jobs_;
@@ -187,6 +211,14 @@ private:
     // subsystem rather than two that could be taken in two orders.
     SchedulerCore scheduler_;
     std::condition_variable queueCv_;
+    // The watchdog gets its OWN condition variable even though it waits on the same
+    // mutex_. Sharing queueCv_ makes it a competing waiter: SubmitJob and RetryJob wake a
+    // worker with notify_one, which picks an arbitrary waiter, so the notification can go
+    // to the watchdog -- which sees `stopping_` is false, goes back to sleep, and has
+    // consumed the wakeup. The queued job then sits there until something else happens to
+    // notify. That is a lost wakeup, and it showed up as retries and freshly submitted
+    // jobs simply never starting.
+    std::condition_variable watchdogCv_;
     bool stopping_ = false;
 
     JobStateChangedCallback stateChangedCallback_;
@@ -194,6 +226,10 @@ private:
     std::function<void(const JobId&)> preMarkStartingHookForTesting_;
 
     std::vector<std::thread> workers_;
+    // Ids the watchdog has already cancelled, with the moment it did so, to tell "asked it
+    // to stop just now" from "asked it to stop and it is still here 30 seconds later".
+    std::map<JobId, std::chrono::steady_clock::time_point> watchdogCancelledAt_;
+    std::thread watchdog_;
 };
 
 }  // namespace mediatool::jobs

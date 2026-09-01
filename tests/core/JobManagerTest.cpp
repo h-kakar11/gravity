@@ -578,3 +578,114 @@ TEST(JobManagerRetry, AJobWaitingOutABackoffCanStillBeCancelled) {
                JobState::Cancelled);
 }
 
+// --- Stuck-job watchdog (Phase E) -----------------------------------------------------
+
+namespace {
+
+// Runs until cancelled, then stops -- a well-behaved long job, which is what the watchdog
+// is supposed to be able to stop.
+class RunsUntilCancelledJob final : public mediatool::jobs::Job {
+public:
+    RunsUntilCancelledJob() : Job(JobType::Test) {}
+    void Execute() override {
+        while (!IsCancellationRequested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        throw MediaToolException(
+            ErrorInfo::Make("E_TEST_CANCELLED", ErrorCategory::Cancelled, "cancelled"));
+    }
+};
+
+mediatool::jobs::JobWatchdogPolicy ImpatientWatchdog() {
+    mediatool::jobs::JobWatchdogPolicy policy;
+    policy.maxJobDuration = std::chrono::milliseconds(50);
+    policy.cancellationGrace = std::chrono::milliseconds(50);
+    policy.checkInterval = std::chrono::milliseconds(10);
+    return policy;
+}
+
+mediatool::jobs::RetryPolicy NoRetryPolicy() {
+    mediatool::jobs::RetryPolicy policy;
+    policy.maxAttempts = 1;
+    return policy;
+}
+
+}  // namespace
+
+TEST(JobManagerWatchdog, AJobThatRunsPastItsLimitIsCancelled) {
+    // The whole point: a job wedged on a network read or a hung ffmpeg does not hold a
+    // worker slot forever. Cancellation is genuinely effective here because both real job
+    // types propagate it to their child process.
+    JobManager manager(1, NoRetryPolicy(), ImpatientWatchdog());
+    const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>());
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+TEST(JobManagerWatchdog, AShortJobIsNeverTouchedByTheWatchdog) {
+    // The limit is a backstop, not a scheduling policy. A job that finishes normally must
+    // never be affected by it, and the watchdog must forget it rather than accumulating
+    // state for every job that ever ran.
+    JobManager manager(1, NoRetryPolicy(), ImpatientWatchdog());
+    const auto id = manager.SubmitJob(std::make_unique<InstantJob>());
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Completed; }),
+               JobState::Completed);
+    // Still Completed a few watchdog ticks later -- nothing cancels it after the fact.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(manager.GetJob(id).state, JobState::Completed);
+}
+
+TEST(JobManagerWatchdog, AZeroLimitDisablesTheWatchdogEntirely) {
+    mediatool::jobs::JobWatchdogPolicy disabled;
+    disabled.maxJobDuration = std::chrono::steady_clock::duration::zero();
+    JobManager manager(1, NoRetryPolicy(), disabled);
+
+    const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>());
+    // Long enough that an enabled watchdog at any sane interval would have fired.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(manager.GetJob(id).state, JobState::Running);
+
+    manager.CancelJob(id);
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+TEST(JobManagerWatchdog, ShutdownJoinsTheWatchdogPromptlyRatherThanWaitingOutItsInterval) {
+    // The watchdog sleeps on the same condition variable the workers use, so `stopping_`
+    // wakes it immediately. Sleeping on a bare timer instead would add its whole interval
+    // to every shutdown.
+    mediatool::jobs::JobWatchdogPolicy slowInterval;
+    slowInterval.maxJobDuration = std::chrono::hours(12);
+    slowInterval.checkInterval = std::chrono::seconds(30);
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    {
+        JobManager manager(1, NoRetryPolicy(), slowInterval);
+        (void)manager.SubmitJob(std::make_unique<InstantJob>());
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - startedAt, std::chrono::seconds(5));
+}
+
+TEST(JobManagerWatchdog, RunningForIsPerAttemptAndUnsetWhenNotRunning) {
+    // The watchdog measures the CURRENT attempt, not the job's lifetime: a job that has
+    // been retried twice has not been running for the sum of its attempts, and treating it
+    // that way would cancel healthy retries.
+    mediatool::jobs::TestJob job;
+    EXPECT_FALSE(job.RunningFor().has_value());  // still Queued
+
+    ASSERT_EQ(job.MarkStarting(), mediatool::jobs::TransitionResult::Success);
+    EXPECT_FALSE(job.RunningFor().has_value());  // Starting is not Running
+
+    ASSERT_EQ(job.MarkRunning(), mediatool::jobs::TransitionResult::Success);
+    ASSERT_TRUE(job.RunningFor().has_value());
+    EXPECT_GE(*job.RunningFor(), std::chrono::steady_clock::duration::zero());
+
+    ASSERT_EQ(job.MarkCompleted(), mediatool::jobs::TransitionResult::Success);
+    EXPECT_FALSE(job.RunningFor().has_value());
+}
+

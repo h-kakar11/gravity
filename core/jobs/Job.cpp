@@ -215,6 +215,7 @@ TransitionResult Job::MarkRunning() {
         result = TransitionLocked(JobState::Running);
         if (result == TransitionResult::Success) {
             if (!startedAt_) startedAt_ = clock_.NowIso8601Utc();
+            runningSince_ = std::chrono::steady_clock::now();
             // Every attempt -- the first and every retry alike -- reaches Running through
             // exactly this transition, which is what makes this a count of attempts
             // rather than of anything else that happens to a job.
@@ -223,6 +224,12 @@ TransitionResult Job::MarkRunning() {
     }
     if (result == TransitionResult::Success) FireStateChanged(JobState::Running);
     return result;
+}
+
+std::optional<std::chrono::steady_clock::duration> Job::RunningFor() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != JobState::Running || !runningSince_) return std::nullopt;
+    return std::chrono::steady_clock::now() - *runningSince_;
 }
 
 TransitionResult Job::MarkCompleted() {

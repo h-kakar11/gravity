@@ -39,6 +39,9 @@ struct DownloaderTimeouts {
     // to survive yt-dlp's own internal retries without cutting off a slow-but-working
     // extractor -- it exists to bound a hang, not to enforce a latency target.
     std::chrono::milliseconds inspect{std::chrono::seconds(60)};
+    // The version probe touches no network at all, so anything beyond interpreter startup
+    // means something is wrong and waiting longer will not help.
+    std::chrono::milliseconds version{std::chrono::seconds(15)};
 };
 
 class YtDlpProvider : public downloads::IDownloadProvider {
@@ -58,6 +61,11 @@ public:
     // youtube.com-only, so this extends to other yt-dlp-supported sites later (spec
     // section 20). yt-dlp itself rejects what it can't actually handle.
     bool CanHandle(const std::string& url) const override;
+
+    // Runs downloader.py's "version" command. Never throws: an interpreter that will not
+    // start, a script that is not there, or a missing yt_dlp all come back as
+    // `available = false`, which is the answer the caller asked for.
+    downloads::DownloaderInfo Info() override;
 
     downloads::DownloadMetadata Inspect(const std::string& url,
                                          downloads::CancelledCallback isCancelled) override;

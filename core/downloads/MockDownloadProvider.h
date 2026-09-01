@@ -18,6 +18,10 @@ class MockDownloadProvider : public IDownloadProvider {
 public:
     bool CanHandle(const std::string& url) const override;
 
+    // Scriptable, like everything else here; defaults to a healthy modern backend so a
+    // test that does not care about downloader health does not have to say so.
+    DownloaderInfo Info() override { return info; }
+
     DownloadMetadata Inspect(const std::string& url, CancelledCallback isCancelled) override;
 
     void Download(const DownloadOptions& options, MetadataCallback onMetadata,
@@ -25,6 +29,7 @@ public:
                   CancelledCallback isCancelled) override;
 
     // --- scripting -----------------------------------------------------------------
+    DownloaderInfo info{/*available=*/true, "yt-dlp", std::string("2026.08.19"), 0, false};
     // Returned by Inspect(), and replayed to Download()'s onMetadata callback.
     DownloadMetadata inspectResult;
     std::optional<errors::ErrorInfo> inspectError;  // if set, Inspect() throws this instead

@@ -290,3 +290,46 @@ TEST(FFmpegEngineTest, AvailableEncodersIsProbedExactlyOnceUnderConcurrentUse) {
             << "every thread must observe the same fully-initialized encoder set";
     }
 }
+
+TEST(FFmpegEngineTest, AFailedConversionReportsWhyRatherThanJustAnExitCode) {
+    // ffmpeg's stderr used to be discarded outright (the callback was literally named
+    // ignoreStderr), so every failure came back as E_FFMPEG_FAILED plus an exit code --
+    // the disk being full, the folder being read-only and the file being corrupt were all
+    // the same error to the frontend, to the user, and to the retry policy.
+    MockProcessRunner runner({}, {"[out#0/mp4 @ 0x55] Error writing trailer: No space left on device"},
+                              1);
+    FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
+    auto noopProgress = [](const mediatool::jobs::Progress&) {};
+    auto neverCancelled = []() { return false; };
+
+    try {
+        engine.Convert("C:\\in\\a.mov", "C:\\out\\b.mp4", {{"outputFormat", "mp4"}},
+                        noopProgress, neverCancelled);
+        FAIL() << "expected the conversion to fail";
+    } catch (const MediaToolException& ex) {
+        EXPECT_EQ(ex.Info().code, "E_DISK_FULL");
+        EXPECT_EQ(ex.Info().category, ErrorCategory::DiskSpaceError);
+        // The raw stderr survives in details even though the message is now a sentence a
+        // user can act on -- it is the only record of what ffmpeg actually said.
+        EXPECT_NE(ex.Info().details.find("No space left on device"), std::string::npos);
+    }
+}
+
+TEST(FFmpegEngineTest, AProbeFailureSaysTheFileIsUnreadableNotThatTheEngineBroke) {
+    // Category, not just code: EngineFailure is retryable and InvalidFile is not, and
+    // re-probing the same corrupt file cannot succeed.
+    MockProcessRunner runner({}, {"[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55] moov atom not found"}, 1);
+    FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
+
+    // Probe() existence-checks first, so point it at a file that really is there.
+    const std::string self = __FILE__;
+    try {
+        (void)engine.Probe(self);
+        FAIL() << "expected the probe to fail";
+    } catch (const MediaToolException& ex) {
+        EXPECT_EQ(ex.Info().code, "E_INVALID_FILE");
+        EXPECT_EQ(ex.Info().category, ErrorCategory::InvalidFile);
+        EXPECT_FALSE(ex.Info().recoverable);
+    }
+}
+

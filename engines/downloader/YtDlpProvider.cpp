@@ -219,6 +219,42 @@ YtDlpProvider::RunOutcome YtDlpProvider::RunPythonCommand(
     return outcome;
 }
 
+downloads::DownloaderInfo YtDlpProvider::Info() {
+    downloads::DownloaderInfo info;  // available = false until the probe says otherwise
+
+    nlohmann::json command;
+    command["command"] = "version";
+    command["params"] = nlohmann::json::object();
+
+    auto onEvent = [&info](downloads::DownloaderEventType type, const nlohmann::json& data) {
+        // downloader.py emits this as its own event kind, which GetDownloaderEventType
+        // does not know -- the generic branch is where forward-compatible event types
+        // land, and reading the payload shape is enough to identify it.
+        if (type != downloads::DownloaderEventType::Unknown) return;
+        if (!data.contains("available")) return;
+        info.available = data.value("available", false);
+        info.version = OptionalString(data, "ytDlpVersion");
+        info.ageDays = OptionalInt(data, "ageDays");
+        info.stale = data.value("stale", false);
+    };
+
+    try {
+        const RunOutcome outcome =
+            RunPythonCommand(command, onEvent, nullptr, "E_VERSION_CANCELLED",
+                              "Version probe was cancelled.", timeouts_.version,
+                              "E_VERSION_TIMEOUT", "Timed out probing the downloader.");
+        if (!outcome.completedReceived) {
+            info.available = false;
+        }
+    } catch (const errors::MediaToolException&) {
+        // A python that will not start, a script that is not there, a probe that hung.
+        // "Not usable" is the answer, not an error to propagate -- the caller asked
+        // whether the downloader works, and it does not.
+        info.available = false;
+    }
+    return info;
+}
+
 downloads::DownloadMetadata YtDlpProvider::Inspect(const std::string& url,
                                                     downloads::CancelledCallback isCancelled) {
     nlohmann::json params;

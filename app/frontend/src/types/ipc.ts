@@ -24,6 +24,7 @@ export type CoreCommand =
   | "inspectFile"
   | "inspectDownloadUrl"
   | "getCapabilities"
+  | "getDownloaderInfo"
   | "getSettings"
   | "updateSettings"
   | "getHardwareInfo"
@@ -67,6 +68,7 @@ export interface CommandParams {
   inspectFile: { path: string };
   inspectDownloadUrl: { url: string };
   getCapabilities: { path: string };
+  getDownloaderInfo: Record<string, never>;
   getSettings: Record<string, never>;
   updateSettings: { settings: Partial<Settings> };
   getHardwareInfo: Record<string, never>;
@@ -96,6 +98,18 @@ export interface CommandResult {
     // fails with E_NOT_IMPLEMENTED; `reason` is user-facing and safe to render verbatim
     // (see core/media/DeferredOperations.h).
     deferredCapabilities: Array<{ capability: string; reason: string }>;
+  };
+  // Whether the yt-dlp backend is usable, and how old it is. `stale` means its extractors
+  // are old enough that downloads are likely to fail with errors that look like the
+  // video's fault -- worth surfacing before the user blames the link.
+  getDownloaderInfo: {
+    downloaderInfo: {
+      available: boolean;
+      backend: string;
+      version: string | null;
+      ageDays: number | null;
+      stale: boolean;
+    };
   };
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };

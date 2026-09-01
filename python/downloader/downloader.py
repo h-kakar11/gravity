@@ -7,6 +7,7 @@ runs in provides nothing else.
 Three modes, mutually exclusive:
   --selftest       emits a canned event sequence, no network access, exits 0.
   --command-stdin  reads one JSON command line from stdin, then acts on it:
+                      {"command": "version", "params": {}}
                       {"command": "inspect", "params": {"url": ...}}
                       {"command": "download", "params": {"url", "outputDir",
                                                           "formatSelector", "filenameBase",
@@ -113,10 +114,25 @@ _KNOWN_FAILURE_PATTERNS = (
     ("postprocessing:", "E_MERGE_FAILED", "ENGINE_FAILURE", False),
 )
 
-_NETWORK_TYPES = (socket.timeout, socket.gaierror, ConnectionError, TimeoutError, urllib.error.URLError)
+# Per-socket-operation bound applied to every yt-dlp call this script makes. It is NOT a
+# bound on a whole fetch -- a fetch is many socket operations and yt-dlp retries each one --
+# which is why the C++ side layers a wall-clock deadline on top for inspect (see
+# engines/downloader/YtDlpProvider.h). This one exists so a single stalled connect or read
+# cannot hang forever underneath that deadline. One constant so the two call sites cannot
+# drift apart.
+_SOCKET_TIMEOUT_SECONDS = 30
+
+# A timeout is a network failure, but not an interchangeable one: it is the network failure
+# most likely to succeed on a second attempt, and the retry policy reads the code as well as
+# the flag. Split out so "the host stopped responding" and "the host does not exist" are not
+# the same event.
+_TIMEOUT_TYPES = (socket.timeout, TimeoutError)
+_NETWORK_TYPES = (socket.gaierror, ConnectionError, urllib.error.URLError)
+
+_TIMEOUT_KEYWORDS = ("timed out", "timeout", "the read operation timed out")
 
 _NETWORK_KEYWORDS = (
-    "network", "timed out", "timeout", "connection", "unreachable",
+    "network", "connection", "unreachable",
     "unable to download webpage", "name or service not known",
     "getaddrinfo failed", "dns", "temporary failure in name resolution",
 )
@@ -128,6 +144,8 @@ def classify_exception(exc: BaseException):
     if isinstance(exc, DownloaderError):
         return exc.code, exc.category, exc.recoverable
 
+    if isinstance(exc, _TIMEOUT_TYPES):
+        return "E_NETWORK_TIMEOUT", "NETWORK_ERROR", True
     if isinstance(exc, _NETWORK_TYPES):
         return "E_NETWORK", "NETWORK_ERROR", True
 
@@ -135,6 +153,10 @@ def classify_exception(exc: BaseException):
     for substring, code, category, recoverable in _KNOWN_FAILURE_PATTERNS:
         if substring in message:
             return code, category, recoverable
+    # Timeout keywords are checked before the general network ones, since "connection timed
+    # out" contains both and the timeout is the more specific reading.
+    if any(keyword in message for keyword in _TIMEOUT_KEYWORDS):
+        return "E_NETWORK_TIMEOUT", "NETWORK_ERROR", True
     if any(keyword in message for keyword in _NETWORK_KEYWORDS):
         return "E_NETWORK", "NETWORK_ERROR", True
 
@@ -238,6 +260,62 @@ def build_metadata_payload(info: dict, url: str) -> dict:
     }
 
 
+# yt-dlp releases are dated (e.g. "2026.8.19"), so its own version string says how stale
+# the extractors are. Two years is generous: extractors for the big sites break on a scale
+# of weeks, so a build this old is almost certainly failing on real URLs and the user should
+# be told that rather than left reading "video unavailable" for every link.
+_YT_DLP_STALE_AFTER_DAYS = 730
+
+
+def _yt_dlp_release_date(version: str):
+    """Parses yt-dlp's dated version string into a date, or None if it isn't one.
+
+    Not every build carries a dated version -- a source checkout can report something like
+    "2026.08.19.123456" or a git description -- so this takes the leading YYYY.MM.DD and
+    ignores whatever follows, and returns None rather than guessing when it can't.
+    """
+    import datetime
+
+    parts = version.split(".")
+    if len(parts) < 3:
+        return None
+    try:
+        return datetime.date(int(parts[0]), int(parts[1]), int(parts[2][:2]))
+    except (TypeError, ValueError):
+        return None
+
+
+def run_version() -> int:
+    """Reports what the downloader stack actually is, so the app can say so before a
+    download fails for a reason the user cannot see.
+
+    Never fails: a missing yt_dlp is reported as `available: false`, not as an error, because
+    "is the downloader usable" is exactly the question being asked.
+    """
+    import datetime
+
+    data = {
+        "available": yt_dlp is not None,
+        "ytDlpVersion": None,
+        "pythonVersion": ".".join(str(part) for part in sys.version_info[:3]),
+        "ageDays": None,
+        "stale": False,
+    }
+
+    if yt_dlp is not None:
+        version = getattr(yt_dlp, "__version__", None) or ""
+        data["ytDlpVersion"] = version or None
+        released = _yt_dlp_release_date(version)
+        if released is not None:
+            age = (datetime.date.today() - released).days
+            data["ageDays"] = age
+            data["stale"] = age > _YT_DLP_STALE_AFTER_DAYS
+
+    emit("version", data)
+    emit("completed", {})
+    return 0
+
+
 def run_selftest() -> int:
     emit("metadata", {
         "title": "MediaTool Self-Test Video",
@@ -286,13 +364,7 @@ _SINGLE_VIDEO_PROBE_OPTS = {
     "skip_download": True,
     "noplaylist": True,
     "extract_flat": "in_playlist",
-    # Bounds how long a single stalled network call can block -- without this, a
-    # unresponsive host leaves inspect() hanging indefinitely, and since it runs
-    # synchronously on the C++ core's single IPC thread (issue #8), that freezes the whole
-    # backend, not just this request. This is a partial mitigation (retries still add up,
-    # and the C++ side has no independent deadline of its own yet) rather than the full
-    # fix issue #8 describes.
-    "socket_timeout": 15,
+    "socket_timeout": _SOCKET_TIMEOUT_SECONDS,
 }
 
 
@@ -385,8 +457,8 @@ def run_download(params: dict) -> int:
             "noplaylist": True,
             # Per-socket-operation bound, not a total-download deadline -- only fires if a
             # single connect/read stalls, so it doesn't cut off a legitimately slow but
-            # progressing large download. See issue #8.
-            "socket_timeout": 15,
+            # progressing large download.
+            "socket_timeout": _SOCKET_TIMEOUT_SECONDS,
         }
         # Points yt-dlp's own internal merge step (when the selector picks separate
         # video+audio streams) at the SAME ffmpeg the C++ core already resolved, instead
@@ -423,6 +495,9 @@ def run_command_stdin() -> int:
             emit_error(exc)
             return 1
         return run_inspect(url)
+
+    if command == "version":
+        return run_version()
 
     if command == "download":
         try:

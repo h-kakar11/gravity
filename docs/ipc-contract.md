@@ -98,6 +98,7 @@ verified without hitting a real URL.
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[], deferredCapabilities: {capability: string, reason: string}[]}` |
+| `getDownloaderInfo` | `{}` | `{downloaderInfo: DownloaderInfo}` |
 | `getSettings` | `{}` | `{settings: Settings}` |
 | `updateSettings` | `{settings: object}` (partial) | `{settings: Settings}` |
 | `getHardwareInfo` | `{}` | `{hardwareInfo: HardwareInfo}` |
@@ -235,6 +236,63 @@ Every job snapshot carries `attempts`: the attempts that have already run, inclu
 one in progress. Compare it against `settings.processing.maxRetryAttempts` to render
 "attempt 2 of 3". The count survives a restart, so a job rebuilt by crash recovery does not
 get a fresh budget.
+
+### Engine failure codes
+
+An ffmpeg or ffprobe failure used to report one code (`E_FFMPEG_FAILED`) and an exit
+status, because the child's stderr was discarded. It is now kept as a bounded tail and
+classified, so the four failures a user can actually act on are distinguishable:
+
+| code | category | meaning |
+|---|---|---|
+| `E_DISK_FULL` | `DISK_SPACE_ERROR` | out of space; the message names the free space at the output location |
+| `E_PERMISSION_DENIED` | `PERMISSION_ERROR` | cannot write there; the message suggests a user-profile folder and antivirus |
+| `E_INVALID_FILE` | `INVALID_FILE` | the input is corrupt or is not a media file |
+| `E_UNSUPPORTED_CODEC` | `UNSUPPORTED_FORMAT` | this ffmpeg build has no such encoder/decoder |
+
+Anything unrecognized keeps `E_FFMPEG_FAILED` with the stderr tail in `details` rather than
+being guessed at. A failed **probe** defaults to `E_INVALID_FILE` instead, since ffprobe
+being unable to read a file is what "not a media file" means. The categories are load-bearing
+beyond display: the retry policy vetoes `DISK_SPACE_ERROR`, `PERMISSION_ERROR`,
+`INVALID_FILE` and `UNSUPPORTED_FORMAT` outright.
+
+`E_NETWORK_TIMEOUT` (`NETWORK_ERROR`, `recoverable: true`) is now distinct from `E_NETWORK`
+in the downloader for the same reason: a timeout is the network failure most likely to
+succeed on a retry. Every yt-dlp call uses a 30-second per-socket timeout, which is a bound
+on one connect/read, not on a fetch — the wall-clock deadline above is what bounds a fetch.
+
+`E_INSUFFICIENT_DISK_SPACE` (`DISK_SPACE_ERROR`) is a coarse 100 MB floor checked at
+`createJob` for `DOWNLOAD`, `CONVERSION` and `COMPRESSION` alike — "the drive is already
+essentially full", caught before an encode runs for an hour and then fails.
+
+### Long-running jobs
+
+One attempt at a job may run for at most 12 hours. Past that the core requests
+cancellation, which is genuinely effective: both job types poll it and both engines
+terminate (then kill) their child process on seeing it. If the job has not stopped 30
+seconds later it is reported in the log as unresponsive and left alone — the core cannot
+take back a thread whose `Execute()` ignores cancellation, and marking such a job `FAILED`
+while its worker still runs would misreport a slot that is not free.
+
+The limit measures the **current attempt**, not the job's lifetime, so a job on its third
+retry has not accumulated the first two.
+
+### `DownloaderInfo`
+
+```ts
+{
+  available: boolean;   // false = yt-dlp cannot be loaded at all; everything below is unset
+  backend: string;      // "yt-dlp"
+  version: string | null;
+  ageDays: number | null;   // null when the version string carries no release date
+  stale: boolean;           // ageDays > 730
+}
+```
+
+Probed at most once per process, on first use rather than at startup — a probe starts a
+process, and doing it eagerly would slow a cold start for information most sessions never
+need. `stale` matters because yt-dlp's site extractors break within weeks: an old build
+fails on real URLs with messages that blame the video rather than the tool.
 
 ### Crash recovery
 
