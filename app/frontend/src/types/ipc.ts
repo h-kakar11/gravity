@@ -90,7 +90,13 @@ export interface CommandResult {
   removeJob: Record<string, never>;
   inspectFile: { fileInfo: FileInfo };
   inspectDownloadUrl: { metadata: DownloadMetadata };
-  getCapabilities: { capabilities: string[] };
+  getCapabilities: {
+    capabilities: string[];
+    // Operations that apply to this file but that the build cannot run. Attempting one
+    // fails with E_NOT_IMPLEMENTED; `reason` is user-facing and safe to render verbatim
+    // (see core/media/DeferredOperations.h).
+    deferredCapabilities: Array<{ capability: string; reason: string }>;
+  };
   getSettings: { settings: Settings };
   updateSettings: { settings: Settings };
   getHardwareInfo: { hardwareInfo: HardwareInfo };

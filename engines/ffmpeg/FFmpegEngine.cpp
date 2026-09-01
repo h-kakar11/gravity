@@ -1,5 +1,7 @@
 #include "engines/ffmpeg/FFmpegEngine.h"
 
+#include "core/media/DeferredOperations.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -236,11 +238,10 @@ filesystem::FileInfo FFmpegEngine::Probe(const std::string& path) {
 }
 
 void FFmpegEngine::ThrowNotImplemented(const std::string& operation) const {
-    throw MediaToolException(ErrorInfo::Make(
-        "E_NOT_IMPLEMENTED", ErrorCategory::UnsupportedFormat,
-        operation + " is not implemented",
-        "FFmpegEngine::" + operation + " is intentionally out of scope for now",
-        /*recoverable=*/false));
+    // Code, category and wording all come from the one deferral table
+    // (core/media/DeferredOperations.h) so this error is byte-for-byte the one
+    // filesystem::DeferredCapabilitiesFor() already told the frontend to expect.
+    throw MediaToolException(MakeNotImplementedError(operation));
 }
 
 const std::set<std::string>& FFmpegEngine::AvailableEncoders() const {
@@ -358,12 +359,12 @@ void FFmpegEngine::Compress(const std::string& inputPath, const std::string& out
 
 void FFmpegEngine::ExtractAudio(const std::string&, const std::string&, ProgressCallback,
                                 CancelledCallback) {
-    ThrowNotImplemented("ExtractAudio");
+    ThrowNotImplemented(kExtractAudioOperation);
 }
 
 void FFmpegEngine::ExtractFrames(const std::string&, const std::string&, const nlohmann::json&,
                                  ProgressCallback, CancelledCallback) {
-    ThrowNotImplemented("ExtractFrames");
+    ThrowNotImplemented(kExtractFramesOperation);
 }
 
 }  // namespace mediatool::media

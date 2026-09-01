@@ -1,5 +1,7 @@
 #include "engines/downloader/YtDlpFormatSelector.h"
 
+#include <cctype>
+
 namespace mediatool::downloader {
 
 using downloads::QualityPreset;
@@ -31,6 +33,60 @@ std::string FormatSelectorForQuality(QualityPreset preset) {
             return "bestaudio";
     }
     return "bestvideo*+bestaudio/best";
+}
+
+namespace {
+
+constexpr std::size_t kMaxFormatIdLength = 64;
+constexpr std::size_t kMaxFormatIdsPerSelector = 8;
+
+// The two yt-dlp selector keywords that survive the grammar below (they are plain
+// alphanumeric words) AND change how many streams get downloaded. "all" selects every
+// format on the page and "mergeall" merges every one of them into a single file, so
+// either one turns "download the stream I picked" into something the user never asked
+// for. The other bare keywords -- best/worst/bestvideo/bestaudio/b/w/bv/ba and friends --
+// are deliberately NOT blocked: they still resolve to one stream of the same video, and a
+// site is free to name a real format id after one of them.
+bool IsArityChangingKeyword(const std::string& token) {
+    return token == "all" || token == "mergeall";
+}
+
+bool IsFormatIdCharacter(char c) {
+    const auto uc = static_cast<unsigned char>(c);
+    return std::isalnum(uc) != 0 || c == '_' || c == '-' || c == '.';
+}
+
+}  // namespace
+
+bool IsSafeFormatSelector(const std::string& selector) {
+    if (selector.empty()) {
+        return false;
+    }
+
+    std::size_t idCount = 0;
+    std::string current;
+    for (const char c : selector) {
+        if (c == '+') {
+            // Rejects a leading '+', a trailing '+' (`current` is still empty when the
+            // loop ends, caught below) and "137++140".
+            if (current.empty() || IsArityChangingKeyword(current)) {
+                return false;
+            }
+            if (++idCount >= kMaxFormatIdsPerSelector) {
+                return false;
+            }
+            current.clear();
+            continue;
+        }
+        if (!IsFormatIdCharacter(c)) {
+            return false;
+        }
+        current.push_back(c);
+        if (current.size() > kMaxFormatIdLength) {
+            return false;
+        }
+    }
+    return !current.empty() && !IsArityChangingKeyword(current);
 }
 
 }  // namespace mediatool::downloader

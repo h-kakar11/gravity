@@ -218,5 +218,8 @@ See the root `README.md`'s "Status" table for the authoritative, per-component b
 do not assume a class exists just because its header does. As of this writing,
 `Convert`/`Compress` on `IMediaEngine` are implemented (`FFmpegEngine`, backing
 `MediaProcessingJob`); `IImageEngine` and `IDocumentConverter` are still interface-only
-with no implementation, and `ExtractFrames` on `IMediaEngine` still throws
-`E_NOT_IMPLEMENTED`.
+with no implementation, and `ExtractAudio`/`ExtractFrames` on `IMediaEngine` still throw
+`E_NOT_IMPLEMENTED`. That deferral is declared rather than merely true: see
+`core/media/DeferredOperations.h`, which both `filesystem::DeferredCapabilitiesFor()` and
+the engines read, so the capability list the frontend receives and the error it gets back
+if it tries anyway can never disagree.

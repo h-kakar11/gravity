@@ -6,6 +6,8 @@
 
 #include "engines/ffmpeg/FFmpegEngine.h"
 
+#include "core/media/DeferredOperations.h"
+
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -151,16 +153,18 @@ TEST(FFmpegEngineTest, ProbeThrowsInvalidFileWhenFfprobeExitsNonZero) {
     }
 }
 
-TEST(FFmpegEngineTest, ExtractAudioAndExtractFramesAreStillNotImplemented) {
+TEST(FFmpegEngineTest, ExtractAudioAndExtractFramesFailWithTheDeclaredDeferralContract) {
     // Convert/Compress are real as of Phase 2 (see the tests below); ExtractAudio and
-    // ExtractFrames remain genuinely out of scope for now.
+    // ExtractFrames remain genuinely out of scope. What this asserts is not merely "it
+    // throws" but that it throws the SAME error filesystem::DeferredCapabilitiesFor()
+    // already promised the frontend -- same code, same category, same wording. Both sides
+    // read core/media/DeferredOperations.h, so implementing either operation means
+    // deleting its table entry, which fails this test on purpose.
     MockProcessRunner runner({}, {}, 0);
     FFmpegEngine engine(runner, std::string("C:\\ffmpeg.exe"), std::string("C:\\ffprobe.exe"));
     auto noopProgress = [](const mediatool::jobs::Progress&) {};
     auto neverCancelled = []() { return false; };
 
-    EXPECT_THROW(engine.ExtractAudio("in.mp4", "out.mp3", noopProgress, neverCancelled),
-                 MediaToolException);
     EXPECT_THROW(engine.ExtractFrames("in.mp4", "out_dir", {}, noopProgress, neverCancelled),
                  MediaToolException);
 
@@ -168,7 +172,11 @@ TEST(FFmpegEngineTest, ExtractAudioAndExtractFramesAreStillNotImplemented) {
         engine.ExtractAudio("in.mp4", "out.mp3", noopProgress, neverCancelled);
         FAIL() << "expected MediaToolException";
     } catch (const MediaToolException& ex) {
+        EXPECT_EQ(ex.Info().code, mediatool::media::kNotImplementedErrorCode);
         EXPECT_EQ(ex.Info().category, ErrorCategory::UnsupportedFormat);
+        EXPECT_FALSE(ex.Info().recoverable);
+        EXPECT_EQ(ex.Info().message,
+                   mediatool::media::DeferralReason(mediatool::media::kExtractAudioOperation));
     }
 }
 

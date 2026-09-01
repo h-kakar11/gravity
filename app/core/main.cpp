@@ -53,6 +53,7 @@
 #include "core/settings/PresetStore.h"
 #include "core/settings/Settings.h"
 #include "core/common/Uuid.h"
+#include "engines/downloader/YtDlpFormatSelector.h"
 #include "engines/downloader/YtDlpProvider.h"
 #include "engines/ffmpeg/FFmpegDiscovery.h"
 #include "engines/ffmpeg/FFmpegEngine.h"
@@ -488,6 +489,17 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
                 "E_INVALID_PARAM_VALUE", errors::ErrorCategory::Unknown,
                 "formatId must not be empty.", "field=formatId value is an empty string"));
         }
+        // This value reaches yt-dlp's -f verbatim, and -f is an expression language, not
+        // a name (see downloader::IsSafeFormatSelector). Rejected here so the caller gets
+        // the error synchronously from createJob instead of discovering it once a worker
+        // thread has already started the job.
+        if (!downloader::IsSafeFormatSelector(*value)) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_FORMAT_ID", errors::ErrorCategory::UnsupportedFormat,
+                "That stream selection is not a valid format id.",
+                "field=formatId value=" + *value +
+                    " (expected up to 8 '+'-joined ids of [A-Za-z0-9_.-])"));
+        }
         formatId = *value;
     }
 
@@ -674,7 +686,17 @@ json HandleInspectFile(AppContext& app, const json& params) {
 json HandleGetCapabilities(AppContext& app, const json& params) {
     const std::string path = RequireNonEmptyString(params, "path");
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
-    return {{"capabilities", filesystem::CapabilitiesFor(info.category, info.extension)}};
+    // `capabilities` is what will actually be attempted; `deferredCapabilities` is what
+    // applies to this file but cannot run yet, each with a reason the UI can show on a
+    // disabled control. Attempting one is guaranteed to fail with E_NOT_IMPLEMENTED --
+    // see core/media/DeferredOperations.h.
+    json deferred = json::array();
+    for (const filesystem::DeferredCapability& capability :
+         filesystem::DeferredCapabilitiesFor(info.category, info.extension)) {
+        deferred.push_back(capability.ToJson());
+    }
+    return {{"capabilities", filesystem::CapabilitiesFor(info.category, info.extension)},
+            {"deferredCapabilities", std::move(deferred)}};
 }
 
 json HandleGetSettings(AppContext& app, const json&) {

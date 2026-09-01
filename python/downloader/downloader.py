@@ -80,6 +80,37 @@ _KNOWN_FAILURE_PATTERNS = (
     ("unsupported url", "E_UNSUPPORTED_URL", "UNSUPPORTED_FORMAT", False),
     ("no space left on device", "E_DISK_SPACE", "DISK_SPACE_ERROR", False),
     ("permission denied", "E_PERMISSION_DENIED", "PERMISSION_ERROR", False),
+
+    # --- Merge / post-processing -------------------------------------------------------
+    # Everything above fails before a single byte is written. These fail AFTER the bytes
+    # are on disk, in yt-dlp's own ffmpeg step, and they split cleanly into two kinds --
+    # which is the whole reason they are classified separately instead of falling through
+    # to E_DOWNLOAD_FAILED/UNKNOWN, where a retry policy has nothing to go on.
+    #
+    #   Permanent: the merge tool is missing, or ffmpeg rejected the streams. Running the
+    #   exact same command again produces the exact same failure; the user has to install
+    #   ffmpeg or pick a different format. Retrying only wastes the download.
+    #
+    #   Recoverable: a fragment could not be fetched. That is a transport failure wearing
+    #   a download-stage costume, and a second attempt genuinely often works.
+    #
+    # Substrings verified against yt-dlp's own source (checked at 2026.8.19):
+    # YoutubeDL.py "You have requested merging of multiple formats but ffmpeg is not
+    # installed" and f"Postprocessing: {err}"; postprocessor/ffmpeg.py "ffmpeg not found.
+    # Please install...", "ffprobe and ffmpeg not found...", "ffprobe not found...",
+    # f"audio conversion failed: {err.msg}"; downloader/external.py f"Unable to open
+    # fragment {frag_index}; {err}"; downloader/fragment.py f"fragment {frag_index} not
+    # found, unable to continue".
+    ("but ffmpeg is not installed", "E_MERGE_TOOL_MISSING", "ENGINE_FAILURE", False),
+    ("ffmpeg not found. please install", "E_MERGE_TOOL_MISSING", "ENGINE_FAILURE", False),
+    ("ffprobe not found. please install", "E_MERGE_TOOL_MISSING", "ENGINE_FAILURE", False),
+    ("unable to open fragment", "E_FRAGMENT_DOWNLOAD_FAILED", "NETWORK_ERROR", True),
+    ("not found, unable to continue", "E_FRAGMENT_MISSING", "DOWNLOAD_FAILURE", False),
+    ("audio conversion failed", "E_MERGE_FAILED", "ENGINE_FAILURE", False),
+    # Last of the merge group on purpose: yt-dlp prefixes the *underlying* message with
+    # "Postprocessing: ", so a more specific pattern above (a missing ffmpeg, say) must
+    # get the first look at the same string.
+    ("postprocessing:", "E_MERGE_FAILED", "ENGINE_FAILURE", False),
 )
 
 _NETWORK_TYPES = (socket.timeout, socket.gaierror, ConnectionError, TimeoutError, urllib.error.URLError)

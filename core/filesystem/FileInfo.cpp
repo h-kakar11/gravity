@@ -4,6 +4,8 @@
 #include <cctype>
 #include <stdexcept>
 
+#include "core/media/DeferredOperations.h"
+
 namespace mediatool::filesystem {
 
 namespace {
@@ -105,7 +107,9 @@ std::vector<std::string> CapabilitiesFor(FileCategory category, const std::strin
 
     switch (category) {
         case FileCategory::Video:
-            return {"compress", "convert", "extractAudio", "extractFrames"};
+            // extractAudio/extractFrames deliberately absent -- see
+            // DeferredCapabilitiesFor() below and core/media/DeferredOperations.h.
+            return {"compress", "convert"};
         case FileCategory::Audio:
             return {"compress", "convert"};
         case FileCategory::Image:
@@ -130,6 +134,27 @@ std::vector<std::string> CapabilitiesFor(FileCategory category, const std::strin
             return {};
     }
     return {};
+}
+
+nlohmann::json DeferredCapability::ToJson() const {
+    return {{"capability", capability}, {"reason", reason}};
+}
+
+std::vector<DeferredCapability> DeferredCapabilitiesFor(FileCategory category,
+                                                         const std::string& /*extension*/) {
+    // Only video carries deferred operations today: extracting an audio track or still
+    // frames is meaningless for the other categories, so reporting them there would be a
+    // second kind of lie. The reasons come from the deferral table itself rather than
+    // being restated here -- see core/media/DeferredOperations.h.
+    if (category != FileCategory::Video) {
+        return {};
+    }
+
+    std::vector<DeferredCapability> deferred;
+    for (const std::string& operation : media::DeferredOperations()) {
+        deferred.push_back({operation, media::DeferralReason(operation)});
+    }
+    return deferred;
 }
 
 }  // namespace mediatool::filesystem

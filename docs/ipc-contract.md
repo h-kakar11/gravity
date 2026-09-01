@@ -97,7 +97,7 @@ verified without hitting a real URL.
 | `retryJob` | `{jobId: string}` | `{}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
-| `getCapabilities` | `{path: string}` | `{capabilities: string[]}` |
+| `getCapabilities` | `{path: string}` | `{capabilities: string[], deferredCapabilities: {capability: string, reason: string}[]}` |
 | `getSettings` | `{}` | `{settings: Settings}` |
 | `updateSettings` | `{settings: object}` (partial) | `{settings: Settings}` |
 | `getHardwareInfo` | `{}` | `{hardwareInfo: HardwareInfo}` |
@@ -132,7 +132,7 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
 | `type` | `params` |
 |---|---|
-| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[]}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31) |
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[]}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31, and is validated before the job is accepted: see "Format id validation" below) |
 | `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number, dependsOn?: string[]}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
 | `"TEST"` | `{priority?: number, dependsOn?: string[]}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
@@ -159,6 +159,53 @@ its `state` becomes `CANCELLED` with no `error` field, and the reason is in the 
 `outputFormat` is required (rejected with `E_MISSING_PARAM` if absent, `E_INVALID_PARAM_VALUE` if empty). `quality`, when present, must be one of `lowest` | `low` | `medium` | `high` | `ultra` | `lossless` — anything else is rejected with `E_INVALID_PARAM_VALUE` rather than silently degraded to `medium` as it was before (issue #83). `lossless` used to be rejected unconditionally as a Pro-tier value; issue #82 removed the tier, so it is now an ordinary selectable quality. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
 
 A `COMPRESSION` job additionally probes its input before encoding and derives an explicit video (or, for an audio-only target, audio) bitrate from the source's own bitrate, scaled by the quality tier. This is what makes compression mean "smaller than the input" rather than "re-encoded at a fixed perceptual quality" — the latter routinely produced a *larger* file, which is issue #80. Callers do not supply the target and cannot override it; an explicit `audioBitrateKbps` is still honoured as-is.
+
+#### Format id validation
+
+`formatId` reaches yt-dlp's `-f` verbatim, and `-f` is a small expression language
+(filters, fallbacks, arithmetic, `all`), not a name. It is therefore held to the shape of
+an actual format id: up to eight `+`-joined ids, each 1–64 characters of `[A-Za-z0-9_.-]`,
+with `all` and `mergeall` rejected by name because they change how many streams get
+downloaded. Anything else is rejected with `E_INVALID_FORMAT_ID`
+(`category: "UNSUPPORTED_FORMAT"`) synchronously from `createJob`, before any process is
+started. The provider re-checks the same rule immediately before spawning, so every path
+into `-f` is covered. The selectors derived from `QualityPreset` are built in C++ and are
+deliberately *not* subject to this rule — they legitimately use the expression syntax.
+
+#### Deferred operations
+
+`getCapabilities` answers two disjoint lists. Everything in `capabilities` will be
+attempted for real. Everything in `deferredCapabilities` applies to the file but cannot
+run in this build; each entry carries a `reason` that is user-facing and safe to render
+verbatim next to a disabled control. Attempting a deferred operation fails with
+`E_NOT_IMPLEMENTED` (`category: "UNSUPPORTED_FORMAT"`, `recoverable: false`) and never
+partially runs, at every layer, with `message` equal to that same `reason`.
+
+Today that means `extractAudio` and `extractFrames` on video files. They used to be
+reported as ordinary capabilities, so the only way to discover they do not run was to
+start a job and read the failure. `core/media/DeferredOperations.h` is the single table
+both lists are derived from.
+
+#### Downloader failure codes
+
+Beyond the download failures already classified (`E_VIDEO_PRIVATE`, `E_GEO_RESTRICTED`,
+`E_FORMAT_UNAVAILABLE`, …), the merge/post-processing stage — yt-dlp's own ffmpeg step,
+which runs *after* the bytes are on disk — reports:
+
+| code | category | `recoverable` | meaning |
+|---|---|---|---|
+| `E_MERGE_TOOL_MISSING` | `ENGINE_FAILURE` | `false` | yt-dlp could not find ffmpeg/ffprobe to merge the streams |
+| `E_MERGE_FAILED` | `ENGINE_FAILURE` | `false` | the merge or a post-processor ran and failed |
+| `E_FRAGMENT_DOWNLOAD_FAILED` | `NETWORK_ERROR` | `true` | a fragment could not be transferred |
+| `E_FRAGMENT_MISSING` | `DOWNLOAD_FAILURE` | `false` | a fragment the manifest names does not exist |
+
+`E_INSPECT_TIMEOUT` (`NETWORK_ERROR`, `recoverable: true`) is reported when a metadata
+fetch exceeds its wall-clock deadline (60s by default). This is a bound on the *caller*,
+which yt-dlp's own `socket_timeout` is not: that limits one connect/read, while a fetch is
+many of them and a child that stalls without any single socket call timing out would
+otherwise hold a worker thread indefinitely. The child is stopped before the error is
+reported. Downloads deliberately have no such deadline — a legitimately long download is
+not a hang.
 
 ## Events (core -> ... -> React)
 

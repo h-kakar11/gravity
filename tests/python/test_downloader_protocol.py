@@ -83,6 +83,60 @@ class ClassifyExceptionTest(unittest.TestCase):
         self.assertEqual(category, "NETWORK_ERROR")
         self.assertTrue(recoverable)
 
+    # --- Merge / post-processing failures -------------------------------------------
+    # These fail after the bytes are already on disk, in yt-dlp's own ffmpeg step. They
+    # used to fall through to E_DOWNLOAD_FAILED/UNKNOWN, which tells a retry policy
+    # nothing -- the whole point of classifying them is the recoverable/permanent split.
+    # The message strings below are yt-dlp's own (verified against its source at
+    # 2026.8.19; the pattern table cites the exact files and lines).
+
+    def test_missing_merge_tool_is_permanent(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "You have requested merging of multiple formats but ffmpeg is not installed. "
+            "Aborting due to --abort-on-error"))
+        self.assertEqual(code, "E_MERGE_TOOL_MISSING")
+        self.assertEqual(category, "ENGINE_FAILURE")
+        # Retrying cannot install ffmpeg; a retry would only re-download and re-fail.
+        self.assertFalse(recoverable)
+
+    def test_postprocessor_missing_ffmpeg_is_permanent(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "ffmpeg not found. Please install or provide the path using --ffmpeg-location"))
+        self.assertEqual(code, "E_MERGE_TOOL_MISSING")
+        self.assertEqual(category, "ENGINE_FAILURE")
+        self.assertFalse(recoverable)
+
+    def test_postprocessing_failure_is_permanent(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "Postprocessing: Error opening output files: Invalid argument"))
+        self.assertEqual(code, "E_MERGE_FAILED")
+        self.assertEqual(category, "ENGINE_FAILURE")
+        self.assertFalse(recoverable)
+
+    def test_fragment_transport_failure_is_recoverable(self):
+        code, category, recoverable = downloader.classify_exception(Exception(
+            "Unable to open fragment 17; HTTP Error 503: Service Unavailable"))
+        self.assertEqual(code, "E_FRAGMENT_DOWNLOAD_FAILED")
+        self.assertEqual(category, "NETWORK_ERROR")
+        # The other half of the split: a fragment that failed to transfer genuinely often
+        # succeeds on a second attempt.
+        self.assertTrue(recoverable)
+
+    def test_missing_fragment_is_permanent(self):
+        code, _, recoverable = downloader.classify_exception(Exception(
+            "fragment 4 not found, unable to continue"))
+        self.assertEqual(code, "E_FRAGMENT_MISSING")
+        self.assertFalse(recoverable)
+
+    def test_a_more_specific_merge_pattern_wins_over_the_postprocessing_prefix(self):
+        # yt-dlp prefixes the underlying message with "Postprocessing: ", so both patterns
+        # match this string. Ordering in the table is what makes the specific one win --
+        # without it every post-processing failure collapses to one opaque code.
+        code, _, _ = downloader.classify_exception(Exception(
+            "Postprocessing: ffmpeg not found. Please install or provide the path using "
+            "--ffmpeg-location"))
+        self.assertEqual(code, "E_MERGE_TOOL_MISSING")
+
     def test_unrecognized_message_falls_back_to_unknown(self):
         code, category, _ = downloader.classify_exception(Exception("completely novel failure text"))
         self.assertEqual(code, "E_DOWNLOAD_FAILED")
