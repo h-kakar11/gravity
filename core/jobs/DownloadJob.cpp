@@ -76,6 +76,9 @@ void DownloadJob::Execute() {
     auto reservation =
         reservationRegistry_.Reserve(options_.outputDirectory, safeTitle, fileSystem_);
     const std::string& filenameBase = reservation.BaseName();
+    if (options_.onArtifactLocation) {
+        options_.onArtifactLocation(options_.outputDirectory, filenameBase);
+    }
 
     Progress starting;
     starting.statusMessage = "Starting download";
@@ -95,7 +98,11 @@ void DownloadJob::Execute() {
             [this](const Progress& progress) { ReportProgress(progress); },
             [&outputPath](const std::string& path) { outputPath = path; },
             [this] { return IsCancellationRequested(); });
-    } catch (const errors::MediaToolException&) {
+    } catch (...) {
+        // catch(...), not catch(MediaToolException&): the point of this handler is that
+        // NOTHING leaves a half-written .part file behind. A provider that lets anything
+        // else escape used to skip cleanup entirely, which is the one case where the
+        // artifact outlives every code path that knows its name.
         CleanupArtifacts(filenameBase);
         throw;
     }

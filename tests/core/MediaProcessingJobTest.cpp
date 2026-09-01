@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <stdexcept>
 #include <utility>
 
 #include "core/errors/MediaToolException.h"
@@ -341,3 +342,85 @@ TEST(MediaProcessingJob, ConversionDoesNotShrinkTheWayCompressionDoes) {
     ASSERT_TRUE(compress.contains("videoBitrateKbps") && convert.contains("videoBitrateKbps"));
     EXPECT_LT(compress.at("videoBitrateKbps").get<int>(), convert.at("videoBitrateKbps").get<int>());
 }
+
+TEST(MediaProcessingJob, ReportsItsArtifactLocationAsSoonAsItReservesAName) {
+    // The one fact only a run knows. A killed process leaves a half-written file whose
+    // name is derived on the worker thread; without this hook the recovery pass has no way
+    // to scope a cleanup to it, and the file survives forever.
+    const std::string inputPath = paths::Join("C:\\in", "Vacation Clip.mov");
+    const std::string outDir = "C:\\out";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\in");
+    fs.AddDirectory(outDir);
+    FileInfo input;
+    input.path = inputPath;
+    input.filename = "Vacation Clip.mov";
+    input.sizeBytes = 999;
+    fs.AddFile(input);
+
+    MockMediaEngine engine;
+    const std::string expectedOutput = paths::Join(outDir, "Vacation Clip.mp4");
+    engine.onProcessingStart = [&fs, expectedOutput](const std::string& outputPath) {
+        FileInfo out;
+        out.path = outputPath;
+        out.filename = paths::GetFilename(outputPath);
+        out.sizeBytes = 512;
+        fs.AddFile(out);
+    };
+
+    std::string reportedDirectory;
+    std::string reportedBase;
+    int callCount = 0;
+
+    FilenameReservationRegistry registry;
+    auto options = MakeOptions(inputPath, outDir, "mp4");
+    options.onArtifactLocation = [&](const std::string& directory, const std::string& base) {
+        reportedDirectory = directory;
+        reportedBase = base;
+        ++callCount;
+    };
+    MediaProcessingJob job(std::move(options), engine, fs, registry);
+    job.Execute();
+
+    EXPECT_EQ(callCount, 1);
+    EXPECT_EQ(reportedDirectory, outDir);
+    // The RESERVED base, not the raw input stem -- a second job converting a file of the
+    // same name gets "Vacation Clip (1)", and cleaning up the wrong one would delete a
+    // different job's output.
+    EXPECT_EQ(reportedBase, "Vacation Clip");
+}
+
+TEST(MediaProcessingJob, CleansUpEvenWhenTheEngineThrowsSomethingOtherThanAMediaToolException) {
+    // The cleanup handler used to be catch(MediaToolException&), so a bad_alloc, a json
+    // exception, or anything else escaping the engine skipped cleanup entirely -- the one
+    // case where a half-written file outlives every code path that knows its name.
+    const std::string inputPath = paths::Join("C:\\in", "Clip.mov");
+    const std::string outDir = "C:\\out";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\in");
+    fs.AddDirectory(outDir);
+    FileInfo input;
+    input.path = inputPath;
+    input.filename = "Clip.mov";
+    input.sizeBytes = 999;
+    fs.AddFile(input);
+
+    MockMediaEngine engine;
+    engine.onProcessingStart = [&fs](const std::string& outputPath) {
+        FileInfo partial;
+        partial.path = outputPath;
+        partial.filename = paths::GetFilename(outputPath);
+        partial.sizeBytes = 128;  // a partial encode, already on disk
+        fs.AddFile(partial);
+        throw std::runtime_error("engine blew up in a way nobody classified");
+    };
+
+    FilenameReservationRegistry registry;
+    MediaProcessingJob job(MakeOptions(inputPath, outDir, "mp4"), engine, fs, registry);
+
+    EXPECT_THROW(job.Execute(), std::runtime_error);
+    EXPECT_FALSE(fs.Exists(paths::Join(outDir, "Clip.mp4")));
+}
+

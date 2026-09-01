@@ -130,6 +130,9 @@ void MediaProcessingJob::Execute() {
     auto reservation =
         reservationRegistry_.Reserve(options_.outputDirectory, safeBase, fileSystem_);
     const std::string& filenameBase = reservation.BaseName();
+    if (options_.onArtifactLocation) {
+        options_.onArtifactLocation(options_.outputDirectory, filenameBase);
+    }
 
     const std::string outputPath = filesystem::paths::Join(
         options_.outputDirectory, filenameBase + "." + options_.outputFormat);
@@ -162,7 +165,11 @@ void MediaProcessingJob::Execute() {
             mediaEngine_.Convert(options_.inputPath, outputPath, engineOptions, onProgress,
                                  isCancelled);
         }
-    } catch (const errors::MediaToolException&) {
+    } catch (...) {
+        // catch(...), not catch(MediaToolException&): the point of this handler is that
+        // NOTHING leaves a half-written file behind. An engine that lets a bad_alloc, a
+        // json exception or anything else escape used to skip cleanup entirely, which is
+        // the one case where the artifact outlives every code path that knows its name.
         CleanupJobArtifacts(fileSystem_, options_.outputDirectory, filenameBase);
         throw;
     }

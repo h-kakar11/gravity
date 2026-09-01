@@ -7,6 +7,7 @@
 // IDownloadProvider and IFileSystem only, never to YtDlpProvider/Python or
 // std::filesystem directly, so it's fully testable against the Mock* implementations.
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -28,6 +29,14 @@ public:
         // Explicit format id from Inspect()'s format list (issue #31); overrides `quality`
         // when set. See downloads::DownloadOptions::formatId.
         std::optional<std::string> formatId;
+
+        // Called once, on the worker thread, the instant this job has reserved the output
+        // filename it is about to write to -- the first moment anything knows what a
+        // killed run would leave behind. The crash-recovery store records it so a later
+        // launch can delete those artifacts before re-running the job; nothing else uses
+        // it, and leaving it unset is a supported no-op.
+        std::function<void(const std::string& outputDirectory, const std::string& filenameBase)>
+            onArtifactLocation;
     };
 
     // `provider`, `fileSystem` and `reservationRegistry` must outlive this job.

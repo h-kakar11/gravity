@@ -9,6 +9,7 @@
 // callbacks, verify the result, clean up (via the same CleanupJobArtifacts that fixes #3)
 // on any failure.
 
+#include <functional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -34,6 +35,14 @@ public:
         nlohmann::json engineOptions;
         bool isCompression = false;  // selects JobType::Compression vs Conversion, and which
                                       // IMediaEngine method to call
+
+        // Called once, on the worker thread, the instant this job has reserved the output
+        // filename it is about to write to -- the first moment anything knows what a
+        // killed run would leave behind. The crash-recovery store records it so a later
+        // launch can delete those artifacts before re-running the job; nothing else uses
+        // it, and leaving it unset is a supported no-op.
+        std::function<void(const std::string& outputDirectory, const std::string& filenameBase)>
+            onArtifactLocation;
     };
 
     // `mediaEngine`, `fileSystem` and `reservationRegistry` must outlive this job.

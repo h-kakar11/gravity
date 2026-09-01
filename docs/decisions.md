@@ -487,3 +487,118 @@ policy tangled up in the thing that owns the threads. See `docs/concurrency-mode
   implemented in `BuildFfmpegArgs` with no UI to reach them; that is a roadmap gap now
   rather than a fake paywall.
 
+
+## Hardening & feature-completion pass (phases A-F)
+
+### A deferred operation is declared, not merely true
+
+`getCapabilities` advertised `extractAudio` and `extractFrames` for every video while both
+`FFmpegEngine` and `MockMediaEngine` threw `E_NOT_IMPLEMENTED` from them. Nothing was
+wrong with either half on its own; what was wrong is that they were two independent
+statements about the same fact, and only one of them reached the frontend. The only way to
+discover an operation did not run was to start a job and read the failure.
+
+`core/media/DeferredOperations.h` is now the single table, and both halves are derived from
+it: `filesystem::DeferredCapabilitiesFor()` reports the operation with a user-facing reason
+in a list disjoint from `CapabilitiesFor()`, and every engine throws
+`MakeNotImplementedError()`, whose `message` *is* that same reason. The deferral cannot rot
+into a lie because implementing an operation means deleting its table entry, which fails
+the tests that assert the deferral.
+
+The alternative — implementing `ExtractAudio` for real — was rejected as out of scope for
+this pass and, more importantly, as not the actual defect: `convert` to an audio format
+already does what a user means by "extract the audio", so the missing feature was costing
+far less than the dishonest capability list.
+
+### A metadata fetch gets a wall-clock deadline; a download does not
+
+`downloader.py` already sets yt-dlp's `socket_timeout`, and that is not a bound on the
+caller: it limits one connect/read, a fetch is many of them, and a child that keeps
+trickling data never trips it. `Inspect()` runs synchronously on a job worker, so a wedged
+child held that thread until the process exited.
+
+`YtDlpProvider` now enforces a `steady_clock` deadline (60s, injectable) around the whole
+run, stops the child, and reports `E_INSPECT_TIMEOUT` as recoverable. `Download()`
+deliberately gets no such deadline: a legitimate 4K download runs for as long as it runs,
+and a clock that kills it is a bug, not a safeguard. Bounding a download is about
+*silence*, not duration, which is a different mechanism (see the long-running-job timeout).
+
+### `formatId` is validated as a name because `-f` is a language
+
+`downloads::DownloadOptions::formatId` comes from the frontend and reached yt-dlp's `-f`
+verbatim. `-f` accepts filter expressions, fallback chains, arithmetic and the `all`
+keyword — so an unvalidated value there is not a free-text field, it is code: `all`
+downloads every stream on the page and a filter selects something the user never saw.
+
+It is now held to the shape of an actual format id (up to eight `+`-joined ids of
+`[A-Za-z0-9_.-]`), which is exactly what `Inspect()` reports and what a caller can build
+from two of them. The preset-derived selectors are ours and are explicitly *not* subject to
+this — they legitimately use the expression syntax. `all` and `mergeall` are rejected by
+name; the other bare keywords are not, because each still resolves to one stream of the
+same video and a site may legitimately name a format id after one of them.
+
+### Crash recovery restores intent, not progress
+
+`JobHistoryStore`'s header states that persisting in-flight jobs is a non-goal, and the
+reasoning it gives — that resuming an ffmpeg or yt-dlp process across a restart is high
+complexity for little value — is still correct. It is not, however, the same question as
+"should the queue survive a crash".
+
+`core/jobs/InProgressJobStore` persists a `JobSpec` — the `createJob` request that produced
+each unfinished job — and drops it the moment the job reaches a terminal state. On startup
+those specs are replayed through the same `SubmitJobOfType()` the live path uses, so a
+recovered job is constructed and validated identically to a fresh one instead of through a
+second path that can drift.
+
+The guarantee is deliberately the weak one, stated plainly: **a killed job is rebuilt and
+re-run from the start, not resumed.** Its subprocess died with the process, its partial
+output is not a checkpoint, and neither yt-dlp nor ffmpeg offers a resume protocol this app
+could drive. What a user actually loses today is the queue — twenty things lined up and
+nothing to say what they were — and that is what comes back.
+
+Three consequences worth recording:
+
+* **Ids change.** A rebuilt job is a new `Job` object with a new id, so `dependsOn` edges
+  are remapped during the replay. An id that is not in the remap belonged to a job that
+  already reached a terminal state, so the edge is either satisfied or unsatisfiable —
+  dropping it is what lets the dependent run at all.
+* **Recovery is capped.** A job that takes the process down on every attempt would
+  otherwise re-queue itself on every launch. `kMaxRecoveryAttempts` (3) stops it.
+* **The store is cleared before the replay**, and each job re-adds itself through the
+  normal submission path. A spec that can no longer be built — its input file is gone, say
+  — is then dropped with a logged reason rather than retried forever. The gap this leaves
+  is a crash *during* recovery, which is not the failure the file exists to survive.
+
+### Orphan cleanup targets output artifacts, not the unused temp directory
+
+The obvious reading of "orphaned temp-file cleanup" is a sweep of
+`%LOCALAPPDATA%\MediaTool\temp\job-*`. `core/filesystem/TempDirectory` is RAII and would
+indeed leak those across a kill — except that nothing in the codebase constructs one. A
+sweep there would clean up something that never exists.
+
+What a killed run actually leaves behind is in the user's *output* directory: yt-dlp
+`.part` files and half-written encodes. Their names are derived on the worker thread (from
+a video title, or an input stem, plus collision-avoidance suffixes), so nothing outside the
+run knows them. Both job types now report the reserved base name through an
+`onArtifactLocation` hook the instant they reserve it, the recovery store records it, and
+the recovery pass deletes those artifacts — through the same `IsJobArtifactOf` scoping every
+live failure path already uses, never a bare prefix match, never recursive — before
+resubmitting.
+
+### `JobManager` is declared last in `AppContext`, and that is load-bearing
+
+`~JobManager` cancels every queued job and joins the worker pool, which fires state-changed
+callbacks — and those callbacks touch `jobHistoryStore`, `inProgressJobStore`,
+`previousState` and `previousStateMutex`. Members are destroyed in reverse declaration
+order, so `JobManager` sat above the stores meant a shutdown with jobs still queued wrote
+history into a destroyed object. Moving it to the end of the struct is the whole fix, and
+the comment there says why nothing may be declared after it.
+
+### Artifact cleanup handlers catch `...`, not `MediaToolException`
+
+Both job types cleaned up after a failed engine/provider call under
+`catch (const errors::MediaToolException&)`. Anything else escaping — `std::bad_alloc`, a
+`nlohmann::json` exception, a `std::runtime_error` from a future provider — skipped cleanup
+entirely, which is precisely the case where the half-written file outlives every code path
+that still knows its name. The handler rethrows unchanged; only the cleanup is
+unconditional.

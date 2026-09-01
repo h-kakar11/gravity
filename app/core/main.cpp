@@ -40,7 +40,10 @@
 #include "core/ipc/RequestExecutor.h"
 #include "core/ipc/RequestValidation.h"
 #include "core/jobs/DownloadJob.h"
+#include "core/jobs/InProgressJobStore.h"
+#include "core/jobs/JobArtifactCleanup.h"
 #include "core/jobs/JobHistoryStore.h"
+#include "core/jobs/JobSpec.h"
 #include "core/jobs/JobManager.h"
 #include "core/jobs/MediaProcessingJob.h"
 #include "core/jobs/JobTypes.h"
@@ -193,8 +196,10 @@ struct AppContext {
     ResolvedTool pythonTool{ResolvePythonExecutable()};
     ResolvedTool downloaderScriptTool{ResolveDownloaderScript()};
     downloader::YtDlpProvider ytDlpProvider;
-    jobs::JobManager jobManager;
     jobs::JobHistoryStore jobHistoryStore{jobs::DefaultJobHistoryFilePath()};
+    // The jobs that have NOT finished, as recipes rather than status reports, so a crash
+    // does not lose the queue -- see core/jobs/InProgressJobStore.h.
+    jobs::InProgressJobStore inProgressJobStore{jobs::DefaultInProgressJobsFilePath()};
     settings::PresetStore presetStore{settings::DefaultPresetsFilePath()};
 
     // Tracks each job's previous state purely to classify the Running state as either
@@ -202,6 +207,15 @@ struct AppContext {
     // the comment on PublishJobStateChanged below.
     std::mutex previousStateMutex;
     std::unordered_map<jobs::JobId, jobs::JobState> previousState;
+
+    // DECLARED LAST, DELIBERATELY, and it is the only member whose position matters.
+    // ~JobManager cancels every queued job and joins the worker pool, which fires
+    // state-changed callbacks -- and those callbacks touch jobHistoryStore,
+    // inProgressJobStore, previousState and previousStateMutex. Members are destroyed in
+    // reverse declaration order, so anything declared after this one would already be
+    // gone by the time those callbacks run. It used to sit above the two stores, which
+    // meant a shutdown with jobs still queued wrote history into a destroyed object.
+    jobs::JobManager jobManager;
 
     explicit AppContext(const settings::Settings& settings)
         : ffmpegEngine(processRunner, EffectiveFfmpegOverride(settings), EffectiveFfprobeOverride()),
@@ -270,6 +284,9 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobCompleted, data, id));
             app.jobHistoryStore.Append(snapshot.ToJson());  // #10/"Session History": every
                                                              // terminal job is recorded
+            // Terminal means there is nothing left to recover. Leaving the record would
+            // re-run finished work on the next launch.
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Failed: {
@@ -278,12 +295,14 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             if (snapshot.error) data["error"] = snapshot.error->ToJson();
             app.eventBus.Publish(events::MakeEvent(events::EventType::JobFailed, data, id));
             app.jobHistoryStore.Append(snapshot.ToJson());
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Cancelled: {
             app.eventBus.Publish(
                 events::MakeEvent(events::EventType::JobCancelled, {{"state", "CANCELLED"}}, id));
             app.jobHistoryStore.Append(app.jobManager.GetJob(id).ToJson());
+            app.inProgressJobStore.Remove(id);
             return;
         }
         case JobState::Queued:
@@ -437,7 +456,16 @@ json HandleInspectDownloadUrl(AppContext& app, const json& params) {
     }
 }
 
-json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
+// The three builders below validate their params and hand back a constructed Job. They
+// deliberately do NOT submit, persist or publish: SubmitJobOfType() does all three for
+// every type, so the createJob path and the crash-recovery path cannot drift apart.
+//
+// `onArtifactLocation` is threaded through because it is the only thing a job knows that
+// the recovery store cannot work out for itself -- see core/jobs/JobSpec.h.
+using ArtifactHook = std::function<void(const std::string&, const std::string&)>;
+
+std::unique_ptr<jobs::Job> BuildDownloadJob(AppContext& app, const json& jobParams,
+                                             ArtifactHook onArtifactLocation) {
     const std::string url = RequireNonEmptyString(jobParams, "url");
     const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
     ValidateDownloadUrl(app, url);
@@ -509,13 +537,10 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     options.quality = quality;
     options.formatId = formatId;
 
-    auto job = std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
-                                                    &app.ffmpegEngine, app.reservationRegistry);
-    ApplySchedulingParams(*job, jobParams);
-    const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
-    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
-    return {{"jobId", id}};
+    options.onArtifactLocation = std::move(onArtifactLocation);
+
+    return std::make_unique<jobs::DownloadJob>(options, app.ytDlpProvider, app.fileSystem,
+                                                &app.ffmpegEngine, app.reservationRegistry);
 }
 
 // Shared by HandleCreateConversionJob/HandleCreateCompressionJob -- they differ only in
@@ -523,7 +548,9 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
 // per engines/ffmpeg/FFmpegArgBuilder.h, Compress is Convert with different default
 // option VALUES (supplied by the caller, i.e. the frontend's preset), not a different
 // code path here either.
-json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool isCompression) {
+std::unique_ptr<jobs::Job> BuildMediaProcessingJob(AppContext& app, const json& jobParams,
+                                                    bool isCompression,
+                                                    ArtifactHook onArtifactLocation) {
     const std::string inputPath = RequireNonEmptyString(jobParams, "inputPath");
     const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
 
@@ -565,33 +592,44 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
     options.outputFormat = outputFormat;
     options.engineOptions = processingOptions;
     options.isCompression = isCompression;
+    options.onArtifactLocation = std::move(onArtifactLocation);
 
-    auto job = std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
-                                                          app.fileSystem, app.reservationRegistry);
-    ApplySchedulingParams(*job, jobParams);
-    const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
-    app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
-    return {{"jobId", id}};
+    return std::make_unique<jobs::MediaProcessingJob>(std::move(options), app.ffmpegEngine,
+                                                      app.fileSystem, app.reservationRegistry);
 }
 
-json HandleCreateJob(AppContext& app, const json& params) {
-    const std::string typeWire = RequireNonEmptyString(params, "type");
-    // Absent/empty job params are legitimate for TEST; the per-type handlers below require
-    // whatever they actually need out of this object.
-    const json& jobParams = OptionalObject(params, "params");
+// Builds, persists and submits one job, whatever its type. The single place that does
+// so: createJob calls it with a fresh request, and the startup recovery pass calls it
+// with a stored one, so a recovered job is constructed and validated exactly like a new
+// one rather than through a second path that can drift.
+//
+// `recoveryCount` is carried through from a recovered spec (0 for a fresh request) so a
+// job that takes the process down on every attempt eventually stops being recovered --
+// see jobs::kMaxRecoveryAttempts.
+jobs::JobId SubmitJobOfType(AppContext& app, const std::string& typeWire, const json& jobParams,
+                             int recoveryCount = 0) {
+    // The hook fires from a worker thread once the job has reserved its output filename,
+    // which is necessarily after SubmitJob() below -- so capturing an id that is filled in
+    // a few lines further down is safe, and is the only way to hand a job its own id
+    // through a constructor argument.
+    auto idHolder = std::make_shared<jobs::JobId>();
+    ArtifactHook onArtifactLocation = [&app, idHolder](const std::string& directory,
+                                                        const std::string& filenameBase) {
+        app.inProgressJobStore.SetArtifactLocation(*idHolder, {directory, filenameBase});
+    };
 
+    std::unique_ptr<jobs::Job> job;
     if (typeWire == "DOWNLOAD") {
-        return HandleCreateDownloadJob(app, jobParams);
-    }
-    if (typeWire == "CONVERSION") {
-        return HandleCreateMediaProcessingJob(app, jobParams, /*isCompression=*/false);
-    }
-    if (typeWire == "COMPRESSION") {
-        return HandleCreateMediaProcessingJob(app, jobParams, /*isCompression=*/true);
-    }
-
-    if (typeWire != "TEST") {
+        job = BuildDownloadJob(app, jobParams, std::move(onArtifactLocation));
+    } else if (typeWire == "CONVERSION") {
+        job = BuildMediaProcessingJob(app, jobParams, /*isCompression=*/false,
+                                       std::move(onArtifactLocation));
+    } else if (typeWire == "COMPRESSION") {
+        job = BuildMediaProcessingJob(app, jobParams, /*isCompression=*/true,
+                                       std::move(onArtifactLocation));
+    } else if (typeWire == "TEST") {
+        job = std::make_unique<jobs::TestJob>();
+    } else {
         throw errors::MediaToolException(errors::ErrorInfo::Make(
             "E_JOB_TYPE_NOT_IMPLEMENTED", errors::ErrorCategory::UnsupportedFormat,
             "Only TEST, DOWNLOAD, CONVERSION and COMPRESSION jobs are implemented so far -- " +
@@ -599,10 +637,39 @@ json HandleCreateJob(AppContext& app, const json& params) {
             "", false));
     }
 
-    auto job = std::make_unique<jobs::TestJob>();
     ApplySchedulingParams(*job, jobParams);
     const jobs::JobId id = job->Id();
-    app.jobManager.SubmitJob(std::move(job));
+    *idHolder = id;
+
+    jobs::JobSpec spec;
+    spec.id = id;
+    spec.type = job->Type();
+    spec.params = jobParams;
+    spec.createdAt = job->CreatedAt();
+    spec.recoveryCount = recoveryCount;
+    // Persisted BEFORE the submission, not after: a crash in between then re-queues a job
+    // that never ran, which is the harmless direction. The other order can lose a job
+    // that is already running.
+    app.inProgressJobStore.Put(spec);
+
+    try {
+        app.jobManager.SubmitJob(std::move(job));
+    } catch (...) {
+        // The scheduler refused it (an unknown or already-failed dependency), so there is
+        // no job to recover -- the record would otherwise be resurrected on every launch.
+        app.inProgressJobStore.Remove(id);
+        throw;
+    }
+    return id;
+}
+
+json HandleCreateJob(AppContext& app, const json& params) {
+    const std::string typeWire = RequireNonEmptyString(params, "type");
+    // Absent/empty job params are legitimate for TEST; the per-type builders require
+    // whatever they actually need out of this object.
+    const json& jobParams = OptionalObject(params, "params");
+
+    const jobs::JobId id = SubmitJobOfType(app, typeWire, jobParams);
     app.eventBus.Publish(events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
     return {{"jobId", id}};
 }
@@ -878,6 +945,87 @@ json ExecuteRequest(AppContext& app, const std::string& id, const std::string& c
     }
 }
 
+// Rebuilds the jobs an earlier run did not finish.
+//
+// What this restores is INTENT, not progress. A job that was RUNNING when the process
+// died is re-queued from the start: its ffmpeg or yt-dlp child died with it, its partial
+// output is not a checkpoint, and neither subprocess has a resume protocol this app could
+// drive. What the user actually loses today is the queue itself -- twenty things lined up
+// and nothing to say what they were -- and that is what comes back.
+//
+// Order matters in three places:
+//   * Specs are replayed in submission order, so a `dependsOn` edge still points at a job
+//     that was submitted before it.
+//   * Each job's leftovers are deleted BEFORE it is resubmitted, so the re-run allocates a
+//     clean filename instead of tripping over a half-written file from the run that died.
+//   * The store is cleared first and each replayed job re-adds itself through the normal
+//     submission path, so a spec that can no longer be built (its input file is gone, say)
+//     does not sit in the file being retried on every launch forever.
+// The gap that leaves is a crash DURING recovery, which loses the specs not yet replayed.
+// Narrowing it would mean a write per spec; a crash inside the recovery pass is not the
+// failure this exists to survive.
+void RecoverInProgressJobs(AppContext& app) {
+    const std::vector<jobs::JobSpec> specs = app.inProgressJobStore.Load();
+    if (specs.empty()) {
+        return;
+    }
+    app.inProgressJobStore.Clear();
+
+    logging::Log::Info("recovery", "Rebuilding " + std::to_string(specs.size()) +
+                                        " job(s) left unfinished by a previous run.");
+
+    // Ids are generated per Job object, so a rebuilt job is a new id. Dependencies are
+    // remapped through this as we go; an id that is NOT in here belonged to a job that
+    // already reached a terminal state (its record was dropped then), so the edge is
+    // either already satisfied or points at something that can never report an outcome --
+    // in both cases dropping it is what lets the dependent run at all.
+    std::unordered_map<jobs::JobId, jobs::JobId> rebuiltIds;
+
+    for (const jobs::JobSpec& spec : specs) {
+        if (spec.recoveryCount >= jobs::kMaxRecoveryAttempts) {
+            logging::Log::Warning("recovery",
+                                   "Giving up on job " + spec.id + " after " +
+                                       std::to_string(spec.recoveryCount) +
+                                       " recovery attempts; it is not being re-queued.");
+            continue;
+        }
+
+        if (spec.artifact) {
+            // The orphan case: files a killed run wrote and no live job owns. Scoped by
+            // filenameBase through the same IsJobArtifactOf match every failure path uses,
+            // so it is never a bare prefix delete and never recursive.
+            jobs::CleanupJobArtifacts(app.fileSystem, spec.artifact->outputDirectory,
+                                       spec.artifact->filenameBase);
+        }
+
+        json jobParams = spec.params;
+        if (jobParams.contains("dependsOn") && jobParams.at("dependsOn").is_array()) {
+            json remapped = json::array();
+            for (const auto& dependency : jobParams.at("dependsOn")) {
+                if (!dependency.is_string()) continue;
+                auto rebuilt = rebuiltIds.find(dependency.get<std::string>());
+                if (rebuilt != rebuiltIds.end()) remapped.push_back(rebuilt->second);
+            }
+            jobParams["dependsOn"] = std::move(remapped);
+        }
+
+        try {
+            const jobs::JobId id =
+                SubmitJobOfType(app, jobs::ToWireString(spec.type), jobParams,
+                                 spec.recoveryCount + 1);
+            rebuiltIds.emplace(spec.id, id);
+            app.eventBus.Publish(
+                events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));
+        } catch (const errors::MediaToolException& e) {
+            // A job whose input has since been deleted, whose output directory is gone, or
+            // whose params a newer build rejects. Dropped with a reason rather than
+            // retried forever.
+            logging::Log::Warning("recovery", "Could not rebuild job " + spec.id + ": " +
+                                                   e.Info().code + " " + e.Info().message);
+        }
+    }
+}
+
 void RunIpcLoop(AppContext& app) {
     app.jobManager.OnJobStateChanged(
         [&app](const jobs::JobId& id, jobs::JobState state) { PublishJobStateChanged(app, id, state); });
@@ -887,6 +1035,11 @@ void RunIpcLoop(AppContext& app) {
     logging::Logger::SetEventSink([&app](events::Event event) { app.eventBus.Publish(event); });
 
     logging::Log::Info("mediatool-core", "IPC loop starting");
+
+    // After the callbacks and the event sink are wired, so a recovered job publishes the
+    // same jobCreated/jobStarted/jobProgress stream a fresh one does -- and before the
+    // read loop, so the frontend's first listJobs already includes them.
+    RecoverInProgressJobs(app);
 
     // Declared here, so it is torn down (and its threads joined) when this function
     // returns -- before AppContext, which its queued tasks reference.
