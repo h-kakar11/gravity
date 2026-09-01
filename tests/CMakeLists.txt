@@ -39,6 +39,7 @@ endif()
 add_executable(mediatool_integration_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/CoreProcessFixture.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/integration/IpcProtocolTest.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/integration/PerformanceBaselineTest.cpp"
 )
 target_include_directories(mediatool_integration_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 target_link_libraries(mediatool_integration_tests PRIVATE
@@ -54,7 +55,10 @@ target_compile_definitions(mediatool_integration_tests PRIVATE
     MEDIATOOL_TEST_DOWNLOADER="${CMAKE_SOURCE_DIR}/python/downloader/downloader.py"
 )
 add_dependencies(mediatool_integration_tests mediatool-core)
-gtest_discover_tests(mediatool_integration_tests)
+# Labelled so ctest can exclude them from the default run: they spawn real subprocesses
+# and take seconds, and the fast suite's speed is the only reason it gets run constantly.
+# `ctest --preset windows-mingw-debug-integration` runs exactly these.
+gtest_discover_tests(mediatool_integration_tests PROPERTIES LABELS "integration")
 
 add_executable(mediatool_stress_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/stress/JobManagerStressTest.cpp"
@@ -64,5 +68,5 @@ target_link_libraries(mediatool_stress_tests PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
-gtest_discover_tests(mediatool_stress_tests)
+gtest_discover_tests(mediatool_stress_tests PROPERTIES LABELS "stress")
 

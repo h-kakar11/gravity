@@ -25,6 +25,25 @@ endif()
 
 option(MEDIATOOL_BUILD_TESTS "Build the GoogleTest suite" ON)
 
+# AddressSanitizer + UndefinedBehaviorSanitizer, for finding the class of bug the stress
+# suite provokes but cannot always observe -- a data race or a use-after-free that happens
+# to not crash on this run.
+#
+# Deliberately opt-in and deliberately not part of any default preset: on the MinGW-w64
+# toolchain this project ships with, GCC's ASan runtime is not reliably available and TSan
+# does not exist for Windows at all. The supported way to run this is a Linux or WSL build
+# (`cmake --preset sanitizers-debug`), which is enough for the concurrency code -- none of
+# it is Windows-specific. scripts/ci-local.ps1 -Sanitizers says exactly this rather than
+# failing obscurely.
+option(MEDIATOOL_ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(MEDIATOOL_ENABLE_SANITIZERS)
+    if(MSVC)
+        message(FATAL_ERROR "MEDIATOOL_ENABLE_SANITIZERS is not supported on MSVC here; use a Linux/WSL build.")
+    endif()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(reproc++ CONFIG REQUIRED)

@@ -385,7 +385,19 @@ private:
         stdinCv_.notify_all();
     }
 
-    static constexpr int kPollIntervalMs = 50;
+    // How long the drain thread blocks in poll() before looking at its own inbox. It
+    // bounds three things: how quickly Terminate()/Kill() take effect, how quickly a
+    // queued stdin write goes out, and (inversely) how often this thread wakes for
+    // nothing. It was 200ms when the loop only had to notice a stop request; a queued
+    // write made it a latency floor for every write, which the IPC integration harness
+    // measured directly as a 50ms round trip at the previous value. 10ms is 100 wakeups
+    // per second per live child -- a poll() with a timeout and two atomic reads -- against
+    // at most a handful of children.
+    //
+    // Production barely notices either way: the only C++ caller that writes to a child
+    // writes one command line and closes stdin. The core's OWN stdin comes from the Rust
+    // bridge, not from here, so nothing a user waits on pays this.
+    static constexpr int kPollIntervalMs = 10;
 
     reproc::process process_;
     std::mutex stdinMutex_;
