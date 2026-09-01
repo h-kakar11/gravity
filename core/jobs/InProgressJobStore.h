@@ -54,6 +54,10 @@ public:
     // finished is not one anything needs to clean up after.
     void SetArtifactLocation(const JobId& id, const JobArtifactLocation& artifact);
 
+    // Records how many attempts `id` has spent, so the retry budget survives a restart.
+    // A no-op if `id` is unknown, same as SetArtifactLocation.
+    void SetAttemptCount(const JobId& id, int attempts);
+
     // Drops `id`. Called when a job reaches a terminal state: from that moment there is
     // nothing to recover, and leaving the entry would re-run finished work on next launch.
     void Remove(const JobId& id);

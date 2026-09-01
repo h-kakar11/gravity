@@ -70,6 +70,16 @@ public:
     std::vector<JobId> DependsOn() const;
     void SetDependsOn(std::vector<JobId> dependsOn);
 
+    // How many times Execute() has been entered for this job, including the run in
+    // progress -- 0 before the first, 1 while the first is running. Incremented by the
+    // one transition every attempt goes through (MarkRunning), so it counts attempts
+    // rather than transitions.
+    int AttemptCount() const { return attemptCount_; }
+    // Seeds the counter for a job rebuilt after a crash, so a restart does not hand it a
+    // fresh retry budget and let a permanently-broken job retry forever, three at a time,
+    // for as long as the user keeps relaunching. Set before submission; never afterwards.
+    void SetAttemptCount(int attempts) { attemptCount_ = attempts; }
+
     // --- Thread-safe snapshots -----------------------------------------------------
     JobState State() const;
     Progress GetProgress() const;
@@ -135,7 +145,14 @@ public:
     TransitionResult MarkFailed(errors::ErrorInfo error);
     TransitionResult MarkCancelled();
     // Only valid from Failed. Clears the cancellation flag so a fresh run starts clean.
+    // This is the MANUAL retry path (a user pressing Retry on a job that gave up).
     TransitionResult MarkRetrying();
+
+    // The AUTOMATIC retry path: records `error` as the most recent attempt's failure and
+    // moves RUNNING -> RETRYING directly, without the job ever being terminal. See
+    // JobStateMachine.cpp for why that distinction is load-bearing rather than cosmetic.
+    // Clears the cancellation flag, same as MarkRetrying.
+    TransitionResult MarkRetryScheduled(errors::ErrorInfo error);
 
     // There is deliberately no public "can this job transition to X?" query. Answering it
     // and then acting on the answer is the check-then-act pattern the #4 race lived in --
@@ -184,6 +201,10 @@ private:
 
     std::atomic<bool> cancellationRequested_{false};
     std::atomic<int> priority_{0};
+    // Atomic rather than mutex_-guarded for the same reason priority_ is: it is read from
+    // JobManager's retry decision on a worker thread while an IPC thread may be building
+    // a snapshot, and it needs no consistency with any other field.
+    std::atomic<int> attemptCount_{0};
     std::vector<JobId> dependsOn_;
 
     StateChangedCallback onStateChanged_;

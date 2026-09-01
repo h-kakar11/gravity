@@ -1,5 +1,6 @@
 #include "core/jobs/SchedulerCore.h"
 
+#include <chrono>
 #include <optional>
 #include <string>
 #include <vector>
@@ -360,6 +361,79 @@ TEST_F(SchedulerCoreTest, ALargeQueueStaysInStrictSchedulingOrder) {
         EXPECT_EQ(order[kPerBand + i], "mid-" + std::to_string(i));
         EXPECT_EQ(order[2 * kPerBand + i], "low-" + std::to_string(i));
     }
+}
+
+// --- Backoff-gated eligibility (Phase C) ----------------------------------------------
+// Still not a single thread: the scheduler takes the current time as an argument rather
+// than reading a clock, so the whole backoff schedule is a deterministic function call.
+
+TEST_F(SchedulerCoreTest, AJobRequeuedWithABackoffIsNotEligibleUntilItsTimeArrives) {
+    const SchedulerCore::TimePoint t0 = SchedulerCore::TimePoint{} + std::chrono::hours(1);
+    SubmitJob("a");
+    ASSERT_EQ(scheduler_.TakeNextEligible(t0), "a");
+    scheduler_.Requeue("a", 0, t0 + std::chrono::seconds(5));
+
+    EXPECT_FALSE(scheduler_.HasEligible(t0));
+    EXPECT_FALSE(scheduler_.HasEligible(t0 + std::chrono::seconds(4)));
+    EXPECT_EQ(scheduler_.TakeNextEligible(t0 + std::chrono::seconds(4)), std::nullopt);
+    // It is still PENDING throughout -- held back, not forgotten.
+    EXPECT_TRUE(scheduler_.IsPending("a"));
+
+    EXPECT_TRUE(scheduler_.HasEligible(t0 + std::chrono::seconds(5)));
+    EXPECT_EQ(scheduler_.TakeNextEligible(t0 + std::chrono::seconds(5)), "a");
+}
+
+TEST_F(SchedulerCoreTest, ABackoffDoesNotBlockOtherJobsBehindIt) {
+    // The same "skipped, not blocking" rule dependencies already follow: a high-priority
+    // job waiting out a backoff must not stall a lower-priority one that is ready.
+    const SchedulerCore::TimePoint t0 = SchedulerCore::TimePoint{} + std::chrono::hours(1);
+    SubmitJob("high", 10);
+    SubmitJob("low", 0);
+    ASSERT_EQ(scheduler_.TakeNextEligible(t0), "high");
+    scheduler_.Requeue("high", 10, t0 + std::chrono::seconds(30));
+
+    EXPECT_EQ(scheduler_.TakeNextEligible(t0), "low");
+}
+
+TEST_F(SchedulerCoreTest, NextEligibleTimeIsTheEarliestBackoffAWorkerCouldSleepUntil) {
+    const SchedulerCore::TimePoint t0 = SchedulerCore::TimePoint{} + std::chrono::hours(1);
+    SubmitJob("a");
+    SubmitJob("b");
+    ASSERT_TRUE(scheduler_.TakeNextEligible(t0).has_value());
+    ASSERT_TRUE(scheduler_.TakeNextEligible(t0).has_value());
+    scheduler_.Requeue("a", 0, t0 + std::chrono::seconds(30));
+    scheduler_.Requeue("b", 0, t0 + std::chrono::seconds(5));
+
+    // The nearer of the two: a worker that slept until the later one would leave "b"
+    // sitting past its own deadline.
+    EXPECT_EQ(scheduler_.NextEligibleTime(t0), t0 + std::chrono::seconds(5));
+    // Once "b" is eligible, only "a" is still on a clock.
+    EXPECT_EQ(scheduler_.NextEligibleTime(t0 + std::chrono::seconds(5)),
+               t0 + std::chrono::seconds(30));
+    // And with nothing waiting on a clock at all there is no deadline to sleep until --
+    // a worker should wait on the notify instead, indefinitely.
+    EXPECT_EQ(scheduler_.NextEligibleTime(t0 + std::chrono::seconds(30)), std::nullopt);
+}
+
+TEST_F(SchedulerCoreTest, AJobWaitingOnADependencyIsNotADeadlineToSleepUntil) {
+    // It becomes eligible when the dependency finishes, which is a notify, not a clock.
+    // Reporting it as a deadline would make workers spin.
+    SubmitJob("first");
+    SubmitJob("second", 0, {"first"});
+    ASSERT_EQ(scheduler_.TakeNextEligible(), "first");
+    EXPECT_EQ(scheduler_.NextEligibleTime(SchedulerCore::TimePoint{}), std::nullopt);
+}
+
+TEST_F(SchedulerCoreTest, TakingAJobConsumesItsBackoffSoAPlainRequeueRunsImmediately) {
+    const SchedulerCore::TimePoint t0 = SchedulerCore::TimePoint{} + std::chrono::hours(1);
+    SubmitJob("a");
+    ASSERT_TRUE(scheduler_.TakeNextEligible(t0).has_value());
+    scheduler_.Requeue("a", 0, t0 + std::chrono::seconds(5));
+    ASSERT_EQ(scheduler_.TakeNextEligible(t0 + std::chrono::seconds(5)), "a");
+
+    // A manual retry passes no backoff at all; the previous one must not linger.
+    scheduler_.Requeue("a", 0);
+    EXPECT_TRUE(scheduler_.HasEligible(t0));
 }
 
 }  // namespace

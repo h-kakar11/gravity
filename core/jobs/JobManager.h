@@ -34,6 +34,7 @@
 #include "core/jobs/JobStateMachine.h"
 #include "core/jobs/JobTypes.h"
 #include "core/jobs/Progress.h"
+#include "core/jobs/RetryPolicy.h"
 #include "core/jobs/SchedulerCore.h"
 
 namespace mediatool::jobs {
@@ -53,6 +54,10 @@ public:
         JobType type;
         JobState state;
         int priority = 0;
+        // Attempts that have already run, including the one in progress. 1 for a job on
+        // its first run; 2 while it is retrying after one failure. Surfaced so the UI can
+        // say "attempt 2 of 3" instead of silently re-running a job the user watched fail.
+        int attempts = 0;
         Progress progress;
         std::optional<errors::ErrorInfo> error;
         std::optional<nlohmann::json> result;
@@ -71,7 +76,11 @@ public:
     // pool. Throws errors::MediaToolException{EngineFailure, "E_WORKER_POOL_UNAVAILABLE"}
     // only if not one worker could be started, since a JobManager that can never run
     // anything is not worth handing back.
-    explicit JobManager(std::size_t maxConcurrentJobs = 1);
+    // `retryPolicy` governs AUTOMATIC retry of failed jobs; the default retries a
+    // recoverable failure twice with exponential backoff. Pass `RetryPolicy{.maxAttempts
+    // = 1}` to disable it entirely, which is what a test that wants a failure to stay
+    // failed should do.
+    explicit JobManager(std::size_t maxConcurrentJobs = 1, RetryPolicy retryPolicy = RetryPolicy{});
     ~JobManager();
 
     JobManager(const JobManager&) = delete;
@@ -112,8 +121,12 @@ public:
     void CancelJob(const JobId& id);
     void PauseJob(const JobId& id);
     void ResumeJob(const JobId& id);
-    // Only valid from Failed.
+    // Only valid from Failed. The MANUAL retry a user asks for -- unlike an automatic
+    // one, it ignores the policy's attempt limit, because a person who presses Retry has
+    // decided something the policy could not know.
     void RetryJob(const JobId& id);
+
+    const RetryPolicy& GetRetryPolicy() const { return retryPolicy_; }
 
     // Drops a job in a terminal state (Completed/Failed/Cancelled) from the active set.
     // Throws if `id` is unknown, the job is not yet terminal, or a still-queued job
@@ -146,6 +159,11 @@ private:
     // race -- see the TransitionResult documentation in core/jobs/JobStateMachine.h.
     static bool ClaimedForExecution(const Job& job, TransitionResult result,
                                      JobState attempted = JobState::Running);
+    // Records a failed attempt and decides what happens next: either the job is left
+    // FAILED, or -- when the policy says the failure is worth another attempt -- it goes
+    // RUNNING -> RETRYING (never through FAILED, see JobStateMachine.cpp) and is requeued
+    // behind a backoff.
+    void FinalizeFailure(Job& job, const errors::ErrorInfo& error);
     Job* LookupJobLocked(const JobId& id) const;
     // Cancels jobs the scheduler reported as unrunnable because a dependency did not
     // complete. Must be called with mutex_ released: cancelling fires state-changed
@@ -159,6 +177,8 @@ private:
 
     // Not const: fixed up in the constructor body once the pool's real size is known.
     std::size_t maxConcurrentJobs_ = 0;
+    // Immutable after construction, so it needs no lock.
+    RetryPolicy retryPolicy_;
 
     mutable std::mutex mutex_;
     std::map<JobId, std::unique_ptr<Job>> jobs_;

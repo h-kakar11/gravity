@@ -602,3 +602,67 @@ Both job types cleaned up after a failed engine/provider call under
 entirely, which is precisely the case where the half-written file outlives every code path
 that still knows its name. The handler rethrows unchanged; only the cleanup is
 unconditional.
+
+### Automatic retry needs two signals, not one
+
+The obvious design keys retry off `ErrorInfo::recoverable` alone, which the plan called
+for. That gets one class of failures wrong in each direction, so the implemented rule
+requires both signals to agree.
+
+`recoverable` is set by the layer that produced the failure, and it is the only thing that
+can distinguish a 503 from a DNS name that will never resolve — a category cannot. But it
+is also the flag most likely to be set carelessly, and a provider that marks a full disk
+"recoverable" turns one clear failure into three identical ones several seconds apart. So
+category acts as a veto over deterministic failures — `FILE_NOT_FOUND`, `INVALID_FILE`,
+`UNSUPPORTED_FORMAT`, `PERMISSION_ERROR`, `DISK_SPACE_ERROR`, `CANCELLED` — regardless of
+the flag, and `recoverable` is the positive signal within the categories that remain.
+
+`CANCELLED` is in that veto list for a different reason than the others: retrying it is not
+wasted work, it is the app arguing with the user.
+
+### An automatic retry never passes through FAILED
+
+`JobState` already had `RETRYING`, reachable only from `FAILED` — the manual path, a user
+pressing Retry on a job that gave up. Reusing it for automatic retry would have meant a
+retried job briefly entering a terminal state, and `FAILED` is terminal in ways that are
+not cosmetic: `SchedulerCore::RecordTerminal` cancels every job that `dependsOn` it, and
+`JobHistoryStore` records the failure. An entire dependent chain torn down, and a permanent
+history entry written, for an attempt the next scheduling decision was about to repeat.
+
+So `RUNNING -> RETRYING` was added as its own transition. The job never becomes terminal, no
+dependent is stranded, no history is written, and the frontend gets a `jobRetrying` event
+carrying the attempt number, the limit and the error rather than watching a job flicker
+through `FAILED`. Only a job that exhausts its attempts — or fails in a way the policy will
+not retry — reaches `FAILED`, which is now the only terminal failure there is.
+
+`RETRYING -> CANCELLED` was added at the same time, and `Job::RequestCancel` now finalizes a
+`RETRYING` job on the spot the way it already did a `QUEUED` one. Both states have no worker
+thread inside `Execute()` to notice the cancellation flag, so nothing else would ever
+finalize them — and a backoff is exactly when a user gives up on a job, so having to wait
+out a 30-second timer before Cancel took effect would make it feel broken.
+
+### The backoff lives in the scheduler, not in a timer thread
+
+Waiting out a backoff needs something to wake up when it elapses. The obvious options were a
+dedicated timer thread or a sleeping worker, both of which add a second concurrency
+mechanism to a subsystem whose whole design is "one lock, one class that touches threads".
+
+Instead `SchedulerCore` gained a `notBefore` per pending entry and takes the current time as
+an *argument*: `TakeNextEligible(now)`, `HasEligible(now)`, `NextEligibleTime(now)`. It stays
+threadless and clockless, so the entire backoff schedule is testable as a sequence of
+function calls with no real waiting — the same property that made priorities and
+dependencies testable. `JobManager`'s workers then sleep with `wait_until(NextEligibleTime)`
+rather than `wait`, recomputing the deadline on every pass so a shorter backoff scheduled
+while a worker slept shortens the sleep.
+
+`TimePoint::max()` is the default `now`, meaning "time is not a constraint", so every
+existing call site and test that never schedules a backoff is unaffected and does not have
+to think about it.
+
+### `maxRetryAttempts` is read with `value()`, not `at()`
+
+Every other field in `Settings::FromJson` uses `at()`. That is fine for a field that has
+always existed and wrong for one being added: `LoadFrom` catches a parse failure by falling
+back to `Settings::Defaults()`, so a settings file written before this field existed — a
+completely normal thing to find on disk after an upgrade — would have silently discarded
+every setting the user had chosen. An additive field must default, not fail.

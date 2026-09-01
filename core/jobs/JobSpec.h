@@ -51,6 +51,10 @@ struct JobSpec {
     // the core on every run would otherwise re-queue itself forever on every launch --
     // see kMaxRecoveryAttempts.
     int recoveryCount = 0;
+    // Attempts already spent against the retry policy (core/jobs/RetryPolicy.h). Carried
+    // across a restart for the same reason recoveryCount is: without it, relaunching hands
+    // a permanently-broken job a fresh budget every time.
+    int attempts = 0;
 
     nlohmann::json ToJson() const;
     // Throws nlohmann::json::exception on a malformed entry -- callers that read a file

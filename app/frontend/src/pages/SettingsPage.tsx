@@ -266,6 +266,19 @@ export default function SettingsPage() {
             onChange={(e) => update("processing", { concurrentJobs: Number(e.target.value) })}
           />
         </Field>
+        <Field
+          label="Retry attempts"
+          hint="1-10, counting the first try. Only failures that could plausibly succeed on a second attempt are retried \u2014 a network drop, not a full disk or a missing file. Set to 1 to never retry."
+        >
+          <input
+            className={styles.numberInput}
+            type="number"
+            min={1}
+            max={10}
+            value={settings.processing.maxRetryAttempts}
+            onChange={(e) => update("processing", { maxRetryAttempts: Number(e.target.value) })}
+          />
+        </Field>
       </GlassCard>
 
       <GlassCard className={styles.section}>

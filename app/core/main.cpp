@@ -225,7 +225,9 @@ struct AppContext {
           ytDlpProvider(processRunner, pythonTool.path, downloaderScriptTool.path,
                         media::DiscoverFfmpegPath(processRunner, EffectiveFfmpegOverride(settings))
                             .value_or("")),
-          jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs))) {}
+          jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs)),
+                      jobs::RetryPolicy{
+                          .maxAttempts = std::max(1, settings.processing.maxRetryAttempts)}) {}
 };
 
 // Called before anything that would launch the Python downloader. Startup deliberately
@@ -305,12 +307,27 @@ void PublishJobStateChanged(AppContext& app, const jobs::JobId& id, jobs::JobSta
             app.inProgressJobStore.Remove(id);
             return;
         }
+        case JobState::Retrying: {
+            // Not a terminal event, and deliberately not a jobFailed: the attempt failed,
+            // the job did not. The frontend needs all four facts to say something honest
+            // ("attempt 2 of 3, retrying in 4s, because ...") instead of showing a job
+            // flicker through FAILED and back.
+            const auto snapshot = app.jobManager.GetJob(id);
+            json data{{"state", "RETRYING"},
+                       {"attempt", snapshot.attempts},
+                       {"maxAttempts", app.jobManager.GetRetryPolicy().maxAttempts},
+                       {"retryInMs", 0}};
+            if (snapshot.error) data["error"] = snapshot.error->ToJson();
+            app.eventBus.Publish(events::MakeEvent(events::EventType::JobRetrying, data, id));
+            // The attempt budget has to survive a crash too, or relaunching the app hands
+            // a permanently-broken job a fresh three attempts every time.
+            app.inProgressJobStore.SetAttemptCount(id, snapshot.attempts);
+            return;
+        }
         case JobState::Queued:
-        case JobState::Retrying:
-            // Queued is announced explicitly by the createJob handler (JobManager has no
-            // "transitioned into Queued" callback since a Job starts Queued at
-            // construction); Retrying is a momentary internal state with no wire event of
-            // its own -- the follow-up Retrying->Running transition above covers it.
+            // Announced explicitly by the createJob handler: JobManager has no
+            // "transitioned into Queued" callback, since a Job starts Queued at
+            // construction.
             return;
     }
 }
@@ -605,9 +622,10 @@ std::unique_ptr<jobs::Job> BuildMediaProcessingJob(AppContext& app, const json& 
 //
 // `recoveryCount` is carried through from a recovered spec (0 for a fresh request) so a
 // job that takes the process down on every attempt eventually stops being recovered --
-// see jobs::kMaxRecoveryAttempts.
+// see jobs::kMaxRecoveryAttempts. `attempts` likewise carries the retry budget already
+// spent, so a relaunch does not hand a permanently-broken job a fresh three attempts.
 jobs::JobId SubmitJobOfType(AppContext& app, const std::string& typeWire, const json& jobParams,
-                             int recoveryCount = 0) {
+                             int recoveryCount = 0, int attempts = 0) {
     // The hook fires from a worker thread once the job has reserved its output filename,
     // which is necessarily after SubmitJob() below -- so capturing an id that is filled in
     // a few lines further down is safe, and is the only way to hand a job its own id
@@ -638,6 +656,7 @@ jobs::JobId SubmitJobOfType(AppContext& app, const std::string& typeWire, const 
     }
 
     ApplySchedulingParams(*job, jobParams);
+    job->SetAttemptCount(attempts);
     const jobs::JobId id = job->Id();
     *idHolder = id;
 
@@ -647,6 +666,7 @@ jobs::JobId SubmitJobOfType(AppContext& app, const std::string& typeWire, const 
     spec.params = jobParams;
     spec.createdAt = job->CreatedAt();
     spec.recoveryCount = recoveryCount;
+    spec.attempts = attempts;
     // Persisted BEFORE the submission, not after: a crash in between then re-queues a job
     // that never ran, which is the harmless direction. The other order can lose a job
     // that is already running.
@@ -1012,7 +1032,7 @@ void RecoverInProgressJobs(AppContext& app) {
         try {
             const jobs::JobId id =
                 SubmitJobOfType(app, jobs::ToWireString(spec.type), jobParams,
-                                 spec.recoveryCount + 1);
+                                 spec.recoveryCount + 1, spec.attempts);
             rebuiltIds.emplace(spec.id, id);
             app.eventBus.Publish(
                 events::MakeEvent(events::EventType::JobCreated, {{"state", "QUEUED"}}, id));

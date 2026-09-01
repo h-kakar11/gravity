@@ -122,6 +122,7 @@ nlohmann::json Settings::ToJson() const {
              {"defaultCompressionQuality", processing.defaultCompressionQuality},
              {"defaultOutputFormat", processing.defaultOutputFormat},
              {"concurrentJobs", processing.concurrentJobs},
+             {"maxRetryAttempts", processing.maxRetryAttempts},
          }},
         {"privacy",
          {
@@ -166,6 +167,11 @@ Settings Settings::FromJson(const nlohmann::json& json) {
         processing.at("defaultCompressionQuality").get<std::string>();
     settings.processing.defaultOutputFormat = processing.at("defaultOutputFormat").get<std::string>();
     settings.processing.concurrentJobs = processing.at("concurrentJobs").get<int>();
+    // value(), not at(): a settings file written before this field existed is a normal
+    // thing to find on disk, and FromJson throwing on it would send LoadFrom() down its
+    // "use defaults" path -- silently discarding every setting the user had chosen. An
+    // additive field must default, not fail.
+    settings.processing.maxRetryAttempts = processing.value("maxRetryAttempts", 3);
 
     const auto& privacy = json.at("privacy");
     settings.privacy.analyticsEnabled = privacy.at("analyticsEnabled").get<bool>();
@@ -188,6 +194,9 @@ void Settings::Validate() const {
                  "downloads.speedUnits");
 
     RequireInRange(processing.concurrentJobs, 1, 25, "processing.concurrentJobs");
+    // Upper bound because each attempt after the first waits out an exponential backoff:
+    // ten attempts is already several minutes of a job that will not succeed.
+    RequireInRange(processing.maxRetryAttempts, 1, 10, "processing.maxRetryAttempts");
     RequireOneOf(processing.defaultCompressionQuality, {"lowest", "low", "medium", "high", "ultra"},
                  "processing.defaultCompressionQuality");
 
@@ -224,6 +233,7 @@ Settings Settings::Defaults() {
     settings.processing.defaultCompressionQuality = "medium";
     settings.processing.defaultOutputFormat = "";
     settings.processing.concurrentJobs = 1;
+    settings.processing.maxRetryAttempts = 3;
 
     settings.privacy.analyticsEnabled = false;
     settings.privacy.crashReportingEnabled = false;

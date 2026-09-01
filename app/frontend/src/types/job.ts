@@ -29,6 +29,10 @@ export interface JobSnapshot {
   state: JobState;
   // Scheduling priority (issue #17): higher runs before lower among jobs still Queued.
   priority: number;
+  // Attempts that have already run, including the one in progress -- 1 on a first run, 2
+  // while retrying after one failure. Compare against settings.processing.maxRetryAttempts
+  // to render "attempt 2 of 3".
+  attempts: number;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

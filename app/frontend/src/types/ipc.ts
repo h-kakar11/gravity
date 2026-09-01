@@ -132,6 +132,7 @@ export type CoreEventName =
   | "jobCompleted"
   | "jobFailed"
   | "jobCancelled"
+  | "jobRetrying"
   | "fileDetected"
   | "hardwareDetected"
   | "downloadMetadataReceived"
@@ -149,6 +150,15 @@ export interface CoreEventData {
   jobCompleted: { state: "COMPLETED"; result?: Record<string, unknown> };
   jobFailed: { state: "FAILED"; error: ErrorInfo };
   jobCancelled: { state: "CANCELLED" };
+  // A failed ATTEMPT that will be repeated -- not a terminal outcome, and deliberately
+  // not a jobFailed. `attempt` is the attempt that just failed, `maxAttempts` the limit.
+  jobRetrying: {
+    state: "RETRYING";
+    attempt: number;
+    maxAttempts: number;
+    retryInMs: number;
+    error: ErrorInfo;
+  };
   fileDetected: { fileInfo: FileInfo };
   hardwareDetected: { hardwareInfo: HardwareInfo };
   downloadMetadataReceived: {

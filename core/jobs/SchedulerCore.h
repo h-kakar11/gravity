@@ -23,6 +23,7 @@
 // A job with unmet dependencies is skipped, not blocking: a lower-priority job whose
 // dependencies are met runs ahead of a higher-priority one still waiting.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -36,6 +37,15 @@ namespace mediatool::jobs {
 
 class SchedulerCore {
 public:
+    // A pending job may additionally be held back until a point in time -- the backoff
+    // before an automatic retry. It is expressed as an absolute time supplied by the
+    // caller, not a duration measured here, because this class has no clock: every
+    // method stays a pure function of the facts it is handed, which is what lets the
+    // whole backoff schedule be tested without waiting on a real timer.
+    //
+    // steady_clock, so a wall-clock correction cannot make a job eligible early or late.
+    using TimePoint = std::chrono::steady_clock::time_point;
+
     struct Submission {
         JobId id;
         int priority = 0;
@@ -60,14 +70,25 @@ public:
     void Submit(Submission submission);
 
     // The next job that may start: the highest-priority pending job all of whose
-    // dependencies have COMPLETED. Marks it running and removes it from the pending set.
-    // Returns nullopt if nothing is eligible, which is not the same as "nothing is pending"
-    // -- jobs may be waiting on dependencies.
-    std::optional<JobId> TakeNextEligible();
+    // dependencies have COMPLETED and whose backoff (if any) has elapsed as of `now`.
+    // Marks it running and removes it from the pending set. Returns nullopt if nothing is
+    // eligible, which is not the same as "nothing is pending" -- jobs may be waiting on a
+    // dependency or on a clock.
+    //
+    // `now` defaults to TimePoint::max(), i.e. "time is not a constraint", so a caller
+    // that never schedules a backoff never has to think about it.
+    std::optional<JobId> TakeNextEligible(TimePoint now = TimePoint::max());
 
-    // Whether TakeNextEligible() would return a job right now. For a worker's wait
-    // predicate; inherently a snapshot.
-    bool HasEligible() const;
+    // Whether TakeNextEligible(now) would return a job. For a worker's wait predicate;
+    // inherently a snapshot.
+    bool HasEligible(TimePoint now = TimePoint::max()) const;
+
+    // The earliest time at which a pending job that is dependency-satisfied but still
+    // waiting on its backoff would become eligible, or nullopt if nothing is waiting on a
+    // clock. A worker with nothing to run sleeps until this instead of until the next
+    // notify, which is the difference between a backoff that elapses and one that only
+    // elapses when something else happens to wake the pool.
+    std::optional<TimePoint> NextEligibleTime(TimePoint now) const;
 
     // Records that `id` finished in `terminal`, and returns the ids of pending jobs that
     // can now never run because they depend on it and it did not complete.
@@ -78,10 +99,11 @@ public:
     // here. Calling this twice for the same job is a no-op the second time.
     std::vector<JobId> RecordTerminal(const JobId& id, JobState terminal);
 
-    // Returns a known, finished job to the pending set (a retry). Its dependency edges are
-    // unchanged: they completed once and stay completed. Throws E_JOB_NOT_FOUND if `id` is
-    // unknown; a no-op if it is already pending.
-    void Requeue(const JobId& id, int priority);
+    // Returns a known job to the pending set (a retry). Its dependency edges are
+    // unchanged: they completed once and stay completed. `notBefore` holds it back until
+    // that instant -- the retry backoff; the default is "immediately". Throws
+    // E_JOB_NOT_FOUND if `id` is unknown; a no-op if it is already pending.
+    void Requeue(const JobId& id, int priority, TimePoint notBefore = TimePoint{});
 
     // Drops everything the scheduler knows about `id`. Throws
     // {Unknown, "E_JOB_HAS_DEPENDENTS"} if a pending job depends on it -- forgetting it
@@ -122,10 +144,15 @@ private:
         std::vector<JobId> dependsOn;
         Phase phase = Phase::Pending;
         JobState terminal = JobState::Queued;  // meaningful only when phase == Finished
+        // Epoch (the default-constructed TimePoint) means "no backoff", which is always
+        // in the past and therefore never gates anything.
+        TimePoint notBefore{};
     };
 
     // True if every dependency of `id` has finished as COMPLETED.
     bool DependenciesSatisfied(const JobId& id) const;
+    // Dependency-satisfied AND past its backoff as of `now`.
+    bool IsEligible(const JobId& id, TimePoint now) const;
 
     std::map<JobId, Entry> entries_;
     std::map<PendingKey, JobId> pending_;             // iterates in scheduling order

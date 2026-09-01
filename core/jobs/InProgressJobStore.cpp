@@ -163,6 +163,18 @@ void InProgressJobStore::SetArtifactLocation(const JobId& id,
     SaveLocked(specs);
 }
 
+void InProgressJobStore::SetAttemptCount(const JobId& id, int attempts) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<JobSpec> specs = LoadLocked();
+    auto existing =
+        std::find_if(specs.begin(), specs.end(), [&](const JobSpec& s) { return s.id == id; });
+    if (existing == specs.end() || existing->attempts == attempts) {
+        return;  // unknown job, or nothing changed -- no reason to rewrite the file
+    }
+    existing->attempts = attempts;
+    SaveLocked(specs);
+}
+
 void InProgressJobStore::Remove(const JobId& id) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<JobSpec> specs = LoadLocked();

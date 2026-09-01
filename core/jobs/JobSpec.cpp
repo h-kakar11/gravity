@@ -9,6 +9,7 @@ nlohmann::json JobSpec::ToJson() const {
     json["params"] = params;
     json["createdAt"] = createdAt;
     json["recoveryCount"] = recoveryCount;
+    json["attempts"] = attempts;
     if (artifact) {
         json["artifact"] = {{"outputDirectory", artifact->outputDirectory},
                              {"filenameBase", artifact->filenameBase}};
@@ -26,6 +27,7 @@ JobSpec JobSpec::FromJson(const nlohmann::json& json) {
     }
     spec.createdAt = json.value("createdAt", std::string());
     spec.recoveryCount = json.value("recoveryCount", 0);
+    spec.attempts = json.value("attempts", 0);
     if (json.contains("artifact") && json.at("artifact").is_object()) {
         const nlohmann::json& artifact = json.at("artifact");
         JobArtifactLocation location;

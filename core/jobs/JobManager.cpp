@@ -1,5 +1,6 @@
 #include "core/jobs/JobManager.h"
 
+#include <chrono>
 #include <system_error>
 
 #include "core/errors/MediaToolException.h"
@@ -7,7 +8,8 @@
 
 namespace mediatool::jobs {
 
-JobManager::JobManager(std::size_t requestedConcurrentJobs) {
+JobManager::JobManager(std::size_t requestedConcurrentJobs, RetryPolicy retryPolicy)
+    : retryPolicy_(retryPolicy) {
     const std::size_t requested = requestedConcurrentJobs == 0 ? 1 : requestedConcurrentJobs;
     workers_.reserve(requested);
     for (std::size_t i = 0; i < requested; ++i) {
@@ -148,6 +150,7 @@ JobManager::JobSnapshot JobManager::SnapshotOf(const Job& job) const {
     snapshot.type = job.Type();
     snapshot.state = job.State();
     snapshot.priority = job.Priority();
+    snapshot.attempts = job.AttemptCount();
     snapshot.progress = job.GetProgress();
     snapshot.error = job.GetError();
     snapshot.result = job.GetResult();
@@ -164,6 +167,7 @@ nlohmann::json JobManager::JobSnapshot::ToJson() const {
     json["type"] = ToWireString(type);
     json["state"] = ToWireString(state);
     json["priority"] = priority;
+    json["attempts"] = attempts;
     json["createdAt"] = createdAt;
     if (startedAt) json["startedAt"] = *startedAt;
     if (completedAt) json["completedAt"] = *completedAt;
@@ -313,12 +317,26 @@ void JobManager::WorkerLoop() {
         JobId id;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            // Note the predicate: not "is anything queued" but "is anything *runnable*". A
-            // queue full of jobs waiting on a dependency must leave workers asleep rather
-            // than spinning on entries they cannot start.
-            queueCv_.wait(lock, [this] { return stopping_ || scheduler_.HasEligible(); });
+            // Not "is anything queued" but "is anything *runnable* right now". A queue
+            // full of jobs waiting on a dependency must leave workers asleep rather than
+            // spinning on entries they cannot start -- and a job waiting out a retry
+            // backoff must wake the pool when its time comes rather than only when some
+            // unrelated event happens to notify it, which is what the timed wait below is
+            // for. Written as a loop rather than a wait predicate because the deadline is
+            // recomputed on every pass: a shorter backoff scheduled while this worker
+            // slept must shorten the sleep.
+            while (!stopping_ && !scheduler_.HasEligible(std::chrono::steady_clock::now())) {
+                const std::optional<SchedulerCore::TimePoint> wakeAt =
+                    scheduler_.NextEligibleTime(std::chrono::steady_clock::now());
+                if (wakeAt) {
+                    queueCv_.wait_until(lock, *wakeAt);
+                } else {
+                    queueCv_.wait(lock);
+                }
+            }
             if (stopping_) return;
-            const std::optional<JobId> next = scheduler_.TakeNextEligible();
+            const std::optional<JobId> next =
+                scheduler_.TakeNextEligible(std::chrono::steady_clock::now());
             if (!next) continue;  // lost the race to another worker
             id = *next;
         }
@@ -376,16 +394,59 @@ void JobManager::RunJob(const JobId& id) {
         if (e.Info().category == errors::ErrorCategory::Cancelled) {
             job->MarkCancelled();
         } else {
-            job->MarkFailed(e.Info());
+            FinalizeFailure(*job, e.Info());
         }
     } catch (const std::exception& e) {
-        job->MarkFailed(errors::ErrorInfo::Make(
-            "E_JOB_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
-            "Job failed unexpectedly", e.what()));
+        FinalizeFailure(*job, errors::ErrorInfo::Make(
+                                   "E_JOB_UNHANDLED_EXCEPTION", errors::ErrorCategory::Unknown,
+                                   "Job failed unexpectedly", e.what()));
     }
     // Every path above ends in a Mark* whose result is deliberately unexamined: by then
     // the only way it can fail is that a concurrent cancellation already finalized the
     // job, which is precisely the outcome those calls were trying to record.
+}
+
+void JobManager::FinalizeFailure(Job& job, const errors::ErrorInfo& error) {
+    const RetryDecision decision = DecideRetry(error, job.AttemptCount(), retryPolicy_);
+    if (!decision.shouldRetry) {
+        logging::Log::Debug("JobManager", "Job " + job.Id() + " failed for good: " + decision.reason);
+        job.MarkFailed(error);
+        return;
+    }
+
+    // Checked before the transition, not after: a job resurrected during shutdown would
+    // be requeued into a scheduler whose pending set has already been drained and
+    // cancelled, leaving it parked in RETRYING with no worker left to pick it up. The
+    // window between this read and the Requeue below is real but harmless -- the worst
+    // case is exactly that parked job, in a process that is exiting anyway.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) {
+            job.MarkFailed(error);
+            return;
+        }
+    }
+
+    // RUNNING -> RETRYING directly. Not through FAILED: that would tell the scheduler
+    // this job had ended, cancelling everything that depends on it, and write a failure
+    // into Session History -- both for an attempt the next line is about to repeat. Fires
+    // the state-changed callback, which re-enters this class, so it must not be called
+    // under mutex_.
+    if (job.MarkRetryScheduled(error) != TransitionResult::Success) {
+        return;  // cancelled or otherwise finalized underneath us; nothing to retry
+    }
+
+    logging::Log::Info("JobManager", "Retrying job " + job.Id() + " in " +
+                                          std::to_string(decision.delay.count()) + "ms: " +
+                                          decision.reason);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        scheduler_.Requeue(job.Id(), job.Priority(),
+                            std::chrono::steady_clock::now() + decision.delay);
+    }
+    // notify_all, not notify_one: the woken worker may not be the one whose timed wait is
+    // shortest, and a worker asleep on a later deadline needs to recompute it.
+    queueCv_.notify_all();
 }
 
 // Runs the testing-only interleaving hook (if any) and then attempts the Queued ->

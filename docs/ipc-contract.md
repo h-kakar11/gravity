@@ -207,6 +207,49 @@ otherwise hold a worker thread indefinitely. The child is stopped before the err
 reported. Downloads deliberately have no such deadline — a legitimately long download is
 not a hang.
 
+### Automatic retry
+
+A job that fails is retried automatically when — and only when — **both** of these hold:
+
+* the layer that produced the failure set `error.recoverable`, and
+* the failure's category is not one where a second attempt cannot help. `FILE_NOT_FOUND`,
+  `INVALID_FILE`, `UNSUPPORTED_FORMAT`, `PERMISSION_ERROR`, `DISK_SPACE_ERROR` and
+  `CANCELLED` are never retried, whatever `recoverable` says.
+
+Either signal alone gets a class of failures wrong, which is why both are required: a
+provider that mislabels a full disk as recoverable would otherwise turn one clear failure
+into three identical ones seconds apart, and a `NETWORK_ERROR` for a hostname that does not
+resolve fails the same way forever. See `core/jobs/RetryPolicy.h`.
+
+The budget is `settings.processing.maxRetryAttempts` (1–10, default 3), counting the first
+attempt — so `1` disables retry entirely. Waits are exponential (2s, then 4s, …, capped at
+60s). A retried job transitions `RUNNING → RETRYING → RUNNING`, **never through `FAILED`**:
+entering a terminal state would cancel every job that `dependsOn` it and write a failure
+into `listJobHistory`, both for an attempt that is about to be repeated. Only a job that has
+exhausted its attempts, or failed in a way that is not retryable, reaches `FAILED`.
+
+A job sitting out a backoff is fully cancellable — `cancelJob` finalizes it immediately
+rather than waiting out the timer.
+
+Every job snapshot carries `attempts`: the attempts that have already run, including the
+one in progress. Compare it against `settings.processing.maxRetryAttempts` to render
+"attempt 2 of 3". The count survives a restart, so a job rebuilt by crash recovery does not
+get a fresh budget.
+
+### Crash recovery
+
+Unfinished jobs are persisted as the `createJob` request that produced them and replayed on
+the next launch through the same submission path a fresh request takes. The guarantee is
+deliberately the weak one: **a job interrupted by a crash is rebuilt and re-run from the
+start, not resumed** — its subprocess died with the process, and neither yt-dlp nor ffmpeg
+offers a resume protocol to drive. Artifacts the killed run left in the output directory are
+deleted before the rebuilt job starts.
+
+A rebuilt job is a new `Job` and therefore has a **new job id**; `dependsOn` edges are
+remapped across the replay, and an edge naming a job that already finished is dropped
+(it is either satisfied or unsatisfiable). Recovery is capped at three attempts per job, so
+a job that takes the core down cannot re-queue itself on every launch.
+
 ## Events (core -> ... -> React)
 
 **Actually emitted today:**
@@ -214,6 +257,12 @@ not a hang.
 `jobCreated`, `jobStarted`, `jobProgress`, `jobPaused`, `jobResumed`, `jobCompleted`,
 `jobFailed`, `jobCancelled` — all carry `jobId` and a `data` object that is at minimum
 `{state: JobState}` and, for `jobProgress`, the full `Progress` object.
+
+`jobRetrying` — `data: {state: "RETRYING", attempt: number, maxAttempts: number,
+retryInMs: number, error: ErrorInfo}`. **Not a terminal event and deliberately not a
+`jobFailed`:** the attempt failed, the job did not. A job that will be retried never enters
+`FAILED` at all (see "Automatic retry" below), so a listener that treats `jobFailed` as
+"this job is over" stays correct.
 
 `logEvent` — `data: {level: "DEBUG"|"INFO"|"WARNING"|"ERROR", message: string, subsystem: string}`,
 forwarded from `Logger::SetEventSink` (`app/core/main.cpp`).
@@ -407,6 +456,9 @@ Grouped exactly as in the product spec: `general`, `downloads`, `processing`, `p
   // Scheduling priority (issue #17): higher runs before lower among jobs still Queued;
   // FIFO among equal priorities. Defaults to 0 if not set at createJob time.
   priority: number;
+  // Attempts that have already run, including the one in progress: 1 on a first run, 2
+  // while retrying after one failure. See "Automatic retry" above.
+  attempts: number;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;

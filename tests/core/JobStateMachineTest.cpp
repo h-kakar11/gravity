@@ -35,9 +35,19 @@ const std::set<std::pair<JobState, JobState>>& ValidTransitions() {
         {JobState::Running, JobState::Cancelled},
         {JobState::Paused, JobState::Running},
         {JobState::Paused, JobState::Cancelled},
+        // RUNNING -> RETRYING is the AUTOMATIC retry path (core/jobs/RetryPolicy.h): an
+        // attempt failed and the next one is already scheduled, so the job never becomes
+        // terminal. Routing it through FAILED instead would cancel every job depending on
+        // it and write a failure into Session History for an attempt about to be repeated.
+        {JobState::Running, JobState::Retrying},
+        // FAILED -> RETRYING remains the MANUAL path: a user pressing Retry on a job that
+        // already gave up.
         {JobState::Failed, JobState::Retrying},
         {JobState::Retrying, JobState::Running},
         {JobState::Retrying, JobState::Failed},
+        // A job sitting out a backoff is exactly when a user gives up on it; it must not
+        // have to wait out the timer to be cancellable.
+        {JobState::Retrying, JobState::Cancelled},
     };
     return valid;
 }
@@ -80,6 +90,7 @@ TEST(JobStateMachine, EachValidTransitionIndividually) {
     EXPECT_TRUE(CanTransition(JobState::Running, JobState::Completed));
     EXPECT_TRUE(CanTransition(JobState::Running, JobState::Failed));
     EXPECT_TRUE(CanTransition(JobState::Running, JobState::Cancelled));
+    EXPECT_TRUE(CanTransition(JobState::Running, JobState::Retrying));
 
     EXPECT_TRUE(CanTransition(JobState::Paused, JobState::Running));
     EXPECT_TRUE(CanTransition(JobState::Paused, JobState::Cancelled));
@@ -88,6 +99,7 @@ TEST(JobStateMachine, EachValidTransitionIndividually) {
 
     EXPECT_TRUE(CanTransition(JobState::Retrying, JobState::Running));
     EXPECT_TRUE(CanTransition(JobState::Retrying, JobState::Failed));
+    EXPECT_TRUE(CanTransition(JobState::Retrying, JobState::Cancelled));
 }
 
 TEST(JobStateMachine, SampleOfInvalidTransitions) {
@@ -104,7 +116,6 @@ TEST(JobStateMachine, SampleOfInvalidTransitions) {
 
     EXPECT_FALSE(CanTransition(JobState::Running, JobState::Queued));
     EXPECT_FALSE(CanTransition(JobState::Running, JobState::Starting));
-    EXPECT_FALSE(CanTransition(JobState::Running, JobState::Retrying));
 
     EXPECT_FALSE(CanTransition(JobState::Paused, JobState::Starting));
     EXPECT_FALSE(CanTransition(JobState::Paused, JobState::Completed));
@@ -118,7 +129,6 @@ TEST(JobStateMachine, SampleOfInvalidTransitions) {
 
     EXPECT_FALSE(CanTransition(JobState::Retrying, JobState::Queued));
     EXPECT_FALSE(CanTransition(JobState::Retrying, JobState::Paused));
-    EXPECT_FALSE(CanTransition(JobState::Retrying, JobState::Cancelled));
     EXPECT_FALSE(CanTransition(JobState::Retrying, JobState::Completed));
 
     EXPECT_FALSE(CanTransition(JobState::Completed, JobState::Queued));
