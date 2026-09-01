@@ -60,25 +60,58 @@ async fn send_core_command(
     }
 }
 
-/// Reveals a completed download's output file in Windows Explorer (spec section 37: "open
+/// The `/select,` argument for explorer.exe, as a single raw command-line fragment.
+///
+/// Two things have to be true at once and they pull against each other:
+///
+///  - explorer.exe parses `/select,<path>` with its own undocumented comma/quote rules
+///    rather than standard argv splitting, so an unquoted path containing a comma can
+///    select the wrong item -- issue #38, which is why the quotes are here. `"` is illegal
+///    in a Windows filename (see the C++ side's FilenameSanitizer reserved-character set),
+///    so the path itself can never need escaping.
+///  - those quotes must reach explorer.exe **verbatim**, which `Command::arg` cannot do:
+///    Rust's Windows argument encoder escapes every `"` in a regular argument
+///    unconditionally (`append_arg` in std's `sys::args::windows` inserts a backslash
+///    before each one whether or not the argument itself gets quoted). So `Command::arg`
+///    turned `/select,"C:\out\clip.mp4"` into a command line reading
+///    `/select,\"C:\out\clip.mp4\"`, explorer read the path as `\"C:\out\clip.mp4\"`,
+///    and it could not find that file -- issue #84. The #38 fix defeated itself.
+///
+/// `raw_arg` (used by the caller) is the escape hatch for exactly this: it appends the
+/// fragment to the command line with no quoting or escaping at all.
+///
+/// Separators are normalized to backslashes because explorer.exe will not select through a
+/// forward-slash path, and an output directory typed into the UI as `D:/Converted` reaches
+/// here exactly as typed.
+fn explorer_select_argument(path: &str) -> String {
+    format!("/select,\"{}\"", path.replace('/', "\\"))
+}
+
+/// Reveals a completed job's output file in Windows Explorer (spec section 37: "open
 /// containing folder", implemented through the backend rather than an arbitrary shell
-/// command from React). `/select,<path>` is one argv entry passed straight to explorer.exe
-/// -- no shell string concatenation, same "structured arguments only" rule the C++ core
-/// follows for every process it launches.
+/// command from React).
 #[tauri::command]
 fn open_containing_folder(path: String) -> Result<(), String> {
     if !Path::new(&path).exists() {
         return Err(format!("cannot open containing folder: path does not exist: {path}"));
     }
-    // `/select,<path>` is one argv entry (no shell interpretation), but explorer.exe still
-    // parses that string with its own undocumented comma/quote rules, independent of
-    // standard argv parsing -- an unquoted path containing a comma could select the wrong
-    // item (issue #38). Quoting the path portion is explorer.exe's own documented escape
-    // for this; safe unconditionally here because `"` is illegal in a Windows filename (see
-    // FilenameSanitizer's reserved-character set), so a real path can never need escaping
-    // itself.
-    Command::new("explorer")
-        .arg(format!("/select,\"{path}\""))
+    let argument = explorer_select_argument(&path);
+
+    let mut command = Command::new("explorer");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // See explorer_select_argument: the quotes must survive to explorer.exe intact.
+        command.raw_arg(&argument);
+    }
+    #[cfg(not(windows))]
+    {
+        // Gravity is Windows-only; this branch exists so the crate still compiles (and its
+        // tests still run) on a non-Windows host, where `raw_arg` doesn't exist.
+        command.arg(&argument);
+    }
+
+    command
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to launch explorer.exe: {e}"))
@@ -167,4 +200,78 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_argument_keeps_the_quotes_that_protect_a_comma_in_the_path() {
+        // Issue #38: explorer.exe splits `/select,<path>` on its own rules, so a comma in
+        // the filename selects the wrong item unless the path portion is quoted.
+        assert_eq!(
+            explorer_select_argument("C:\\out\\clip, final.mp4"),
+            "/select,\"C:\\out\\clip, final.mp4\""
+        );
+    }
+
+    #[test]
+    fn explorer_argument_normalizes_forward_slashes_to_backslashes() {
+        // An output directory typed into the UI as `D:/Converted` reaches this function
+        // exactly as typed, and explorer.exe will not select through a forward-slash path.
+        assert_eq!(
+            explorer_select_argument("D:/Converted/clip.mp4"),
+            "/select,\"D:\\Converted\\clip.mp4\""
+        );
+    }
+
+    #[test]
+    fn explorer_argument_is_a_single_fragment_with_no_escaping_of_its_own() {
+        // Issue #84: the quotes have to reach explorer.exe verbatim. This function must
+        // therefore produce the exact bytes to append -- any backslash-escaping of the
+        // quotes belongs nowhere, here or in the spawn (which uses raw_arg for that
+        // reason). A `\"` appearing in this string would be the bug.
+        let argument = explorer_select_argument("C:\\out\\clip.mp4");
+        assert!(!argument.contains("\\\""), "must not escape its own quotes: {argument}");
+        assert_eq!(argument.matches('"').count(), 2);
+    }
+
+    /// Issue #85. The NSIS context-menu hooks must never hardcode the installed
+    /// executable's filename: Tauri derives it from `mainBinaryName`, which defaults to the
+    /// Cargo package name (`gravity-desktop`), NOT to `productName` (`Gravity`). Pointing a
+    /// shell verb at a file the installer doesn't create makes Explorer fall back to its
+    /// "How do you want to open this file?" chooser, which is exactly what #85 and #52
+    /// reported. `${MAINBINARYNAME}` is the only spelling that cannot drift.
+    #[test]
+    fn installer_hooks_reference_the_binary_through_tauris_own_define() {
+        let hooks = include_str!("../installer/hooks.nsh");
+        let command_lines: Vec<&str> = hooks
+            .lines()
+            // NSIS comments start with ';' -- the header comment above deliberately quotes
+            // the old broken value to explain the bug, and is not a registry write.
+            .filter(|line| !line.trim_start().starts_with(';'))
+            .filter(|line| line.contains("$INSTDIR\\"))
+            .collect();
+        assert!(!command_lines.is_empty(), "no $INSTDIR references found in hooks.nsh");
+        for line in command_lines {
+            assert!(
+                line.contains("$INSTDIR\\${MAINBINARYNAME}.exe"),
+                "hooks.nsh must reference $INSTDIR\\${{MAINBINARYNAME}}.exe, not a literal \
+                 binary name: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn installer_hooks_register_both_verbs_with_the_quoted_file_argument() {
+        let hooks = include_str!("../installer/hooks.nsh");
+        for flag in ["--convert", "--compress"] {
+            let expected = format!("\"$INSTDIR\\${{MAINBINARYNAME}}.exe\" {flag} \"%1\"");
+            assert!(
+                hooks.contains(&expected),
+                "hooks.nsh is missing the {flag} command string: {expected}"
+            );
+        }
+    }
 }

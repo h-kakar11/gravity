@@ -109,7 +109,8 @@ version-pinned record of the full dependency graph if a future audit needs it.
 **Open decision, deliberately left unresolved in this pass** (per the user's own choice --
 see `docs/decisions.md` "Phase 5"): no root `LICENSE` file exists yet. The default legal
 state of a repository with no LICENSE file is "all rights reserved" (no one may copy,
-modify, or redistribute without permission), which happens to match the Pro-tier
-commercial model this app is being built toward -- but that's a consequence of the
-*absence* of a file, not a considered choice recorded here. Revisit before any public
+modify, or redistribute without permission) -- but that's a consequence of the *absence*
+of a file, not a considered choice recorded here. (This paragraph previously justified it
+by reference to a planned "Pro" commercial tier; issue #82 removed that tier, which leaves
+the licensing question genuinely open rather than merely unstated.) Revisit before any public
 distribution of source (not just the packaged binary).

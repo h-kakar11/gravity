@@ -3,6 +3,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
 using mediatool::media::BuildFfmpegArgs;
 using mediatool::media::MediaProcessingOptions;
@@ -49,18 +53,62 @@ TEST(FFmpegArgBuilderTest, UsesLibx264WhenTheResolvedFfmpegReportsIt) {
 }
 
 TEST(FFmpegArgBuilderTest, QualityTiersMapToExpectedCrfForH264) {
-    MediaProcessingOptions low = BasicVideoOptions();
-    low.quality = "low";
-    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.mp4", low, {}), "-crf"), "28");
-
-    MediaProcessingOptions medium = BasicVideoOptions();
-    medium.quality = "medium";
-    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.mp4", medium, {}), "-crf"), "23");
-
-    MediaProcessingOptions high = BasicVideoOptions();
-    high.quality = "high";
-    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.mp4", high, {}), "-crf"), "18");
+    // Requires an encoder that actually implements -crf; see
+    // NoCrfIsEmittedForAnEncoderThatWouldSilentlyIgnoreIt below for why the encoder set
+    // matters here at all.
+    const std::set<std::string> withX264 = {"libx264"};
+    for (const auto& [quality, crf] : std::vector<std::pair<std::string, std::string>>{
+             {"lowest", "34"}, {"low", "28"}, {"medium", "23"}, {"high", "20"}, {"ultra", "17"}}) {
+        MediaProcessingOptions options = BasicVideoOptions();
+        options.quality = quality;
+        EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.mp4", options, withX264), "-crf"), crf)
+            << "quality=" << quality;
+    }
 }
+
+TEST(FFmpegArgBuilderTest, NoCrfIsEmittedForAnEncoderThatWouldSilentlyIgnoreIt) {
+    // Issue #80. libopenh264 -- the bundled default, and therefore the encoder almost
+    // every real install uses -- defines no `crf` AVOption. ffmpeg does not fail on the
+    // flag; it logs a warning this builder's own `-loglevel error` suppresses and encodes
+    // at its hardcoded 2 Mbps default. So a -crf here is not merely useless, it is a
+    // quality control that looks wired up and is not: every tier produced a
+    // byte-identical file. Emit nothing rather than something inert.
+    for (const std::string quality : {"lowest", "low", "medium", "high", "ultra", "lossless"}) {
+        MediaProcessingOptions options = BasicVideoOptions();
+        options.quality = quality;
+        auto args = BuildFfmpegArgs("in.mp4", "out.mp4", options, {});
+        ASSERT_EQ(ValueAfter(args, "-c:v"), "libopenh264");
+        EXPECT_FALSE(Contains(args, "-crf")) << "quality=" << quality;
+    }
+}
+
+TEST(FFmpegArgBuilderTest, AnExplicitBitrateTargetReplacesCrfAndCapsThePeaks) {
+    // Issue #80's actual fix: a compression job hands down a target derived from the
+    // source's own bitrate, because CRF targets quality and cannot promise a size.
+    MediaProcessingOptions options = BasicVideoOptions();
+    options.quality = "high";
+    options.videoBitrateKbps = 600;
+    auto args = BuildFfmpegArgs("in.mp4", "out.mp4", options, {"libx264"});
+
+    EXPECT_EQ(ValueAfter(args, "-b:v"), "600k");
+    EXPECT_EQ(ValueAfter(args, "-maxrate"), "600k");
+    EXPECT_EQ(ValueAfter(args, "-bufsize"), "1200k");
+    // Both forms of rate control at once is contradictory -- ffmpeg would honour one and
+    // quietly discard the other, which is the exact class of bug this issue was.
+    EXPECT_FALSE(Contains(args, "-crf"));
+}
+
+TEST(FFmpegArgBuilderTest, ABitrateTargetReachesTheEncoderThatIgnoresCrf) {
+    // The point of routing through -b:v: unlike -crf, EVERY encoder honours it, so the
+    // quality tier finally has an effect on the default (libopenh264) path too.
+    MediaProcessingOptions options = BasicVideoOptions();
+    options.videoBitrateKbps = 400;
+    auto args = BuildFfmpegArgs("in.mp4", "out.mp4", options, {});
+    EXPECT_EQ(ValueAfter(args, "-c:v"), "libopenh264");
+    EXPECT_EQ(ValueAfter(args, "-b:v"), "400k");
+}
+
+
 
 TEST(FFmpegArgBuilderTest, Vp9UsesAWiderCrfRangeThanH264) {
     MediaProcessingOptions options;
@@ -160,14 +208,14 @@ TEST(FFmpegArgBuilderTest, ImageFormatSkipsVideoEncoderAndAudioEntirely) {
     EXPECT_FALSE(Contains(args, "-c:v"));
     EXPECT_FALSE(Contains(args, "-c:a"));
     EXPECT_FALSE(Contains(args, "-crf"));
-    EXPECT_EQ(ValueAfter(args, "-quality"), "95");
+    EXPECT_EQ(ValueAfter(args, "-quality"), "90");
 }
 
 TEST(FFmpegArgBuilderTest, JpegQualityFlagIsInvertedFromEveryOtherQualityKnob) {
     MediaProcessingOptions high;
     high.outputFormat = "jpg";
     high.quality = "high";
-    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.png", "out.jpg", high, {}), "-q:v"), "2");  // lower == better
+    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.png", "out.jpg", high, {}), "-q:v"), "4");  // lower == better
 
     MediaProcessingOptions low;
     low.outputFormat = "jpg";
@@ -196,11 +244,11 @@ TEST(FFmpegArgBuilderTest, EveryVideoTargetIncludesProgressPipeForConsumptionByT
     EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.gif", gif, {}), "-progress"), "pipe:1");
 }
 
-TEST(FFmpegArgBuilderTest, LosslessMapsToCrfZeroIfItEverReachesThisLayer) {
-    // The real Pro-tier gate lives at the IPC-handler layer (main.cpp rejects "lossless"
-    // before a job is ever created) -- this only confirms BuildFfmpegArgs itself stays
-    // independently correct/testable rather than assuming that gate already ran.
+TEST(FFmpegArgBuilderTest, LosslessMapsToCrfZero) {
+    // Issue #82 removed the Pro tier, so "lossless" is now an ordinary selectable quality
+    // rather than a value main.cpp rejected before a job could be created. It still only
+    // means anything on an encoder that implements -crf.
     MediaProcessingOptions options = BasicVideoOptions();
     options.quality = "lossless";
-    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.mp4", options, {}), "-crf"), "0");
+    EXPECT_EQ(ValueAfter(BuildFfmpegArgs("in.mp4", "out.mp4", options, {"libx264"}), "-crf"), "0");
 }

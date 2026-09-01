@@ -155,11 +155,21 @@ export default function DownloaderPage() {
   // click on Inspect (issue #62). Only fires for something that already looks like an
   // http(s) URL -- ValidateDownloadUrl/CanHandle on the core side is the real gate, this
   // is just "don't try to auto-inspect someone pasting arbitrary text."
+  //
+  // preventDefault() is load-bearing, not tidiness (issue #81: "Ctrl+V pastes the URL
+  // twice"). `paste` is a DISCRETE event in React 18, so setUrl() below is flushed
+  // synchronously when this handler returns -- which writes the pasted text into the
+  // controlled input's DOM value and leaves the caret at the end -- and only THEN does the
+  // browser run the paste's default action, inserting the same text a second time at that
+  // caret. The field ends up holding the URL twice over. Taking over the insertion
+  // entirely is the fix; the state we set here is already exactly what the default action
+  // would have produced.
   const handlePasteUrl = useCallback(
     (e: React.ClipboardEvent<HTMLInputElement>) => {
       if (canCancel || inspecting) return;
       const pasted = e.clipboardData.getData("text").trim();
       if (!/^https?:\/\/\S+$/i.test(pasted)) return;
+      e.preventDefault();
       setUrl(pasted);
       void handleInspect(pasted);
     },

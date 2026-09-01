@@ -33,6 +33,7 @@
 #include "core/filesystem/FileInfo.h"
 #include "core/filesystem/LocalFileSystem.h"
 #include "core/filesystem/PathUtils.h"
+#include "core/filesystem/ToolPathResolver.h"
 #include "core/hardware/HardwareInfo.h"
 #include "core/hardware/WindowsHardwareDetector.h"
 #include "core/ipc/LineReader.h"
@@ -86,21 +87,68 @@ std::string EnvOr(const char* name, const std::string& fallback) {
     return (value && *value) ? std::string(value) : fallback;
 }
 
-// A literal (non-bare-command) path is passed straight through to CreateProcess on
-// Windows without a PATH search, and CreateProcess does not reliably accept a
-// forward-slash path there the way POSIX-style tools do -- construct through
-// std::filesystem::path and normalize to the native separator so the relative dev-mode
-// default actually resolves instead of failing with "cannot find the file specified".
-std::string NativePath(const std::string& value) {
-    return stdfs::path(value).make_preferred().string();
+// Issue #79. Both of these used to be an environment variable or a CWD-relative literal,
+// handed straight to CreateProcess with no existence check at all, so the two ways they
+// could go wrong -- a working directory that isn't the repository root, and an environment
+// variable whose value carries the quotes a batch file wrapped it in -- both surfaced as
+// the same opaque "The system cannot find the file specified" naming a path that reads as
+// perfectly valid. Candidates are now anchored to the core executable's own directory
+// (see ToolPathResolver.h) and checked before launch.
+//
+// A tool that resolves to nothing does NOT abort startup: downloading is one feature of
+// several, and a missing Python interpreter should not stop conversion, compression or
+// settings from working. The empty string propagates to YtDlpProvider, and
+// EnsureDownloaderAvailable below turns the next download/inspect attempt into an error
+// that names every path that was tried.
+const std::vector<std::string> kPythonRelativeCandidates = {
+    // Packaged layout (app/desktop/src-tauri/src/core_bridge.rs bundles it here).
+    "python/python.exe",
+    // Dev layout, Windows venv...
+    "python/downloader/.venv/Scripts/python.exe",
+    // ...and POSIX venv, so a non-Windows dev build resolves the same way.
+    "python/downloader/.venv/bin/python3",
+};
+
+const std::vector<std::string> kDownloaderScriptRelativeCandidates = {
+    "python/downloader/downloader.py",
+};
+
+struct ResolvedTool {
+    std::string path;                     // empty when nothing existed
+    std::vector<std::string> candidates;  // everything tried, in order, for diagnostics
+};
+
+ResolvedTool ResolveTool(const char* envName, const std::vector<std::string>& relativeCandidates) {
+    ResolvedTool resolved;
+    resolved.candidates = filesystem::BuildToolCandidates(
+        EnvOr(envName, ""), filesystem::ExecutableDirectory(), relativeCandidates);
+    std::error_code ec;
+    resolved.path = filesystem::FirstExisting(resolved.candidates,
+                                               [&ec](const std::string& candidate) {
+                                                   return stdfs::exists(candidate, ec);
+                                               })
+                        .value_or(std::string());
+    return resolved;
 }
 
-std::string ResolvePythonExecutable() {
-    return NativePath(EnvOr("MEDIATOOL_PYTHON_PATH", "python/downloader/.venv/Scripts/python.exe"));
+ResolvedTool ResolvePythonExecutable() {
+    return ResolveTool("MEDIATOOL_PYTHON_PATH", kPythonRelativeCandidates);
 }
 
-std::string ResolveDownloaderScript() {
-    return NativePath(EnvOr("MEDIATOOL_DOWNLOADER_SCRIPT", "python/downloader/downloader.py"));
+ResolvedTool ResolveDownloaderScript() {
+    return ResolveTool("MEDIATOOL_DOWNLOADER_SCRIPT", kDownloaderScriptRelativeCandidates);
+}
+
+// Turns "nothing resolved" into an error a user can act on, at the point a download is
+// actually requested. Lists every candidate rather than only the last one, because the
+// useful information is which layout the core thought it was running in.
+[[noreturn]] void ThrowDownloaderToolMissing(const char* what, const ResolvedTool& tool) {
+    std::string details = "Tried, in order:";
+    for (const std::string& candidate : tool.candidates) details += "\n  " + candidate;
+    details += "\nSet MEDIATOOL_PYTHON_PATH / MEDIATOOL_DOWNLOADER_SCRIPT to override.";
+    throw errors::MediaToolException(errors::ErrorInfo::Make(
+        "E_DOWNLOADER_NOT_FOUND", errors::ErrorCategory::EngineFailure,
+        std::string("The downloader's ") + what + " could not be found.", details));
 }
 
 // A user-supplied path in Settings always wins (they explicitly chose a different
@@ -138,6 +186,11 @@ struct AppContext {
     // per process, not per job.
     filesystem::FilenameReservationRegistry reservationRegistry;
     media::FFmpegEngine ffmpegEngine;
+    // Resolved once at startup and kept, not just consumed: the candidate list is what
+    // makes a "downloader not found" failure diagnosable (issue #79). Declared before
+    // ytDlpProvider so member-initialization order fills them in first.
+    ResolvedTool pythonTool{ResolvePythonExecutable()};
+    ResolvedTool downloaderScriptTool{ResolveDownloaderScript()};
     downloader::YtDlpProvider ytDlpProvider;
     jobs::JobManager jobManager;
     jobs::JobHistoryStore jobHistoryStore{jobs::DefaultJobHistoryFilePath()};
@@ -154,11 +207,21 @@ struct AppContext {
           // Resolved once at startup (not per-download) and handed to yt-dlp so it merges
           // separate video/audio streams via the SAME ffmpeg binary the rest of the app
           // already uses -- see docs/decisions.md "Video/audio merge strategy".
-          ytDlpProvider(processRunner, ResolvePythonExecutable(), ResolveDownloaderScript(),
+          ytDlpProvider(processRunner, pythonTool.path, downloaderScriptTool.path,
                         media::DiscoverFfmpegPath(processRunner, EffectiveFfmpegOverride(settings))
                             .value_or("")),
           jobManager(static_cast<std::size_t>(std::max(1, settings.processing.concurrentJobs))) {}
 };
+
+// Called before anything that would launch the Python downloader. Startup deliberately
+// does not fail when these are missing (issue #79) -- this is where a user finds out, with
+// the full candidate list, instead of getting CreateProcess's bare "cannot find the file
+// specified" pointing at a path that looks correct.
+void EnsureDownloaderAvailable(const AppContext& app) {
+    if (app.pythonTool.path.empty()) ThrowDownloaderToolMissing("Python interpreter", app.pythonTool);
+    if (app.downloaderScriptTool.path.empty())
+        ThrowDownloaderToolMissing("downloader.py script", app.downloaderScriptTool);
+}
 
 // --- event publishing from JobManager callbacks -----------------------------------------
 
@@ -354,6 +417,7 @@ constexpr auto kInspectDeadline = std::chrono::seconds(30);
 json HandleInspectDownloadUrl(AppContext& app, const json& params) {
     const std::string url = RequireNonEmptyString(params, "url");
     ValidateDownloadUrl(app, url);
+    EnsureDownloaderAvailable(app);
 
     const auto deadline = std::chrono::steady_clock::now() + kInspectDeadline;
     auto isCancelled = [deadline] { return std::chrono::steady_clock::now() >= deadline; };
@@ -376,6 +440,9 @@ json HandleCreateDownloadJob(AppContext& app, const json& jobParams) {
     const std::string url = RequireNonEmptyString(jobParams, "url");
     const std::string outputDirectory = RequireNonEmptyString(jobParams, "outputDirectory");
     ValidateDownloadUrl(app, url);
+    // Fail here, with the candidate list, rather than letting the job start and die inside
+    // a worker thread with CreateProcess's opaque message (issue #79).
+    EnsureDownloaderAvailable(app);
     // #11: reject traversal and (unless explicitly opted into) UNC output directories --
     // previously any string was accepted as-is.
     const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
@@ -471,14 +538,13 @@ json HandleCreateMediaProcessingJob(AppContext& app, const json& jobParams, bool
 
     const json& processingOptions = OptionalObject(jobParams, "options");
     const std::string outputFormat = RequireNonEmptyString(processingOptions, "outputFormat");
-    // Server-side Pro-tier gate, independent of the UI never offering this value at all
-    // (idealist.md: build the "Pro" affordances as visibly-present-but-inert, not wired
-    // to anything real) -- there is no entitlement system, so this is an unconditional
-    // rejection, not a toggle.
-    if (OptionalString(processingOptions, "quality").value_or("medium") == "lossless") {
-        throw errors::MediaToolException(errors::ErrorInfo::Make(
-            "E_PRO_FEATURE_LOCKED", errors::ErrorCategory::UnsupportedFormat,
-            "Lossless quality is a Pro feature and is not available yet."));
+    // `quality` used to reach the arg builder unvalidated, where an unrecognized value
+    // silently degraded to "medium" -- a typo in a preset produced a job that ran with a
+    // quality the caller never asked for. Issue #82 also removed the Pro tier that used to
+    // reject "lossless" here outright, so the whole tier list is now simply the allowed set.
+    if (processingOptions.contains("quality") && !processingOptions.at("quality").is_null()) {
+        (void)ipc::RequireEnum(processingOptions, "quality",
+                                {"lowest", "low", "medium", "high", "ultra", "lossless"});
     }
 
     jobs::MediaProcessingJob::Options options;
@@ -938,7 +1004,7 @@ void RunSelfTest(AppContext& app) {
     try {
         std::vector<std::string> stdoutLines;
         auto proc = app.processRunner.Start(
-            ResolvePythonExecutable(), {ResolveDownloaderScript(), "--selftest"}, {},
+            app.pythonTool.path, {app.downloaderScriptTool.path, "--selftest"}, {},
             [&stdoutLines](const std::string& line) { stdoutLines.push_back(line); },
             [](const std::string& line) { std::cout << "  [python stderr] " << line << "\n"; });
         const auto result = proc->Wait();

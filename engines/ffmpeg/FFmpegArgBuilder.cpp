@@ -1,7 +1,6 @@
 #include "engines/ffmpeg/FFmpegArgBuilder.h"
 
 #include <algorithm>
-#include <cmath>
 #include <sstream>
 #include <unordered_set>
 
@@ -21,11 +20,11 @@ using errors::MediaToolException;
                                                "Invalid conversion/compression options.", reason));
 }
 
-const std::unordered_set<std::string> kAudioOnlyFormats = {
-    "mp3", "wav", "flac", "aac", "m4a", "ogg", "opus",
-};
-
-bool IsAudioOnlyFormat(const std::string& outputFormat) { return kAudioOnlyFormats.count(outputFormat) > 0; }
+// The audio-only format set lives in core/media/BitrateTarget.h, because
+// MediaProcessingJob needs exactly the same distinction when it sizes a compression job.
+bool IsAudioOnlyFormat(const std::string& outputFormat) {
+    return IsAudioOnlyOutputFormat(outputFormat);
+}
 
 // Static image targets -- explicitly NOT routed through the video (CRF/audio-encoder)
 // path below: converting to e.g. .webp is a stated primary use case (idealist.md), and a
@@ -46,8 +45,10 @@ std::vector<std::string> ImageQualityArgs(const std::string& outputFormat, const
     if (outputFormat == "webp") {
         // -quality 0-100, higher is better.
         int value = 75;
+        if (quality == "lowest") value = 30;
         if (quality == "low") value = 50;
-        if (quality == "high" || quality == "lossless") value = 95;
+        if (quality == "high") value = 90;
+        if (quality == "ultra" || quality == "lossless") value = 95;
         return {"-quality", std::to_string(value)};
     }
     if (outputFormat == "jpg" || outputFormat == "jpeg") {
@@ -55,8 +56,10 @@ std::vector<std::string> ImageQualityArgs(const std::string& outputFormat, const
         // other quality knob in this file, called out explicitly rather than left as a
         // trap for the next reader.
         int value = 5;
+        if (quality == "lowest") value = 20;
         if (quality == "low") value = 12;
-        if (quality == "high" || quality == "lossless") value = 2;
+        if (quality == "high") value = 4;
+        if (quality == "ultra" || quality == "lossless") value = 2;
         return {"-q:v", std::to_string(value)};
     }
     return {};
@@ -68,13 +71,34 @@ std::vector<std::string> ImageQualityArgs(const std::string& outputFormat, const
 int CrfForQuality(const std::string& quality, bool wideRange) {
     if (quality == "lossless") return 0;
     if (wideRange) {
+        if (quality == "lowest") return 42;
         if (quality == "low") return 36;
-        if (quality == "high") return 24;
+        if (quality == "high") return 27;
+        if (quality == "ultra") return 23;
         return 31;  // medium, and the default for any unrecognized value
     }
+    if (quality == "lowest") return 34;
     if (quality == "low") return 28;
-    if (quality == "high") return 18;
+    if (quality == "high") return 20;
+    if (quality == "ultra") return 17;
     return 23;  // medium, and the default for any unrecognized value
+}
+
+// Whether `encoder` actually implements ffmpeg's `-crf` private AVOption. This is not a
+// stylistic preference -- passing -crf to an encoder that doesn't define it is a SILENT
+// no-op: ffmpeg logs "Codec AVOption crf ... has not been used for any stream" at
+// AV_LOG_WARNING (suppressed by the `-loglevel error` this builder emits) and exits 0.
+// The encode then runs at that encoder's own default rate control, identically for every
+// quality tier the user picks. That is issue #80's "same output size at both high and low
+// quality", and it is the default path on a stock install: ResolveVideoEncoder() below
+// falls back to libopenh264 (BSD-licensed, the only H.264 encoder Gravity can bundle),
+// whose ffmpeg wrapper defines no `crf` option and defaults to a hardcoded 2 Mbps.
+//
+// Hardware encoders (NVENC/AMF/QSV) are excluded for the same reason plus their own: they
+// use vendor-specific quality flags this product deliberately doesn't expose.
+bool EncoderSupportsCrf(const std::string& encoder) {
+    return encoder == "libx264" || encoder == "libx265" || encoder == "libvpx-vp9" ||
+           encoder == "libaom-av1";
 }
 
 // Resolves videoCodec+hardwareAcceleration+availableEncoders down to one concrete ffmpeg
@@ -195,6 +219,9 @@ MediaProcessingOptions MediaProcessingOptions::FromJson(const nlohmann::json& js
 
     if (json.contains("audioBitrateKbps") && !json.at("audioBitrateKbps").is_null()) {
         options.audioBitrateKbps = json.at("audioBitrateKbps").get<int>();
+    }
+    if (json.contains("videoBitrateKbps") && !json.at("videoBitrateKbps").is_null()) {
+        options.videoBitrateKbps = json.at("videoBitrateKbps").get<int>();
     }
 
     return options;
@@ -345,12 +372,30 @@ std::vector<std::string> BuildFfmpegArgs(const std::string& inputPath, const std
 
     args.push_back("-c:v");
     args.push_back(videoEncoder);
-    if (!isHardwareEncoder) {
-        // CRF-based rate control only applies to the software encoders here; the
-        // NVENC/AMF/QSV encoders use their own quality-mode flags, which is a deliberate
-        // simplification -- default hardware-encoder settings, not exposed as a separate
-        // quality control, since this product's hardware-acceleration toggle is about
-        // speed, not an independently tunable hardware quality knob.
+
+    // Rate control, in priority order (issue #80):
+    //
+    //  1. An explicit videoBitrateKbps target always wins. Every encoder understands
+    //     -b:v, including the ones that ignore -crf, and it is the only form of rate
+    //     control that can make a promise about OUTPUT SIZE rather than output quality.
+    //     -maxrate/-bufsize cap the peaks so a high-motion passage can't blow past the
+    //     target the caller sized the job around; a 2x bufsize is the conventional
+    //     one-second-at-2x-target VBV window.
+    //  2. Otherwise -crf, but ONLY for an encoder that actually implements it. Emitting
+    //     it for one that doesn't is worse than emitting nothing, because it looks like
+    //     a working quality control while silently doing nothing at all.
+    //  3. Otherwise nothing: no rate-control flag the resolved encoder would honour.
+    //     MediaProcessingJob avoids reaching this branch for anything it can probe, by
+    //     supplying (1) instead.
+    if (options.videoBitrateKbps.has_value()) {
+        const int kbps = *options.videoBitrateKbps;
+        args.push_back("-b:v");
+        args.push_back(std::to_string(kbps) + "k");
+        args.push_back("-maxrate");
+        args.push_back(std::to_string(kbps) + "k");
+        args.push_back("-bufsize");
+        args.push_back(std::to_string(kbps * 2) + "k");
+    } else if (!isHardwareEncoder && EncoderSupportsCrf(videoEncoder)) {
         args.push_back("-crf");
         args.push_back(std::to_string(CrfForQuality(options.quality, wideRangeCrf)));
     }

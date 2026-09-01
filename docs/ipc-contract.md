@@ -122,6 +122,11 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
   Responses are still correlated by `id`; as stated above, requests may complete out of
   order. If that pool is saturated the request is answered with `E_CORE_BUSY`
   (`recoverable: true`), never queued without limit.
+- **`inspectDownloadUrl` and `createJob{type: "DOWNLOAD"}` check that the Python downloader
+  is actually present** before doing anything else, and answer `E_DOWNLOADER_NOT_FOUND`
+  with every candidate path that was tried in `error.details` if it isn't (issue #79).
+  A missing interpreter does not stop the core from starting or from running conversion,
+  compression and settings commands.
 
 ### `createJob` params by `type`
 
@@ -151,7 +156,9 @@ its `state` becomes `CANCELLED` with no `error` field, and the reason is in the 
 
 `{outputFormat: string, quality?: "low"|"medium"|"high"|"lossless", videoCodec?: "auto"|"h264"|"h265"|"vp9"|"av1", hardwareAcceleration?: "auto"|"none"|"nvenc"|"amf"|"qsv", resolution?: {width: number, height: number}, trim?: {startSeconds?: number, endSeconds?: number}, watermark?: {imagePath: string, position: "top-left"|"top-right"|"bottom-left"|"bottom-right"|"center", opacity: number}, audioBitrateKbps?: number}`
 
-`outputFormat` is required (rejected with `E_MISSING_PARAM` if absent, `E_INVALID_PARAM_VALUE` if empty). `quality: "lossless"` is rejected unconditionally with `E_PRO_FEATURE_LOCKED` — there is no Pro entitlement system yet, so this is a hard server-side gate, not a toggle; the frontend must never offer it as a selectable value. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
+`outputFormat` is required (rejected with `E_MISSING_PARAM` if absent, `E_INVALID_PARAM_VALUE` if empty). `quality`, when present, must be one of `lowest` | `low` | `medium` | `high` | `ultra` | `lossless` — anything else is rejected with `E_INVALID_PARAM_VALUE` rather than silently degraded to `medium` as it was before (issue #83). `lossless` used to be rejected unconditionally as a Pro-tier value; issue #82 removed the tier, so it is now an ordinary selectable quality. See `engines/ffmpeg/FFmpegArgBuilder.h` for exactly how each field maps to ffmpeg arguments (encoder selection, CRF tiers, the GIF palette pipeline, image-format handling, trim/watermark filter graphs).
+
+A `COMPRESSION` job additionally probes its input before encoding and derives an explicit video (or, for an audio-only target, audio) bitrate from the source's own bitrate, scaled by the quality tier. This is what makes compression mean "smaller than the input" rather than "re-encoded at a fixed perceptual quality" — the latter routinely produced a *larger* file, which is issue #80. Callers do not supply the target and cannot override it; an explicit `audioBitrateKbps` is still honoured as-is.
 
 ## Events (core -> ... -> React)
 

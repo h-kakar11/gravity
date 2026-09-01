@@ -2,6 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <string>
+#include <utility>
+
 #include "core/errors/MediaToolException.h"
 #include "core/filesystem/FilenameReservationRegistry.h"
 #include "core/filesystem/MockFileSystem.h"
@@ -226,4 +230,114 @@ TEST(MediaProcessingJob, MissingOutputAfterEngineSuccessFails) {
         EXPECT_EQ(e.Info().code, "E_MEDIA_PROCESSING_OUTPUT_MISSING");
     }
     EXPECT_TRUE(threw);
+}
+
+// --- issue #80: compression must have a size objective, not just a quality one ----------
+
+namespace {
+
+// Builds a job whose input probes at `sourceBitrateBps` and runs it to completion,
+// returning the options the engine actually received.
+nlohmann::json RunAndCaptureEngineOptions(bool isCompression, const std::string& outputFormat,
+                                          std::int64_t sourceBitrateBps,
+                                          const nlohmann::json& extraOptions = nlohmann::json::object()) {
+    const std::string inputPath = paths::Join("C:\\in", "clip.mp4");
+    const std::string outDir = "C:\\out";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\in");
+    fs.AddDirectory(outDir);
+    FileInfo input;
+    input.path = inputPath;
+    input.filename = "clip.mp4";
+    input.sizeBytes = 1219022;
+    fs.AddFile(input);
+
+    MockMediaEngine engine;
+    engine.probeResult.bitrate = sourceBitrateBps;
+    engine.onProcessingStart = [&fs](const std::string& outputPath) {
+        FileInfo out;
+        out.path = outputPath;
+        out.filename = paths::GetFilename(outputPath);
+        out.sizeBytes = 512;
+        fs.AddFile(out);
+    };
+
+    MediaProcessingJob::Options options = MakeOptions(inputPath, outDir, outputFormat);
+    options.isCompression = isCompression;
+    for (auto it = extraOptions.begin(); it != extraOptions.end(); ++it) {
+        options.engineOptions[it.key()] = it.value();
+    }
+
+    FilenameReservationRegistry registry;
+    MediaProcessingJob job(std::move(options), engine, fs, registry);
+    job.MarkStarting();
+    job.MarkRunning();
+    job.Execute();
+
+    EXPECT_TRUE(engine.lastOptions.has_value());
+    return engine.lastOptions.value_or(nlohmann::json::object());
+}
+
+}  // namespace
+
+TEST(MediaProcessingJob, CompressionDerivesAVideoBitrateTargetFromTheProbedSource) {
+    // Issue #80: "compress" used to be byte-for-byte the same ffmpeg invocation as
+    // "convert" -- a CRF quality target with no notion of the input's size at all, which
+    // is why re-encoding an already-compressed 1.19 MB clip came back at 1.03x (medium)
+    // and 1.41x (high). The job now probes the input first and hands the engine a bitrate
+    // derived from what the source actually is.
+    const auto options = RunAndCaptureEngineOptions(/*isCompression=*/true, "mp4",
+                                                     /*sourceBitrateBps=*/750'000);
+    ASSERT_TRUE(options.contains("videoBitrateKbps"));
+    // 750 kbps source, "medium" compression factor 0.45 => 338 kbps overall, less the
+    // 128 kbps audio budget the same call reserves.
+    EXPECT_EQ(options.at("videoBitrateKbps").get<int>(), 338 - 128);
+    EXPECT_EQ(options.at("audioBitrateKbps").get<int>(), 128);
+}
+
+TEST(MediaProcessingJob, EveryCompressionQualityTierTargetsLessThanTheSource) {
+    // The property the issue is actually about: whatever tier the user picks, the total
+    // target has to come in under the source. A quality-only knob could not promise this.
+    for (const std::string quality : {"lowest", "low", "medium", "high", "ultra"}) {
+        const auto options = RunAndCaptureEngineOptions(
+            /*isCompression=*/true, "mp4", /*sourceBitrateBps=*/2'000'000, {{"quality", quality}});
+        ASSERT_TRUE(options.contains("videoBitrateKbps")) << "quality=" << quality;
+        const int total =
+            options.at("videoBitrateKbps").get<int>() + options.at("audioBitrateKbps").get<int>();
+        EXPECT_LT(total, 2000) << "quality=" << quality;
+    }
+}
+
+TEST(MediaProcessingJob, AudioOnlyCompressionSizesTheAudioStreamInstead) {
+    // An mp3/wav target has no video stream for -b:v to apply to; the audio bitrate is
+    // the only size lever there is.
+    const auto options = RunAndCaptureEngineOptions(/*isCompression=*/true, "mp3",
+                                                     /*sourceBitrateBps=*/320'000);
+    EXPECT_FALSE(options.contains("videoBitrateKbps"));
+    ASSERT_TRUE(options.contains("audioBitrateKbps"));
+    EXPECT_LT(options.at("audioBitrateKbps").get<int>(), 320);
+}
+
+TEST(MediaProcessingJob, AnExplicitAudioBitrateIsNeverOverriddenBySizing) {
+    // The user asked for a specific bitrate, not a ratio of the source.
+    const auto options = RunAndCaptureEngineOptions(
+        /*isCompression=*/true, "mp3", /*sourceBitrateBps=*/320'000, {{"audioBitrateKbps", 192}});
+    EXPECT_EQ(options.at("audioBitrateKbps").get<int>(), 192);
+}
+
+TEST(MediaProcessingJob, AnUnprobableSourceLeavesTheEngineOptionsUntouched) {
+    // No bitrate reported means no basis for a target. Inventing one from a number we
+    // don't have would be worse than leaving the engine on its previous behavior.
+    const auto options = RunAndCaptureEngineOptions(/*isCompression=*/true, "mp4",
+                                                     /*sourceBitrateBps=*/0);
+    EXPECT_FALSE(options.contains("videoBitrateKbps"));
+}
+
+TEST(MediaProcessingJob, ConversionDoesNotShrinkTheWayCompressionDoes) {
+    // Same machinery, different intent: a conversion is only asked not to balloon.
+    const auto compress = RunAndCaptureEngineOptions(/*isCompression=*/true, "mp4", 2'000'000);
+    const auto convert = RunAndCaptureEngineOptions(/*isCompression=*/false, "mp4", 2'000'000);
+    ASSERT_TRUE(compress.contains("videoBitrateKbps") && convert.contains("videoBitrateKbps"));
+    EXPECT_LT(compress.at("videoBitrateKbps").get<int>(), convert.at("videoBitrateKbps").get<int>());
 }

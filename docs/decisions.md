@@ -233,8 +233,8 @@ section 47. Newest entries at the bottom of each phase's section.
   begin with. Everything that crosses a process or IPC boundary in this app (React <->
   Rust <-> C++ core <-> engines) is small JSON control/progress messages — job parameters,
   `-progress pipe:1` lines, NDJSON events — never raw audio/video/image bytes.
-- **Choice:** treat this as not applicable rather than build a placeholder or a
-  Pro-locked stub for it. There is no raw-media copy anywhere in the pipeline to
+- **Choice:** treat this as not applicable rather than build a placeholder or an inert
+  stub for it. There is no raw-media copy anywhere in the pipeline to
   eliminate, so there is nothing a "zero-copy" mode could actually turn off.
 - **Consequences:** no code, no UI affordance, no IPC surface for this item — this
   paragraph is the entire close-out. If a future architecture change ever did route raw
@@ -303,8 +303,7 @@ section 47. Newest entries at the bottom of each phase's section.
 - **Choice:** asked directly (proprietary/all-rights-reserved vs. source-available vs.
   permissive open source vs. skip) — the user chose to skip it for this pass.
 - **Consequences:** no root `LICENSE` file exists. The repository's default legal state
-  ("all rights reserved," matching the Pro-tier commercial model) applies by absence of a
-  file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
+  ("all rights reserved") applies by absence of a file, not by a considered choice — `docs/licensing.md` flags this explicitly so it isn't
   mistaken for a deliberate "we chose all-rights-reserved" decision later. Revisit before
   any public source distribution.
 
@@ -382,3 +381,109 @@ policy tangled up in the thing that owns the threads. See `docs/concurrency-mode
   correct (something strictly newer is already displayed) but it does mean a snapshot fetch
   can be wasted work; the alternative is showing the user a state their app has already
   moved past.
+
+## Defect investigation pass (issues #79-#86)
+
+### Compression is a bitrate target derived from the source, not a CRF quality target
+- **Context:** issue #80 -- a 1.17 MB file compressed to 3.46 MB, identically at *both*
+  high and low quality. Two independent causes, both reproduced with a real ffmpeg here:
+  1. `-crf` is a *quality* target, not a *size* target. "Compress" was byte-for-byte the
+     same ffmpeg invocation as "Convert", with no reference to the input's size at all.
+     Measured on a 1.19 MB 640x360 H.264 clip: CRF 23 ("medium") returned 1.03x the
+     original, CRF 18 ("high") returned 1.41x. Re-encoding already-compressed material at
+     a fixed CRF inflates it routinely, not exceptionally.
+  2. `libopenh264` -- the bundled default H.264 encoder, and therefore the one almost
+     every install uses -- **defines no `crf` AVOption**. ffmpeg does not fail on the flag:
+     it logs "Codec AVOption crf ... has not been used for any stream" at `AV_LOG_WARNING`,
+     which this codebase's own `-loglevel error` suppresses, and exits 0. The encode then
+     runs at `TARGET_BITRATE_DEFAULT` (2 Mbps, hardcoded in ffmpeg's `libopenh264enc.c`)
+     for every quality tier alike. 2 Mbps over the reported clip length is ~3.46 MB, and
+     it is identical at high and low quality -- exactly the reported symptom.
+- **Options considered:** (a) lower the CRF values for compression -- rejected, it cannot
+  *promise* anything about size and does nothing at all on libopenh264; (b) switch the
+  bundled encoder -- rejected, the libopenh264 choice is licensing-load-bearing
+  (`docs/licensing.md`) and unrelated to this bug; (c) derive an explicit bitrate from the
+  source.
+- **Choice:** (c). `MediaProcessingJob` probes the input before encoding and passes
+  `videoBitrateKbps` (or, for an audio-only target, `audioBitrateKbps`) computed as
+  source bitrate x a per-tier factor -- 0.20x at "lowest" up to 0.75x at "ultra" for a
+  compression job. `BuildFfmpegArgs` emits `-b:v/-maxrate/-bufsize` when a target is
+  present, and emits `-crf` only for an encoder that actually implements it
+  (`EncoderSupportsCrf`), never both.
+- **Consequences:** compression is smaller than its input by construction rather than by
+  luck. Measured end-to-end against the same 1.19 MB source: 0.24x / 0.29x / 0.44x / 0.59x
+  / 0.75x across the five tiers. A source ffprobe reports no bitrate for gets no target at
+  all -- prior behavior, rather than a number invented from one we don't have. The quality
+  tier now also has an effect on the libopenh264 path, which it never did before.
+
+### The downloader's Python paths are anchored to the executable, not the working directory
+- **Context:** issue #79 -- `E_PROCESS_LAUNCH_FAILED` / "The system cannot find the file
+  specified" naming a `python.exe` that exists. Both the interpreter and `downloader.py`
+  were resolved as an env var *or* a CWD-relative literal
+  (`python/downloader/.venv/Scripts/python.exe`), handed straight to `CreateProcess`, and
+  never checked. The core's working directory is whatever the Tauri shell inherited --
+  `app/desktop/src-tauri` under `tauri dev`, the shortcut's "Start in" for an installed
+  build -- essentially never the repository root that literal was written against.
+- **Choice:** `core/filesystem/ToolPathResolver` builds an ordered candidate list (explicit
+  env override, then each relative candidate against the core executable's own directory
+  and its ancestors, then the legacy CWD-relative form last so nothing that resolved before
+  stops resolving), existence-checks each one, and cleans surrounding quotes off env values
+  (`set VAR="C:\..."` in a batch file stores them, and they then reach `CreateProcess` as
+  part of the filename while `echo` still looks correct).
+- **Consequences:** a missing interpreter no longer aborts startup -- downloading is one
+  feature among several -- but the next download or inspect fails with
+  `E_DOWNLOADER_NOT_FOUND` listing every path that was tried. **Not verified on Windows
+  from this environment**; the CWD-anchoring defect is verified by unit test, and the other
+  candidate causes are converted from silent failures into named ones rather than proven
+  absent.
+
+### Context-menu entries reference Tauri's `${MAINBINARYNAME}`, never a literal
+- **Context:** issues #85 and #52 -- right-click "Convert"/"Compress" showed Windows'
+  generic "How do you want to open this file?" chooser. Two prior passes reviewed
+  `hooks.nsh` and `cli.rs` and found nothing, concluding a Windows machine was required.
+- **Root cause:** `hooks.nsh` registered `"$INSTDIR\Gravity.exe" --convert "%1"`, but Tauri
+  names the installed binary after `mainBinaryName`, which defaults to the **Cargo package
+  name** (`gravity-desktop`), not `productName` (`Gravity`) -- `mainBinaryName` is unset
+  here, and `cargo metadata` confirms the produced bin target is `gravity-desktop`. Every
+  verb pointed at a file the installer never creates, so Explorer fell back to the chooser.
+  Tauri's own template still carries the comment "We used to use product name as
+  MAINBINARYNAME" over its shortcut-migration code, which is where the stale convention
+  came from.
+- **Choice:** reference `$INSTDIR\${MAINBINARYNAME}.exe`, the define Tauri itself uses, so
+  the two can never drift. Tauri `!include`s the hook file *before* it `!define`s
+  `MAINBINARYNAME`, which is fine: NSIS expands `${...}` in a macro body at
+  `!insertmacro` time. Verified by compiling this exact file with `makensis` against a
+  harness reproducing that ordering -- the emitted string is
+  `\gravity-desktop.exe" --convert "%1"`, with no warnings.
+- **Consequences:** a Rust unit test now fails if any `$INSTDIR` line in `hooks.nsh`
+  hardcodes a binary filename again. Still unverified against a real installed build on
+  Windows.
+
+### "Open folder" passes explorer.exe a raw argument
+- **Context:** issue #84 -- "Open folder" could not locate a completed job's output. Issue
+  #38 had wrapped the path in quotes (explorer parses `/select,<path>` by its own rules, so
+  a comma in a filename selects the wrong item). But Rust's Windows argument encoder
+  escapes every `"` in a regular argument *unconditionally* -- `append_arg` in std's
+  `sys::args::windows` inserts a backslash before each one whether or not the argument gets
+  quoted -- so `Command::arg` turned `/select,"C:\out\clip.mp4"` into a command line
+  reading `/select,\"C:\out\clip.mp4\"`. Explorer received a path with literal
+  backslash-quotes and could not find it. The #38 fix defeated itself.
+- **Choice:** `CommandExt::raw_arg`, which appends the fragment verbatim with no quoting or
+  escaping -- the documented escape hatch for exactly this. Separators are also normalized
+  to backslashes, since an output directory typed as `D:/Converted` reaches the command as
+  typed and explorer will not select through a forward slash.
+
+### The "Pro" tier is removed rather than left inert
+- **Context:** issue #82. `idealist.md` had called for Pro affordances built
+  "visibly-present-but-inert", and the code followed: a `ProLockedBadge` component, four
+  disabled stub controls on the Convert page, and a server-side `E_PRO_FEATURE_LOCKED`
+  rejection of `quality: "lossless"`.
+- **Choice:** delete all of it. The badge component and the batch/trim/watermark stubs are
+  gone (they were wired to nothing), and `lossless` is now an ordinary selectable quality.
+  The vision text in `idealist.md` is marked superseded rather than deleted -- the feature
+  ideas still stand, only the tiering framing is gone.
+- **Consequences:** with the badge removed, an inert control would read as a broken one, so
+  the stubs had to go with it rather than being left unlabelled. Trim and watermark remain
+  implemented in `BuildFfmpegArgs` with no UI to reach them; that is a roadmap gap now
+  rather than a fake paywall.
+

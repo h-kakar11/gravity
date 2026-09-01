@@ -75,10 +75,24 @@
   font-size: 13px;
 }
 
+/* Issue #86: Settings is a long single-column form, and the Save button sat at the very
+   bottom of it -- changing anything in the first section meant scrolling past every other
+   section to commit it. Sticky rather than fixed so it still participates in the column's
+   normal flow (and stops being sticky once the page is short enough not to scroll).
+   `.wrap`'s 64px bottom padding is what keeps the last card clear of it.
+   The negative horizontal margin bleeds the backdrop out to `.wrap`'s own 24px padding, so
+   content scrolls under an opaque bar rather than under a floating button. */
 .footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 12px;
+  margin: 0 -24px;
+  padding: 16px 24px;
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-surface-border);
 }
 
 .saveButton {

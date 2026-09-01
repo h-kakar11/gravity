@@ -97,6 +97,11 @@ it to high-quality 320kbps MP3 or FLAC.
 merged").
 
 ### 2. The "Pro" Media Suite (Advanced Tools)
+> **Superseded (issue #82).** Gravity ships with no commercial tiering: there is no Pro
+> mode, no entitlement check, and no locked affordance anywhere in the UI. The feature
+> ideas below still stand on their own merits and are tracked in `docs/roadmap.md`; only
+> the "these are the paid ones" framing is gone. `quality: "lossless"` -- the one value
+> that was actually gated in code -- is now an ordinary selectable option.
 *   **Lossless Compression:** For the file compressor, include a "Lossless" mode (using algorithms like LZMA2) for documents/data and a "High-Efficiency" mode for
 images (WebP/AVIF conversion).
 *   **Image "Batch" Optimization:** Give users the option to "Resize and Convert" simultaneously (e.g., "Resize all 100 images to 1080p and convert to WebP").
@@ -127,8 +132,8 @@ available on the cloud.
 ### Summary: How to structure these for the UI
 To keep it "clean and minimal" as you requested:
 1.  **Keep the Home Screen simple.**
-2.  **Add a "Mode" toggle** on the home screen: **[Standard]** vs **[Pro]**.
-3.  The **[Pro]** mode unlocks the "Batch Downloader," "Auto-Rename," and "Advanced Bitrate" options.
+2.  ~~**Add a "Mode" toggle** on the home screen: **[Standard]** vs **[Pro]**.~~ (Dropped -- issue #82.)
+3.  ~~The **[Pro]** mode unlocks the "Batch Downloader," "Auto-Rename," and "Advanced Bitrate" options.~~ (Dropped -- issue #82: every feature that exists is available to everyone.)
 
 
 

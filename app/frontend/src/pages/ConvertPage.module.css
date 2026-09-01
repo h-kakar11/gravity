@@ -72,11 +72,6 @@
   color: var(--color-text-secondary);
 }
 
-.batchStub {
-  color: var(--color-text-disabled);
-  font-size: 12px;
-}
-
 .section {
   padding: 20px 22px;
   display: flex;
@@ -123,12 +118,6 @@
   color: var(--color-text-primary);
 }
 
-.qualityRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 .textInput,
 .selectInput {
   background: var(--color-bg);
@@ -150,15 +139,6 @@
   font-size: 13px;
   width: 100px;
   font-family: var(--font-family);
-}
-
-.trimStub {
-  font-size: 12px;
-  color: var(--color-text-disabled);
-  padding: 6px 10px;
-  border: 1px solid var(--color-surface-border);
-  border-radius: var(--radius-control);
-  background: var(--color-bg);
 }
 
 .footer {

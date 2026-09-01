@@ -1,7 +1,9 @@
 //! Windows context menu CLI contract (Phase 5.3, locked decision #3):
-//! `gravity.exe --convert "<path>"` / `--compress "<path>"` (a bare path with no flag
-//! defaults to `--convert`). The registry entries `installer/hooks.nsh` writes launch
-//! `Gravity.exe` with exactly one of these forms per right-click.
+//! `--convert "<path>"` / `--compress "<path>"` (a bare path with no flag defaults to
+//! `--convert`). The registry entries `installer/hooks.nsh` writes launch the installed
+//! shell binary -- `$INSTDIR\${MAINBINARYNAME}.exe`, i.e. `gravity-desktop.exe`, since
+//! Tauri names it after the Cargo package rather than productName (issue #85) -- with
+//! exactly one of these forms per right-click.
 //!
 //! Two delivery paths, matching the plan's IPC surface table:
 //! - **Cold start** (Gravity wasn't already running): args are stashed in `CliState` here
