@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <system_error>
@@ -311,13 +312,18 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     // encoder" -- so a bounded tail is kept and classified (FFmpegErrorClassifier.h).
     // Bounded because ffmpeg on a bad input can produce a line per frame, and the last few
     // lines are the ones that carry the failure.
-    std::mutex stderrMutex;
-    std::deque<std::string> stderrRing;
-    static constexpr std::size_t kMaxStderrLines = 20;
-    auto captureStderr = [&](const std::string& line) {
-        std::lock_guard<std::mutex> lock(stderrMutex);
-        stderrRing.push_back(line);
-        if (stderrRing.size() > kMaxStderrLines) stderrRing.pop_front();
+    // Shared ownership ensures the resources stay alive even if stderr callbacks are still
+    // in flight when this function returns (possible on Windows with async I/O).
+    struct StderrCapture {
+        std::mutex mutex;
+        std::deque<std::string> ring;
+    };
+    constexpr std::size_t kMaxStderrLines = 20;
+    auto stderrCapture = std::make_shared<StderrCapture>();
+    auto captureStderr = [stderrCapture](const std::string& line) {
+        std::lock_guard<std::mutex> lock(stderrCapture->mutex);
+        stderrCapture->ring.push_back(line);
+        if (stderrCapture->ring.size() > kMaxStderrLines) stderrCapture->ring.pop_front();
     };
 
     process::ProcessOptions processOptions;
@@ -355,8 +361,8 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     if (result.exitCode != 0) {
         std::string stderrTail;
         {
-            std::lock_guard<std::mutex> lock(stderrMutex);
-            for (const std::string& line : stderrRing) stderrTail += line + "\n";
+            std::lock_guard<std::mutex> lock(stderrCapture->mutex);
+            for (const std::string& line : stderrCapture->ring) stderrTail += line + "\n";
         }
         // Free space at the OUTPUT location, and only to make a disk-full message
         // concrete. Measured after the fact, so it is never what decides the
