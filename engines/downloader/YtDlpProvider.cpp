@@ -93,7 +93,13 @@ downloads::PlaylistInfo ParsePlaylistInfo(const nlohmann::json& data) {
         entry.index = raw.value("index", 0);
         entry.url = raw.value("url", std::string());
         entry.title = raw.value("title", std::string());
-        entry.durationSeconds = OptionalDouble(raw, "durationSeconds");
+        // "duration", not "durationSeconds": that is the key downloader.py actually emits
+        // for a playlist entry (docs/protocols/downloader.md's `playlist` event), matching
+        // the single-video `metadata` event above. Reading the outbound C++ spelling here
+        // meant every entry duration silently parsed as absent, so the playlist listing
+        // never showed one. The rename to `durationSeconds` happens on the way OUT, in
+        // PlaylistInfo::ToJson().
+        entry.durationSeconds = OptionalDouble(raw, "duration");
         // An entry with no URL is not downloadable; downloader.py already drops these, so
         // this is defense against a malformed payload rather than an expected case.
         if (entry.url.empty()) continue;

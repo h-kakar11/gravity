@@ -31,10 +31,17 @@ option(MEDIATOOL_BUILD_TESTS "Build the GoogleTest suite" ON)
 #
 # Deliberately opt-in and deliberately not part of any default preset: on the MinGW-w64
 # toolchain this project ships with, GCC's ASan runtime is not reliably available and TSan
-# does not exist for Windows at all. The supported way to run this is a Linux or WSL build
-# (`cmake --preset sanitizers-debug`), which is enough for the concurrency code -- none of
-# it is Windows-specific. scripts/ci-local.ps1 -Sanitizers says exactly this rather than
-# failing obscurely.
+# does not exist for Windows at all. The supported way to run this is a Linux or WSL build,
+# which is enough for the concurrency code -- none of it is Windows-specific.
+#
+#   cmake --preset sanitizers-linux && cmake --build --preset sanitizers-linux \
+#     && ctest --preset sanitizers-linux
+#
+# The `sanitizers-debug` preset is the Windows/MinGW spelling and exists only for a machine
+# where that toolchain's ASan does work; `sanitizers-linux` is the one that runs on a stock
+# Linux/WSL box, which is why it does not inherit the MinGW compilers or the vcpkg
+# mingw-static triplet. scripts/ci-local.ps1 does not have a sanitizer stage -- this is a
+# deliberate, manually-invoked build, not part of per-commit validation.
 option(MEDIATOOL_ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(MEDIATOOL_ENABLE_SANITIZERS)
     if(MSVC)

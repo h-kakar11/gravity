@@ -130,4 +130,36 @@ HardwareInfo WindowsHardwareDetector::Detect() {
 
 }  // namespace mediatool::hardware
 
+#else  // !_WIN32
+
+// Non-Windows fallback. Gravity ships on Windows only, but CMakeLists.txt documents a
+// Linux/WSL build as the supported way to run the ASan/UBSan preset (MinGW has no
+// reliable ASan runtime and no TSan at all), and the stress/concurrency suites this is
+// meant to exercise are not Windows-specific. Without a definition here the whole
+// non-Windows build fails to link on WindowsHardwareDetector's vtable, so that
+// documented path could not actually be taken.
+//
+// This reports only what is portable: the logical core count. An empty GPU and encoder
+// list is an explicitly valid result (see HardwareInfo.h, spec section 22), so this is a
+// truthful answer rather than a stub that fakes hardware.
+
+#include <thread>
+
+namespace mediatool::hardware {
+
+HardwareInfo WindowsHardwareDetector::Detect() {
+    HardwareInfo info;
+    try {
+        info.cpu.logicalCores = std::thread::hardware_concurrency();
+        info.cpu.name = "Unknown CPU";
+        info.gpus = {};
+        info.availableEncoders = {};
+    } catch (...) {
+        // Detect() must never throw -- same contract as the Windows implementation.
+    }
+    return info;
+}
+
+}  // namespace mediatool::hardware
+
 #endif  // _WIN32

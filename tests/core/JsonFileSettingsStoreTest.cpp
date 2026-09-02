@@ -5,6 +5,8 @@
 #include <sstream>
 
 #include <gtest/gtest.h>
+
+#include "tests/support/TempTestDirectory.h"
 #include <nlohmann/json.hpp>
 
 #include "core/errors/MediaToolException.h"
@@ -17,7 +19,7 @@ namespace fs = std::filesystem;
 class JsonFileSettingsStoreTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        tempDir_ = fs::temp_directory_path() / "mediatool_json_settings_store_test";
+        tempDir_ = mediatool::testing::UniqueTempPath("mediatool_json_settings_store_test");
         std::error_code ec;
         fs::remove_all(tempDir_, ec);
         fs::create_directories(tempDir_);

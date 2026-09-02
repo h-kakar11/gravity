@@ -491,6 +491,9 @@ void ValidateDownloadUrl(AppContext& app, const std::string& url) {
 // engines/downloader/YtDlpProvider.cpp), so a deadline-based callback here is enough to
 // turn "hangs forever" into "gives up after a fixed, bounded period" without needing a
 // second thread.
+// Must stay STRICTLY BELOW core_bridge.rs's REQUEST_TIMEOUT (45s), or the Rust side gives
+// up first and the specific error built below never reaches the user. See that constant's
+// comment.
 constexpr auto kInspectDeadline = std::chrono::seconds(30);
 
 json HandleInspectDownloadUrl(AppContext& app, const json& params) {

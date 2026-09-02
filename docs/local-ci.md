@@ -62,6 +62,27 @@ The `installer-smoke-test` job (full NSIS build) is intentionally **not** part o
 `tauri build`) and already gated to manual/nightly in CI for the same reason. To build and
 test the installer locally, follow `docs/development.md`'s "Packaging" section directly.
 
+## Suites nothing runs for you
+
+Three suites exist, build, and pass, but are not covered by `ci-local.ps1` **or** by CI.
+Run them by hand; nothing else will.
+
+| Suite | Command | Why it isn't automatic |
+|---|---|---|
+| Integration (`tests/integration`) | `ctest --preset windows-mingw-debug-integration` | Excluded by label from the default ctest preset that both `-Cpp` and CI's `cpp` job use. Spawns a real `mediatool-core` per test. |
+| Stress (`tests/stress`) | `ctest --preset windows-mingw-debug-stress` | Same label exclusion. Deliberately slow and repetitive. |
+| Sanitizers (ASan + UBSan) | `cmake --preset sanitizers-linux` → `cmake --build --preset sanitizers-linux` → `ctest --preset sanitizers-linux` | Needs a Linux/WSL toolchain: MinGW's ASan runtime is unreliable and TSan does not exist for Windows at all. |
+
+`tests/CMakeLists.txt` used to point at `scripts/ci-local.ps1 -IntegrationTest` and
+`-StressTest`; those switches have never existed. The commands above are the real ones.
+
+The sanitizer build is the only place the concurrency code gets checked for data races and
+use-after-free, so it is worth running after any change under `core/jobs/`, `core/ipc/` or
+`app/core/main.cpp`. Note that the C++ suite is **not** fully green on Linux -- the
+PathUtils, RealProcessRunner and DownloadJob-dedup tests assert Windows path separators and
+launch `cmd.exe`, so 15 of them fail there by construction. Everything else passes, which
+is what makes the sanitizer run useful despite the platform.
+
 ## Prerequisites
 
 `ci-local.ps1` checks for required tools on PATH before running each stage and fails with a

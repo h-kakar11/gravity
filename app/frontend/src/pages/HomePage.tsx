@@ -6,14 +6,30 @@ import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
 import type { DownloadMetadata, PlaylistInfo, QualityPreset } from "../types/download";
 import { QUALITY_PRESET_LABELS } from "../types/download";
+import type { ErrorInfo } from "../types/error";
 import type { JobSnapshot } from "../types/job";
 import type { SpeedUnit } from "../types/settings";
 import { asErrorInfo } from "../utils/errors";
 import { formatSpeedWithUnit, formatTimestamp } from "../utils/format";
-import { analyzePlaylistUrl, joinWindowsPath } from "../utils/playlistUrl";
+import { analyzePlaylistUrl, joinWindowsPath, withoutPlaylistParam } from "../utils/playlistUrl";
 import styles from "./HomePage.module.css";
 
 const QUALITY_OPTIONS: QualityPreset[] = ["BEST", "2160P", "1440P", "1080P", "720P", "480P", "AUDIO_ONLY"];
+
+// The download card's inputs and selects, themed. Without this they render as the
+// browser's default light controls on a dark surface -- white boxes with black text in the
+// middle of the app's own palette. Mirrors .urlInput in HomePage.module.css, which is the
+// one control on this card that was already themed.
+const CONTROL_STYLE: React.CSSProperties = {
+  padding: "0.4rem 0.5rem",
+  fontSize: "0.9rem",
+  border: "1px solid var(--color-surface-border)",
+  borderRadius: 8,
+  background: "var(--color-surface)",
+  color: "var(--color-text-primary)",
+  fontFamily: "inherit",
+};
+const FIELD_STYLE: React.CSSProperties = { ...CONTROL_STYLE, flex: "1 1 260px" };
 const ACTIVE_STATES = new Set(["QUEUED", "STARTING", "RUNNING", "PAUSED"]);
 const PLAYLIST_NOT_SUPPORTED = "E_PLAYLIST_NOT_SUPPORTED";
 
@@ -72,6 +88,14 @@ function useCardLayoutFlip(containerRef: React.RefObject<HTMLDivElement | null>,
     const container = containerRef.current;
     if (!container) return;
 
+    // The Web Animations API is decorative here, and a throw inside a layout effect
+    // unmounts the whole tree -- so an environment without it must lose the animation, not
+    // the page. (jsdom is one such environment, which is also why this page could not be
+    // rendered in a test at all before.)
+    if (typeof Element.prototype.getAnimations !== "function" || typeof Element.prototype.animate !== "function") {
+      return;
+    }
+
     const cards = Array.from(container.children) as HTMLElement[];
     const layoutChanged = previousKey.current !== null && previousKey.current !== layoutKey;
     const animating = cards.some((card) => card.getAnimations().some((a) => a.playState === "running"));
@@ -107,11 +131,39 @@ function useCardLayoutFlip(containerRef: React.RefObject<HTMLDivElement | null>,
   });
 }
 
-function ErrorBanner({ error }: { error: any }) {
+// Same treatment DownloaderPage gives errors, rather than the raw category/code dump this
+// page had: a connectivity failure is the one class a user can usually just retry (issue
+// #55), and the raw diagnostic text -- which can be a whole Python traceback, see
+// downloader.py's emit_error -- belongs behind a disclosure, not permanently on screen
+// (issue #33). Colours come from the theme tokens; the hardcoded light-mode red this used
+// was unreadable on Gravity's dark surface.
+function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
   if (!error) return null;
+  const box = {
+    border: "1px solid var(--color-error)",
+    background: "rgba(220, 53, 69, 0.12)",
+    color: "var(--color-text-primary)",
+    borderRadius: 6,
+    padding: "0.5rem 0.75rem",
+    fontSize: "0.9rem",
+  } as const;
+
+  if (error.category === "NETWORK_ERROR") {
+    return (
+      <div style={box} role="alert">
+        Can&apos;t reach the network. Check your internet connection and try again.
+      </div>
+    );
+  }
   return (
-    <div style={{ border: "1px solid #f5c2c7", background: "#f8d7da", color: "#842029", borderRadius: 6, padding: "0.5rem 0.75rem", fontSize: "0.9rem" }} role="alert">
+    <div style={box} role="alert">
       <strong>{error.category}</strong> ({error.code}): {error.message}
+      {error.details && error.details !== error.message ? (
+        <details style={{ marginTop: "0.35rem", fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+          <summary>Technical details</summary>
+          <div style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>{error.details}</div>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -122,7 +174,7 @@ export default function HomePage() {
   const [url, setUrl] = useState("");
   const [history, setHistory] = useState<JobSnapshot[]>([]);
   const [inspecting, setInspecting] = useState(false);
-  const [inspectError, setInspectError] = useState<any>(null);
+  const [inspectError, setInspectError] = useState<ErrorInfo | null>(null);
   const [metadata, setMetadata] = useState<DownloadMetadata | null>(null);
   const [selectedFormatId, setSelectedFormatId] = useState<string | null>(null);
   const [quality, setQuality] = useState<QualityPreset>("BEST");
@@ -134,9 +186,10 @@ export default function HomePage() {
   const [playlistFolder, setPlaylistFolder] = useState("");
   const [playlistJobIds, setPlaylistJobIds] = useState<string[]>([]);
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<any>(null);
+  const [createError, setCreateError] = useState<ErrorInfo | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
+  const [openFolderError, setOpenFolderError] = useState<ErrorInfo | null>(null);
 
   useEffect(() => {
     coreClient
@@ -285,6 +338,17 @@ export default function HomePage() {
     }
   }, [playlist, playlistFolder, outputDirectory, quality]);
 
+  const handleOpenFolder = useCallback(async () => {
+    const outputPath = activeJob?.result?.outputPath;
+    if (typeof outputPath !== "string") return;
+    setOpenFolderError(null);
+    try {
+      await coreClient.openContainingFolder(outputPath);
+    } catch (err) {
+      setOpenFolderError(asErrorInfo(err));
+    }
+  }, [activeJob]);
+
   const handleCancel = useCallback(async () => {
     if (!activeJobId) return;
     setCancelBusy(true);
@@ -308,6 +372,7 @@ export default function HomePage() {
     setPlaylistFolder("");
     setComboChoiceUrl(null);
     setInspectError(null);
+    setOpenFolderError(null);
   }, []);
 
   const handleRetry = useCallback(() => {
@@ -328,6 +393,7 @@ export default function HomePage() {
 
   const jobSectionRef = useRef<HTMLElement>(null);
   const failureRef = useRef<HTMLDivElement>(null);
+  const openFolderButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (activeJobId) jobSectionRef.current?.focus();
@@ -335,6 +401,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (activeJob?.state === "FAILED") failureRef.current?.focus();
+    if (activeJob?.state === "COMPLETED") openFolderButtonRef.current?.focus();
   }, [activeJob?.state]);
 
   const handleConvertDrop = (paths: string[]) => {
@@ -351,7 +418,12 @@ export default function HomePage() {
     }
   }, [navigate]);
 
-  const showDownloadUI = (metadata !== null || playlist !== null || activeJobId !== null || inspectError !== null) && (url.length > 0 || activeJobId !== null);
+  // playlistLoading belongs here too: the "Reading playlist..." message lives inside this
+  // block, so without it the one slow step in the playlist flow (enumerating the list,
+  // which is a network round-trip) showed the user nothing at all.
+  const showDownloadUI =
+    (metadata !== null || playlist !== null || playlistLoading || activeJobId !== null || inspectError !== null) &&
+    (url.length > 0 || activeJobId !== null);
   const downloadInputActive = url.length > 0;
 
   const boxesRef = useRef<HTMLDivElement>(null);
@@ -419,6 +491,89 @@ export default function HomePage() {
                 </div>
               )}
 
+              {/* The "shared from a playlist" fork. `comboChoiceUrl` was already being set
+                  here but nothing rendered it, so a watch?v=X&list=Y link silently
+                  resolved to just the one video with no way to ask for the list. */}
+              {comboChoiceUrl && (
+                <div
+                  style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem", fontSize: "0.9rem" }}
+                  role="group"
+                  aria-label="This link is part of a playlist"
+                >
+                  <div>This link is part of a playlist.</div>
+                  <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setComboChoiceUrl(null);
+                        setUrl(withoutPlaylistParam(comboChoiceUrl));
+                      }}
+                    >
+                      Just this video
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const target = comboChoiceUrl;
+                        setComboChoiceUrl(null);
+                        void loadPlaylist(target);
+                      }}
+                    >
+                      The whole playlist
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Per-stream selection (issue #31). `selectedFormatId` is read by
+                  handleDownload and disables the quality preset, but with no list rendered
+                  it could never become non-null -- the whole feature was unreachable here. */}
+              {metadata && metadata.formats.length > 0 && (
+                <details style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+                  <summary>
+                    {metadata.formats.length} available format(s)
+                    {selectedFormatId ? ` -- using ${selectedFormatId}` : ""}
+                  </summary>
+                  <ul style={{ margin: "0.4rem 0 0", paddingLeft: 0, listStyle: "none", maxHeight: 220, overflowY: "auto" }}>
+                    {metadata.formats.map((format) => {
+                      const isSelected = format.formatId === selectedFormatId;
+                      return (
+                        <li key={format.formatId}>
+                          <button
+                            type="button"
+                            aria-pressed={isSelected}
+                            onClick={() => setSelectedFormatId(isSelected ? null : format.formatId)}
+                            style={{
+                              display: "block",
+                              width: "100%",
+                              textAlign: "left",
+                              padding: "0.25rem 0.4rem",
+                              fontSize: "0.8rem",
+                              cursor: "pointer",
+                              background: isSelected ? "rgba(99, 102, 241, 0.25)" : "transparent",
+                              color: "var(--color-text-primary)",
+                              border: "1px solid transparent",
+                              borderRadius: 4,
+                            }}
+                          >
+                            {format.formatId}
+                            {format.resolution ? ` \u00b7 ${format.resolution}` : ""}
+                            {format.fps ? ` \u00b7 ${format.fps}fps` : ""}
+                            {format.hasVideo && format.videoCodec ? ` \u00b7 ${format.videoCodec}` : ""}
+                            {format.hasAudio && format.audioCodec ? ` \u00b7 ${format.audioCodec}` : ""}
+                            {!format.hasVideo ? " \u00b7 audio only" : !format.hasAudio ? " \u00b7 video only" : ""}
+                            {format.extension ? ` \u00b7 .${format.extension}` : ""}
+                            {formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes) !== "?"
+                              ? ` \u00b7 ${formatBytes(format.filesizeBytes ?? format.approxFilesizeBytes)}`
+                              : ""}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </details>
+              )}
+
               {metadata && (
                 <div>
                   <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap", fontSize: "0.9rem" }}>
@@ -428,7 +583,7 @@ export default function HomePage() {
                         value={quality}
                         onChange={(e) => setQuality(e.target.value as QualityPreset)}
                         disabled={canCancel || selectedFormatId !== null}
-                        style={{ padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                        style={CONTROL_STYLE}
                       >
                         {QUALITY_OPTIONS.map((preset) => (
                           <option key={preset} value={preset}>
@@ -437,12 +592,20 @@ export default function HomePage() {
                         ))}
                       </select>
                     </label>
+                    {selectedFormatId && (
+                      <span style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem" }}>
+                        Overridden by format {selectedFormatId} --{" "}
+                        <button type="button" onClick={() => setSelectedFormatId(null)}>
+                          use quality preset instead
+                        </button>
+                      </span>
+                    )}
                   </div>
                   <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: "0.5rem" }}>
                     <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.9rem", flex: "1 1 260px" }}>
                       Output folder:{" "}
                       <input
-                        style={{ flex: "1 1 260px", padding: "0.4rem 0.5rem", fontSize: "0.9rem" }}
+                        style={FIELD_STYLE}
                         type="text"
                         placeholder="Choose an output folder"
                         value={outputDirectory}
@@ -473,14 +636,133 @@ export default function HomePage() {
                 </div>
               )}
 
+              {/* Playlist fan-out (issue #41). `playlist`, `playlistFolder`,
+                  `handleDownloadPlaylist` and `playlistProgress` were all present in this
+                  file already -- nothing rendered any of them, so pasting a playlist link
+                  enumerated it successfully and then showed the user an empty card. */}
+              {playlist && (
+                <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)", overflowWrap: "break-word" }}>{playlist.title}</div>
+                  <div style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem" }}>
+                    {playlist.count} video{playlist.count === 1 ? "" : "s"}
+                    {playlist.uploader ? ` \u00b7 ${playlist.uploader}` : ""}
+                    {" \u00b7 downloaded one at a time, in order."}
+                  </div>
+                  {playlist.truncated && (
+                    <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 6, padding: "0.5rem 0.75rem", fontSize: "0.85rem" }} role="status">
+                      This playlist is longer than the {playlist.count}-video limit. Only the
+                      first {playlist.count} will be downloaded.
+                    </div>
+                  )}
+
+                  <details style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
+                    <summary>Show the {playlist.count} videos</summary>
+                    <ol style={{ margin: "0.4rem 0 0", paddingLeft: "1.4rem", maxHeight: 220, overflowY: "auto" }}>
+                      {playlist.entries.map((entry) => (
+                        <li key={`${entry.index}-${entry.url}`} style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
+                          {entry.title}
+                          {entry.durationSeconds !== undefined ? ` \u00b7 ${formatDuration(entry.durationSeconds)}` : ""}
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+
+                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.9rem", flexWrap: "wrap" }}>
+                    Quality for all videos:{" "}
+                    <select
+                      value={quality}
+                      onChange={(e) => setQuality(e.target.value as QualityPreset)}
+                      disabled={creating}
+                      style={CONTROL_STYLE}
+                    >
+                      {QUALITY_OPTIONS.map((preset) => (
+                        <option key={preset} value={preset}>
+                          {QUALITY_PRESET_LABELS[preset]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.9rem" }}>
+                    Output folder:{" "}
+                    <input
+                      style={FIELD_STYLE}
+                      type="text"
+                      placeholder="Choose an output folder"
+                      value={outputDirectory}
+                      onChange={(e) => setOutputDirectory(e.target.value)}
+                      disabled={creating}
+                    />
+                  </label>
+                  <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.9rem" }}>
+                    Playlist folder name:{" "}
+                    <input
+                      style={FIELD_STYLE}
+                      type="text"
+                      placeholder="playlist #1"
+                      value={playlistFolder}
+                      onChange={(e) => setPlaylistFolder(e.target.value)}
+                      disabled={creating}
+                    />
+                  </label>
+                  {/* Two editable fields combine into one destination, and "where did my 47
+                      files go" is otherwise only answerable after the fact. */}
+                  {outputDirectory.trim() && playlistFolder.trim() ? (
+                    <p style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem", overflowWrap: "break-word", wordBreak: "break-word", margin: 0 }}>
+                      Files go to {joinWindowsPath(outputDirectory.trim(), playlistFolder.trim())}, named{" "}
+                      <code>01 - Title</code>, <code>02 - Title</code>, ...
+                    </p>
+                  ) : null}
+
+                  <div>
+                    <button
+                      onClick={() => void handleDownloadPlaylist()}
+                      disabled={
+                        creating ||
+                        playlist.entries.length === 0 ||
+                        !outputDirectory.trim() ||
+                        !playlistFolder.trim() ||
+                        playlistJobIds.length > 0
+                      }
+                      style={{ padding: "0.5rem 1rem", fontSize: "0.9rem", background: "var(--color-accent)", color: "white", border: "none", borderRadius: 6, cursor: "pointer" }}
+                    >
+                      {creating ? `Queueing ${playlist.count} videos...` : `Download all ${playlist.count}`}
+                    </button>
+                  </div>
+                  <ErrorBanner error={createError} />
+
+                  {playlistProgress && (
+                    <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 6, padding: "0.5rem 0.75rem", fontSize: "0.85rem" }} role="status" aria-live="polite">
+                      Queued {playlistProgress.total} downloads. {playlistProgress.completed} done
+                      {playlistProgress.running > 0 ? `, ${playlistProgress.running} running` : ""}
+                      {playlistProgress.failed > 0 ? `, ${playlistProgress.failed} failed` : ""}.
+                      <div style={{ color: "var(--color-text-secondary)" }}>
+                        They run one at a time. Watch or cancel individual videos on the Queue
+                        screen.
+                      </div>
+                      <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.5rem" }}>
+                        <button onClick={() => navigate({ kind: "queue" })}>Open the Queue</button>
+                        <button onClick={handleStartOver}>Download something else</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {activeJob && (
                 <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", background: "rgba(99, 102, 241, 0.05)", marginTop: "0.75rem" }} ref={jobSectionRef as any} tabIndex={-1}>
-                  <div style={{ marginBottom: "0.5rem" }}>
+                  <div style={{ marginBottom: "0.5rem" }} aria-live="polite">
                     <strong>State:</strong> {activeJob.state}
                   </div>
-                  <div style={{ marginBottom: "0.5rem", color: "var(--color-text-secondary)" }}>{activeJob.progress.statusMessage}</div>
+                  <div style={{ marginBottom: "0.5rem", color: "var(--color-text-secondary)" }} aria-live="polite">{activeJob.progress.statusMessage}</div>
                   {activeJob.progress.percentage !== undefined && (
-                    <div style={{ background: "rgba(99, 102, 241, 0.2)", borderRadius: 4, height: 6, overflow: "hidden", marginBottom: "0.5rem" }}>
+                    <div
+                      style={{ background: "rgba(99, 102, 241, 0.2)", borderRadius: 4, height: 6, overflow: "hidden", marginBottom: "0.5rem" }}
+                      role="progressbar"
+                      aria-valuenow={Math.round(activeJob.progress.percentage)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label="Download progress"
+                    >
                       <div style={{ background: "var(--color-accent)", height: "100%", width: `${activeJob.progress.percentage}%`, transition: "width 0.3s" }} />
                     </div>
                   )}
@@ -496,9 +778,15 @@ export default function HomePage() {
                       {typeof activeJob.result?.outputPath === "string" && (
                         <p style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem", wordBreak: "break-word", margin: "0.25rem 0" }}>{activeJob.result.outputPath}</p>
                       )}
-                      <button onClick={handleStartOver} style={{ marginTop: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "0.85rem", background: "var(--color-accent)", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
-                        Download another
-                      </button>
+                      <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+                        <button ref={openFolderButtonRef} onClick={() => void handleOpenFolder()} style={{ padding: "0.4rem 0.8rem", fontSize: "0.85rem", background: "var(--color-accent)", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
+                          Open folder
+                        </button>
+                        <button onClick={handleStartOver} style={{ padding: "0.4rem 0.8rem", fontSize: "0.85rem", background: "var(--color-accent)", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
+                          Download another
+                        </button>
+                      </div>
+                      <ErrorBanner error={openFolderError} />
                     </div>
                   )}
 

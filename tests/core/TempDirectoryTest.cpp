@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "tests/support/TempTestDirectory.h"
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -17,7 +19,7 @@ namespace {
 class TempDirectoryTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        baseDir_ = (stdfs::temp_directory_path() / "mediatool_tempdir_test").string();
+        baseDir_ = mediatool::testing::UniqueTempPath("mediatool_tempdir_test").string();
         std::error_code ec;
         stdfs::remove_all(baseDir_, ec);
     }
