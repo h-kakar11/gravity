@@ -97,7 +97,7 @@
 
 .box {
   height: 280px;
-  width: 900;
+  width: 900px;
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-rows: auto auto auto;
@@ -113,6 +113,11 @@
   overflow: hidden;
 }
 
+
+.downloadCard {
+  height: auto;
+  min-height: 280px;
+}
 
 .icon {
   grid-column: 1;
