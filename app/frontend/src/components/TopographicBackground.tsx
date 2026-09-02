@@ -1,10 +1,9 @@
 import { useEffect, useRef } from "react";
-import * as ChriscoursesPerlinNoise from "https://esm.sh/@chriscourses/perlin-noise";
+import { noise } from "../utils/perlinNoise";
 import styles from "./TopographicBackground.module.css";
 
 export default function TopographicBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fpsCountRef = useRef<HTMLParagraphElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -14,15 +13,12 @@ export default function TopographicBackground() {
     if (!ctx) return;
 
     // Editable values
-    const showFPS = false;
-    const MAX_FPS = 0;
     const thresholdIncrement = 5;
     const thickLineThresholdMultiple = 3;
     const res = 8;
     const baseZOffset = 0.0001;
     const lineColor = "#6366f1";
 
-    let frameValues: number[] = [];
     let inputValues: number[][] = [];
     let currentThreshold = 0;
     let cols = 0;
@@ -32,13 +28,18 @@ export default function TopographicBackground() {
     let noiseMin = 100;
     let noiseMax = 0;
     let mousePos = { x: -99, y: -99 };
-    let mouseDown = false;
+    // The one thing that must be cancellable on unmount: without this the requestAnimationFrame
+    // chain below outlived the component, drawing forever into a detached canvas.
+    let frameHandle = 0;
 
     const canvasSize = () => {
       const rect = canvas.parentElement?.getBoundingClientRect() || canvas.getBoundingClientRect();
       canvas.width = rect.width * window.devicePixelRatio;
       canvas.height = rect.height * window.devicePixelRatio;
-      ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+      // setTransform, not scale(): scale() COMPOUNDS with whatever transform is already on
+      // the context, so every resize used to multiply the device-pixel-ratio scale again
+      // and the field zoomed in a step at a time.
+      ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
       canvas.style.width = rect.width + "px";
       canvas.style.height = rect.height + "px";
       cols = Math.floor(canvas.width / res) + 1;
@@ -173,7 +174,7 @@ export default function TopographicBackground() {
         inputValues[y] = [];
         for (let x = 0; x <= cols; x++) {
           inputValues[y][x] =
-            (ChriscoursesPerlinNoise.noise(x * 0.02, y * 0.02, zOffset + (zBoostValues[y]?.[x] || 0)) as number) * 100;
+            noise(x * 0.02, y * 0.02, zOffset + (zBoostValues[y]?.[x] || 0)) * 100;
           if (inputValues[y][x] < noiseMin) noiseMin = inputValues[y][x];
           if (inputValues[y][x] > noiseMax) noiseMax = inputValues[y][x];
           if ((zBoostValues[y]?.[x] || 0) > 0) {
@@ -201,17 +202,11 @@ export default function TopographicBackground() {
     };
 
     const animate = () => {
-      const startTime = performance.now();
-      setTimeout(() => {
-        const endTime = performance.now();
-        const frameDuration = endTime - startTime;
-        frameValues.push(Math.round(1000 / frameDuration));
-        if (frameValues.length > 60 && showFPS && fpsCountRef.current) {
-          fpsCountRef.current.innerText = Math.round(frameValues.reduce((a, b) => a + b) / frameValues.length).toString();
-          frameValues = [];
-        }
-        requestAnimationFrame(() => animate());
-      }, MAX_FPS === 0 ? 0 : 1000 / MAX_FPS);
+      // Scheduled first and kept in `frameHandle` so cleanup can cancel exactly the frame
+      // that is actually pending. (This used to be a setTimeout wrapping a
+      // requestAnimationFrame, with the handle of neither retained -- so nothing could stop
+      // it, and the two schedulers each queued the next frame independently.)
+      frameHandle = requestAnimationFrame(animate);
 
       mouseOffset();
 
@@ -230,44 +225,40 @@ export default function TopographicBackground() {
       noiseMax = 0;
     };
 
+    // Named handlers, because removeEventListener compares by identity: the previous
+    // cleanup passed freshly-created arrow functions, which match nothing and removed
+    // nothing, so every mount leaked its listeners onto window/canvas permanently.
+    const handleResize = () => canvasSize();
+    // On `window`, not on the canvas. The canvas sits at z-index -1 behind AppShell's
+    // content layer (z-index 1), which covers the whole viewport -- so it was never the
+    // hit-test target and never received a single mousemove, leaving the cursor-follows
+    // effect dead on arrival. Listening at the window and converting client coordinates
+    // into canvas-local ones is what makes it actually respond to the pointer, and lets
+    // the canvas keep `pointer-events: none`, which is what a background should have.
+    const handleMouseMove = (e: MouseEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      mousePos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    };
+    // Pointer gone from the window: park it somewhere the grid can't reach, or the last
+    // position keeps boosting that spot forever.
+    const handleMouseLeave = () => {
+      mousePos = { x: -99, y: -99 };
+    };
+
     canvasSize();
-    window.addEventListener("resize", () => canvasSize());
-
-    canvas.addEventListener("mousemove", (e) => {
-      mousePos = { x: e.offsetX, y: e.offsetY };
-    });
-
-    canvas.addEventListener("mousedown", () => {
-      mouseDown = true;
-    });
-
-    canvas.addEventListener("mouseup", () => {
-      mouseDown = false;
-    });
-
-    canvas.addEventListener("mouseleave", () => {
-      mouseDown = false;
-    });
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseleave", handleMouseLeave);
 
     animate();
 
     return () => {
-      window.removeEventListener("resize", () => canvasSize());
-      canvas.removeEventListener("mousemove", () => {});
-      canvas.removeEventListener("mousedown", () => {});
-      canvas.removeEventListener("mouseup", () => {});
-      canvas.removeEventListener("mouseleave", () => {});
+      cancelAnimationFrame(frameHandle);
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseleave", handleMouseLeave);
     };
   }, []);
 
-  return (
-    <>
-      <canvas ref={canvasRef} className={styles.canvas} />
-      {false && (
-        <div className={styles.fpsContainer}>
-          <p ref={fpsCountRef} id="fps-count" />
-        </div>
-      )}
-    </>
-  );
+  return <canvas ref={canvasRef} className={styles.canvas} aria-hidden="true" />;
 }

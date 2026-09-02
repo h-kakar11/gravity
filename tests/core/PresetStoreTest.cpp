@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include "tests/support/TempTestDirectory.h"
+
 namespace mediatool::settings {
 namespace {
 
@@ -13,7 +15,7 @@ namespace fs = std::filesystem;
 class PresetStoreTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        tempDir_ = fs::temp_directory_path() / "mediatool_preset_store_test";
+        tempDir_ = mediatool::testing::UniqueTempPath("mediatool_preset_store_test");
         std::error_code ec;
         fs::remove_all(tempDir_, ec);
         fs::create_directories(tempDir_);

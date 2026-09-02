@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "tests/support/TempTestDirectory.h"
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -137,7 +139,7 @@ namespace {
 class FilenameDedupTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        dir_ = (stdfs::temp_directory_path() / "mediatool_dedup_test").string();
+        dir_ = mediatool::testing::UniqueTempPath("mediatool_dedup_test").string();
         std::error_code ec;
         stdfs::remove_all(dir_, ec);
         stdfs::create_directories(dir_);

@@ -111,12 +111,27 @@ by launching it through an `IProcessRunner` and translating its NDJSON events
 ## The download pipeline (Phase 2)
 
 ```
-React (DownloaderPage) -> Tauri -> C++ core -> DownloadJob -> IDownloadProvider (YtDlpProvider)
-                                                                       |
-                                                              stdio NDJSON
-                                                                       v
+React (HomePage / DownloaderPage) -> Tauri -> C++ core -> DownloadJob -> IDownloadProvider (YtDlpProvider)
+                                                                                 |
+                                                                        stdio NDJSON
+                                                                                 v
                                                         python/downloader/downloader.py -> yt-dlp -> ffmpeg
 ```
+
+Two screens drive the same commands. `HomePage` is where a user actually starts a download
+-- pasting a link into the home card inspects it in place, without navigating anywhere --
+and it covers the full flow: metadata, per-stream format selection, quality, playlist
+enumeration and fan-out, progress, cancellation, and reveal-in-Explorer on completion.
+`DownloaderPage` is the older dedicated screen, still reachable via the paste-and-download
+global hotkey (`App.tsx` navigates to `{kind: "download"}`), and still the only screen with
+a download `PresetBar`.
+
+Both call the same `coreClient` functions with the same parameters, which is the property
+that matters: neither screen contains download logic of its own. When the flow was first
+inlined into `HomePage` it was inlined *partially* -- the playlist UI, the combo-link
+choice and the format list were carried over as state and handlers with no JSX rendering
+them, so those features were silently unreachable from the app's main entry point while
+still existing in the file. `app/frontend/src/pages/HomePage.test.tsx` exists to pin them.
 
 Two IPC commands drive it (`docs/ipc-contract.md`):
 

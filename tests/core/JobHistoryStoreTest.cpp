@@ -9,6 +9,8 @@
 
 #include <gtest/gtest.h>
 
+#include "tests/support/TempTestDirectory.h"
+
 namespace mediatool::jobs {
 namespace {
 
@@ -17,7 +19,7 @@ namespace fs = std::filesystem;
 class JobHistoryStoreTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        tempDir_ = fs::temp_directory_path() / "mediatool_job_history_store_test";
+        tempDir_ = mediatool::testing::UniqueTempPath("mediatool_job_history_store_test");
         std::error_code ec;
         fs::remove_all(tempDir_, ec);
         fs::create_directories(tempDir_);

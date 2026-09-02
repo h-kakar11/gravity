@@ -291,12 +291,19 @@ def build_playlist_payload(info: dict, url: str) -> dict:
 
     raw_entries = info.get("entries") or []
     entries = []
+    # Set only when a downloadable entry is actually dropped for the cap. Reporting
+    # `len(entries) >= cap` instead claimed truncation for a playlist of exactly 500
+    # complete videos, and the UI told the user entries had been dropped when none had.
+    truncated = False
     for raw in raw_entries:
         if not isinstance(raw, dict):
             continue  # unavailable entry -- yt-dlp yields None for these
         entry_url = raw.get("url") or raw.get("webpage_url")
         if not entry_url:
             continue
+        if len(entries) >= _MAX_PLAYLIST_ENTRIES:
+            truncated = True
+            break
         entries.append({
             # Assigned after the loop: index must count surviving entries, not raw position.
             "index": 0,
@@ -304,8 +311,6 @@ def build_playlist_payload(info: dict, url: str) -> dict:
             "title": raw.get("title") or "Untitled",
             "duration": raw.get("duration"),
         })
-        if len(entries) >= _MAX_PLAYLIST_ENTRIES:
-            break
 
     for position, entry in enumerate(entries, start=1):
         entry["index"] = position
@@ -315,7 +320,7 @@ def build_playlist_payload(info: dict, url: str) -> dict:
         "uploader": info.get("uploader") or info.get("channel"),
         "webpageUrl": info.get("webpage_url") or url,
         "count": len(entries),
-        "truncated": len(entries) >= _MAX_PLAYLIST_ENTRIES,
+        "truncated": truncated,
         "entries": entries,
     }
 
@@ -345,6 +350,29 @@ def _yt_dlp_release_date(version: str):
         return None
 
 
+def _yt_dlp_version_string() -> str:
+    """yt-dlp's version, or "" if this build does not report one.
+
+    `yt_dlp.__version__` is NOT it. Current releases (verified against 2026.08.19) expose
+    the string only as `yt_dlp.version.__version__`; there is no `__version__` on the
+    package itself. Reading the wrong attribute silently produced "" for every install,
+    which made `ytDlpVersion` and `ageDays` always null and `stale` always false -- so the
+    "your extractors are two years old, that is why every link fails" warning this whole
+    function exists to raise could never fire.
+
+    Both spellings are tried, newest-first, so an older build that did carry the package
+    attribute still reports correctly.
+    """
+    try:
+        from yt_dlp.version import __version__ as version  # type: ignore[import-not-found]
+
+        if version:
+            return str(version)
+    except Exception:
+        pass
+    return str(getattr(yt_dlp, "__version__", "") or "")
+
+
 def run_version() -> int:
     """Reports what the downloader stack actually is, so the app can say so before a
     download fails for a reason the user cannot see.
@@ -363,7 +391,7 @@ def run_version() -> int:
     }
 
     if yt_dlp is not None:
-        version = getattr(yt_dlp, "__version__", None) or ""
+        version = _yt_dlp_version_string()
         data["ytDlpVersion"] = version or None
         released = _yt_dlp_release_date(version)
         if released is not None:
@@ -480,6 +508,23 @@ def run_inspect_playlist(url: str) -> int:
         return 1
 
 
+def escape_outtmpl_literal(text: str) -> str:
+    """Escapes text that must appear VERBATIM in a yt-dlp output template.
+
+    `outtmpl` is a template, not a path: yt-dlp expands `%(field)s` in it. Both halves of
+    the template built below are attacker-influenced -- the filename base is derived from
+    the video's title, which comes from whatever remote site is being downloaded from --
+    so splicing them in raw let a title inject template fields:
+
+        title "100%(ext)s weird"  -> file named "100mp4 weird.mp4"
+        title "%(title)200000s"   -> a 200,000-character filename
+
+    `%%` is the template's own escape for a literal percent, so doubling every `%` makes
+    the text mean itself. A name with no `%` in it is unchanged.
+    """
+    return text.replace("%", "%%")
+
+
 def _resolve_output_path(downloader: "yt_dlp.YoutubeDL", result_info: dict) -> str:
     """`prepare_filename()` is a template renderer, not a report of what yt-dlp actually
     wrote to disk -- it doesn't reflect post-processing (e.g. yt-dlp forcing a different
@@ -519,7 +564,11 @@ def run_download(params: dict) -> int:
         # the real download is enough; there is no path that reaches this function without
         # already having passed that gate).
         os.makedirs(output_dir, exist_ok=True)
-        outtmpl = os.path.join(output_dir, filename_base + ".%(ext)s")
+        # Only the trailing ".%(ext)s" is meant as a template field; everything the caller
+        # supplied is literal text and is escaped as such. See escape_outtmpl_literal.
+        outtmpl = os.path.join(
+            escape_outtmpl_literal(output_dir), escape_outtmpl_literal(filename_base) + ".%(ext)s"
+        )
 
         def progress_hook(status: dict) -> None:
             state = status.get("status")

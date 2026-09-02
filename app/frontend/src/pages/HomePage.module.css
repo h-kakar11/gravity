@@ -81,10 +81,9 @@
 .boxes {
   display: flex;
   gap: 10px;
-  justify-items: auto;
-  text-justify: distribute;
   justify-content: center;
   flex-wrap: wrap;
+  width: 100%;
 }
 
 .boxesExpanded {
@@ -92,14 +91,10 @@
   align-items: center;
 }
 
-.box:hover{
-  transform-box: border-box; 
-}
-
 .box {
   height: 280px;
   width: 40%;
-  min-width: 450px;
+  min-width: min(450px, 100%);
   max-width: 550px;
   display: grid;
   grid-template-columns: auto 1fr;
@@ -155,7 +150,9 @@
 
 .historyContainer {
   width: calc(40% + 10px + 40%);
-  min-width: 910px;
+  /* Same clamp as .boxesExpanded .box, and for the same reason: a flat 910px here
+     overflows the 900px minimum window width whenever there is any history to show. */
+  min-width: min(910px, 100%);
   max-width: 1110px;
   padding: 16px;
   border-radius: 24px;
@@ -269,10 +266,16 @@
 }
 
 /* Expanded layout: both cards stack and span the full width the pair used to occupy,
-   matching .historyContainer below them. */
+   matching .historyContainer below them.
+
+   min-width is clamped to the viewport rather than a flat 910px: the Tauri window's
+   minWidth is 900 (tauri.conf.json), and a stacked card that cannot shrink below 910
+   overflowed it horizontally the moment the download UI expanded -- a single card has no
+   second card to wrap under, so flex-wrap could not rescue it the way it does the
+   side-by-side layout. */
 .boxesExpanded .box {
   width: calc(40% + 10px + 40%);
-  min-width: 910px;
+  min-width: min(910px, 100%);
   max-width: 1110px;
   height: 180px;
 }

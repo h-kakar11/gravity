@@ -346,13 +346,19 @@ TEST(YtDlpProvider, InspectSendsInspectCommandAndReturnsRichMetadata) {
 }
 
 TEST(YtDlpProvider, InspectPlaylistSendsPlaylistCommandAndReturnsEntries) {
+    // The entry duration key here is "duration", which is what downloader.py's
+    // build_playlist_payload actually emits (docs/protocols/downloader.md's `playlist`
+    // event). This fixture previously used the C++-side spelling "durationSeconds", so it
+    // agreed with the parser's bug instead of with the producer: the test passed while
+    // every real playlist listing showed no durations at all. Keep this matching
+    // docs/protocols/downloader.md, not IDownloadProvider.h.
     FakeProcessRunner runner({
         R"({"event":"playlist","data":{)"
         R"("title":"My Playlist","uploader":"Some Channel",)"
         R"("webpageUrl":"https://example.com/playlist?list=abc","truncated":false,"count":2,)"
         R"("entries":[)"
-        R"({"index":1,"url":"https://example.com/watch?v=a","title":"First","durationSeconds":10.5},)"
-        R"({"index":2,"url":"https://example.com/watch?v=b","title":"Second","durationSeconds":null})"
+        R"({"index":1,"url":"https://example.com/watch?v=a","title":"First","duration":10.5},)"
+        R"({"index":2,"url":"https://example.com/watch?v=b","title":"Second","duration":null})"
         R"(]}})",
         R"({"event":"completed","data":{}})",
     });
