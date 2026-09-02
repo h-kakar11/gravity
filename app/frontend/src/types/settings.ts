@@ -13,7 +13,7 @@ export interface GeneralSettings {
   hotkeyFocusQueue: string;
 }
 
-export type SpeedUnit = "KBps" | "KiBps" | "MBps" | "MiBps" | "GBps" | "GiBps" | "Mbps";
+export type SpeedUnit = "KBps" | "KiBps" | "MBps" | "MiBps" | "GBps" | "GiBps" | "Kbps" | "Kibps" | "Mbps" | "Mibps" | "Gbps" | "Gibps";
 
 export interface DownloadSettings {
   defaultQuality: string;

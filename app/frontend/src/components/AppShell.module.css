@@ -2,7 +2,7 @@
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  background: var(--color-bg);
+  background: transparent;
 }
 
 .topBar {
@@ -12,56 +12,78 @@
   padding: 14px 24px;
   border-bottom: 1px solid var(--color-surface-border);
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--color-bg);
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: 0.02em;
+  font-weight: bold;
+  font-size: 22px;
   cursor: pointer;
   background: none;
   border: none;
   color: var(--color-text-primary);
   padding: 0;
+  font-family: "Perfect DOS VGA 437", "Courier New", monospace;
+  letter-spacing: 2px;
+}
+
+@keyframes blink {
+  0%, 49%, 100% {
+    opacity: 1;
+  }
+  50%, 99% {
+    opacity: 0.2;
+  }
 }
 
 .brandDot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 100%;
   background: var(--color-accent);
+  flex-shrink: 0;
+  animation: blink 1s infinite;
 }
 
 .navGroup {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 10px;
+  padding: 10px;
 }
 
 .navButton {
-  background: none;
+  background: transparent;
   border: none;
-  color: var(--color-text-secondary);
+  color: #f0f8ff;
   font-size: 13px;
   font-weight: 500;
   padding: 8px 14px;
-  border-radius: var(--radius-control);
+  border-radius: 6px;
   cursor: pointer;
+  font-family: "Consolas", monospace;
   transition:
     color var(--transition-fast),
-    background var(--transition-fast);
+    background var(--transition-fast),
+    transform var(--transition-fast),
+    text-shadow var(--transition-fast);
 }
 
 .navButton:hover {
   color: var(--color-text-primary);
   background: var(--color-surface);
+  transform: scale(1.1);
+  text-shadow: 0 0 10px #6366f1, 0 0 20px #6366f1;
 }
 
 .navButtonActive {
-  color: var(--color-text-primary);
+  color: var(--color-accent);
   background: var(--color-surface);
 }
 
@@ -77,4 +99,6 @@
 .content {
   flex: 1;
   overflow-y: auto;
+  position: relative;
+  z-index: 1;
 }

@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
+import TopographicBackground from "./TopographicBackground";
 import styles from "./AppShell.module.css";
 
 // Replaces the old inline <nav> two-tab switch. A slim top bar only -- no sidebar
@@ -31,6 +32,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className={styles.shell}>
+      <TopographicBackground />
       <header className={styles.topBar}>
         <button className={styles.brand} onClick={() => navigate({ kind: "home" })} aria-label="Gravity home">
           <span className={styles.brandDot} aria-hidden="true" />

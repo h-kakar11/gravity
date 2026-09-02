@@ -66,6 +66,7 @@ function Field({
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [originalSettings, setOriginalSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -74,7 +75,10 @@ export default function SettingsPage() {
   useEffect(() => {
     coreClient
       .getSettings()
-      .then(({ settings: loaded }) => setSettings(loaded))
+      .then(({ settings: loaded }) => {
+        setSettings(loaded);
+        setOriginalSettings(loaded);
+      })
       .catch((err) => setLoadError(asErrorInfo(err).message));
     // Best-effort -- the encoder probe is a "nice to know" surfaced from 2.6's cached
     // FFmpegEngine::AvailableEncoders(), never allowed to block the Settings page loading.
@@ -104,12 +108,30 @@ export default function SettingsPage() {
     setSaveState("idle");
   };
 
+  const getChangedFields = (): string[] => {
+    if (!settings || !originalSettings) return [];
+    const changed: string[] = [];
+    for (const section of Object.keys(settings) as Array<keyof Settings>) {
+      const currentSection = settings[section];
+      const originalSection = originalSettings[section];
+      for (const key of Object.keys(currentSection)) {
+        if (currentSection[key as keyof typeof currentSection] !== originalSection[key as keyof typeof originalSection]) {
+          changed.push(key);
+        }
+      }
+    }
+    return changed;
+  };
+
+  const countChanges = (): number => getChangedFields().length;
+
   const save = async () => {
     setSaveState("saving");
     setSaveError(null);
     try {
       const { settings: saved } = await coreClient.updateSettings(settings);
       setSettings(saved);
+      setOriginalSettings(saved);
       setSaveState("saved");
       // Best-effort: a saved hotkey binding should take effect immediately rather than
       // waiting for the next launch. Not fatal if it fails -- the new binding still lands
@@ -221,7 +243,12 @@ export default function SettingsPage() {
             <option value="MiBps">Mebibytes/sec (MiB/s)</option>
             <option value="GBps">Gigabytes/sec (GB/s)</option>
             <option value="GiBps">Gibibytes/sec (GiB/s)</option>
-            <option value="Mbps">Megabits/sec (Mb/s)</option>
+            <option value="Kbps">Kilobits/sec (Kbps)</option>
+            <option value="Kibps">Kibibits/sec (Kibps)</option>
+            <option value="Mbps">Megabits/sec (Mbps)</option>
+            <option value="Mibps">Megabits/sec (Mibps)</option>
+            <option value="Gbps">Gigabits/sec (Gbps)</option>
+            <option value="Gibps">Gigabits/sec (Gibps)</option>
           </select>
         </Field>
       </GlassCard>
@@ -330,8 +357,17 @@ export default function SettingsPage() {
 
       <div className={styles.footer}>
         <button className={styles.saveButton} onClick={() => void save()} disabled={saveState === "saving"}>
-          {saveState === "saving" ? "Saving..." : "Save"}
+          {saveState === "saving" ? "Saving..." : `Save Changes${countChanges() > 0 ? ` (${countChanges()})` : ""}`}
         </button>
+        {getChangedFields().length > 0 && (
+          <div className={styles.changedFields}>
+            {getChangedFields().map((field) => (
+              <span key={field} className={styles.changedFieldTag}>
+                {field}
+              </span>
+            ))}
+          </div>
+        )}
         {saveState === "saved" && <span className={styles.statusText}>Saved</span>}
         {saveState === "error" && saveError && <span className={styles.errorText}>{saveError}</span>}
       </div>

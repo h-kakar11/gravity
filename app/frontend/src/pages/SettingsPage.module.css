@@ -1,5 +1,5 @@
 .wrap {
-  max-width: 640px;
+  max-width: 800px;
   margin: 0 auto;
   padding: 32px 24px 64px;
   display: flex;
@@ -50,7 +50,7 @@
   padding: 6px 10px;
   font-size: 13px;
   font-family: var(--font-family);
-  min-width: 220px;
+  min-width: 480px;
 }
 
 .numberInput {
@@ -83,13 +83,14 @@
    The negative horizontal margin bleeds the backdrop out to `.wrap`'s own 24px padding, so
    content scrolls under an opaque bar rather than under a floating button. */
 .footer {
-  position: sticky;
+  position: fixed;
   bottom: 0;
-  z-index: 1;
+  left: 0;
+  right: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0 -24px;
   padding: 16px 24px;
   background: var(--color-bg);
   border-top: 1px solid var(--color-surface-border);
@@ -124,4 +125,21 @@
 .errorText {
   font-size: 12px;
   color: var(--color-error);
+}
+
+.changedFields {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  align-items: center;
+}
+
+.changedFieldTag {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--color-surface-border);
 }
