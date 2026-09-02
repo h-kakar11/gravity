@@ -36,7 +36,7 @@ jobs:
     name: C++ (build + ctest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install MinGW-w64 GCC
         # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
@@ -71,8 +71,8 @@ jobs:
     name: Python (unittest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Run downloader protocol tests
@@ -89,7 +89,7 @@ jobs:
       run:
         working-directory: app/desktop/src-tauri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install MinGW-w64 GCC
         # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
@@ -113,10 +113,109 @@ jobs:
           rustup component add clippy
 
       - name: cargo test
-        run: cargo test
+        # TEMPORARY DIAGNOSTIC -- remove once the STATUS_ENTRYPOINT_NOT_FOUND cause is
+        # confirmed (issue #90). The lib test binary links cleanly but dies at process
+        # start with 0xc0000139, meaning a DLL it imports doesn't export a symbol it
+        # asks for. Prior rounds ruled out a MinGW runtime mismatch (the binary imports
+        # no MinGW runtime DLLs at all, which is also why +crt-static was a no-op).
+        # This step names the actual missing entrypoint by diffing the binary's import
+        # table against the real exports of each system DLL it imports, and records
+        # which gcc/ld actually performed the link.
+        run: |
+          Write-Host "--- linker provenance ---"
+          foreach ($t in 'gcc','ld','dlltool') {
+            Get-Command $t -All -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "$t -> $($_.Source)" }
+          }
+          gcc --version | Select-Object -First 1
+
+          cargo test --no-run 2>&1 | Select-Object -Last 3
+          $exe = (Get-ChildItem -Recurse -Filter "gravity_desktop_lib-*.exe" target\debug\deps |
+                  Select-Object -First 1).FullName
+          Write-Host "--- import/export diff for $exe ---"
+
+          $imports = @{}; $cur = $null
+          foreach ($line in (objdump -p $exe)) {
+            if ($line -match '^\s*DLL Name:\s*(\S+)') {
+              $cur = $Matches[1]
+              if (-not $imports.ContainsKey($cur)) {
+                $imports[$cur] = New-Object System.Collections.Generic.List[string]
+              }
+              continue
+            }
+            if ($cur -and $line -match '^\s*[0-9a-f]+\s+(?:\d+|<none>)\s+(\S+)\s*$') {
+              $imports[$cur].Add($Matches[1])
+            }
+          }
+          foreach ($dll in $imports.Keys) {
+            $path = Join-Path $env:WINDIR "System32\$dll"
+            if (-not (Test-Path $path)) { Write-Host "[apiset/absent] $dll"; continue }
+            $exports = New-Object System.Collections.Generic.HashSet[string]
+            foreach ($l in (objdump -p $path)) {
+              if ($l -match '^\s*\[\s*\d+\]\s+(\S+)') { [void]$exports.Add($Matches[1]) }
+            }
+            if ($exports.Count -eq 0) { Write-Host "[unparsed exports] $dll"; continue }
+            $missing = @($imports[$dll] | Where-Object { -not $exports.Contains($_) })
+            if ($missing.Count) { Write-Host "MISSING >>> ${dll}: $($missing -join ', ')" }
+            else { Write-Host "ok $dll ($($imports[$dll].Count) imports)" }
+          }
+
+          Write-Host "--- run WITH choco MinGW on PATH ---"
+          & $exe --list | Out-Null; Write-Host "exit=$LASTEXITCODE"
+          Write-Host "--- run WITHOUT any mingw dir on PATH (same binary) ---"
+          $saved = $env:PATH
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'mingw' }) -join ';'
+          & $exe --list | Out-Null; Write-Host "exit=$LASTEXITCODE"
+          $env:PATH = $saved
+
+          cargo test
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  # TEMPORARY EXPERIMENT (issue #90) -- variant B: identical to the `rust` job above but
+  # without the Chocolatey MinGW install, so rustc links with whatever toolchain the
+  # runner image already provides rather than a GCC 16.x that shadows the rustup GNU
+  # toolchain's own version-matched ld/dlltool on PATH.
+  rust-experiment-no-choco-mingw:
+    name: "EXPERIMENT B: Rust, no choco MinGW"
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: app/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install GNU Rust toolchain
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu
+          rustup default stable-x86_64-pc-windows-gnu
+      - name: Which gcc will link
+        run: |
+          Get-Command gcc -All -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "gcc -> $($_.Source)" }
+          gcc --version | Select-Object -First 1
+      - name: cargo test
+        run: cargo test
+
+  # TEMPORARY EXPERIMENT (issue #90) -- variant C: the MSVC toolchain, which sidesteps the
+  # MinGW import-descriptor question entirely. Recorded as a data point only; the project
+  # deliberately targets GNU/MinGW (docs/development.md), so this is not a proposed switch.
+  rust-experiment-msvc:
+    name: "EXPERIMENT C: Rust on MSVC"
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: app/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install MSVC Rust toolchain
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc
+          rustup default stable-x86_64-pc-windows-msvc
+      - name: cargo test
+        run: cargo test
 
   frontend:
     name: Frontend (tsc + vite build + vitest)
@@ -125,8 +224,8 @@ jobs:
       run:
         working-directory: app/frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -144,7 +243,7 @@ jobs:
     needs: [cpp, rust, frontend]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install MinGW-w64 GCC
         # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
@@ -171,7 +270,7 @@ jobs:
           cmake --preset windows-mingw-release
           cmake --build --preset windows-mingw-release
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -203,7 +302,7 @@ jobs:
         working-directory: app/desktop
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gravity-installer
           path: app/desktop/src-tauri/target/release/bundle/nsis/*.exe
