@@ -26,7 +26,20 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
 
 /// Requests time out after this long with no matching response line from core.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Deliberately LONGER than the core's own longest per-command deadline (`kInspectDeadline`
+/// in app/core/main.cpp, 30s), and it has to stay that way. Both were 30s, and this timer
+/// starts first -- the moment the request is written to stdin, before core has even parsed
+/// it -- so this one always expired first. The core's purpose-built E_INSPECT_TIMEOUT /
+/// E_INSPECT_PLAYLIST_TIMEOUT errors ("Timed out fetching information about this link. The
+/// site may be unreachable or very slow right now.") could therefore never reach the user;
+/// what they actually saw was this module's developer-facing string, surfaced by
+/// coreClient.ts as a bare E_UNKNOWN.
+///
+/// This is the outer backstop for a core that has stopped answering at all. The inner,
+/// per-command deadlines are what should normally fire, because they know what timed out
+/// and can say so.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
@@ -41,7 +54,7 @@ pub struct CoreState {
     /// mediatool-core's stdout closes (process exited, crashed, or was killed) -- see
     /// issue #23. Checked by `send_request` so a request made after that point fails
     /// immediately with a clear error instead of hitting a raw OS pipe-write error or
-    /// silently sitting until the 30s timeout in `send_core_command`.
+    /// silently sitting until `send_core_command`'s REQUEST_TIMEOUT elapses.
     alive: Arc<AtomicBool>,
 }
 

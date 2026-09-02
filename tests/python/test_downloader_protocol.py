@@ -304,6 +304,45 @@ class BuildPlaylistPayloadTest(unittest.TestCase):
         self.assertEqual(payload["count"], downloader._MAX_PLAYLIST_ENTRIES)
         self.assertTrue(payload["truncated"])
 
+    def test_a_playlist_of_exactly_the_cap_is_not_reported_as_truncated(self):
+        # `truncated` used to be `len(entries) >= cap`, which is also true when the playlist
+        # happens to hold exactly `cap` complete videos and nothing was dropped -- the UI
+        # then told the user entries had been left out when none had.
+        exact = [
+            {"url": f"https://example.com/watch?v={n}", "title": f"Video {n}"}
+            for n in range(downloader._MAX_PLAYLIST_ENTRIES)
+        ]
+        payload = downloader.build_playlist_payload(
+            self._playlist(exact), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["count"], downloader._MAX_PLAYLIST_ENTRIES)
+        self.assertFalse(payload["truncated"])
+
+    def test_unavailable_entries_past_the_cap_do_not_count_as_truncation(self):
+        # Dead entries are dropped whether or not there is room for them, so a tail made
+        # entirely of them is not a truncated playlist.
+        entries = [
+            {"url": f"https://example.com/watch?v={n}", "title": f"Video {n}"}
+            for n in range(downloader._MAX_PLAYLIST_ENTRIES)
+        ] + [None, {"title": "no url"}]
+        payload = downloader.build_playlist_payload(
+            self._playlist(entries), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["count"], downloader._MAX_PLAYLIST_ENTRIES)
+        self.assertFalse(payload["truncated"])
+
+    def test_entry_duration_is_emitted_under_the_key_the_core_parses(self):
+        # The C++ side (YtDlpProvider::ParsePlaylistInfo) reads "duration" here, and read
+        # "durationSeconds" for a while -- silently dropping every entry duration. Pinning
+        # the producer's key so that mismatch cannot come back unnoticed.
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"url": "https://example.com/watch?v=a", "title": "First", "duration": 61.0},
+        ]), "https://example.com/playlist?list=x")
+
+        self.assertIn("duration", payload["entries"][0])
+        self.assertEqual(payload["entries"][0]["duration"], 61.0)
+        self.assertNotIn("durationSeconds", payload["entries"][0])
+
     def test_single_video_raises_not_a_playlist(self):
         with self.assertRaises(downloader.DownloaderError) as ctx:
             downloader.build_playlist_payload(
@@ -316,6 +355,65 @@ class BuildPlaylistPayloadTest(unittest.TestCase):
             self._playlist([]), "https://example.com/playlist?list=x")
         self.assertEqual(payload["count"], 0)
         self.assertEqual(payload["entries"], [])
+
+
+class EscapeOuttmplLiteralTest(unittest.TestCase):
+    """The output template's literal halves are attacker-influenced (a video title becomes
+    the filename base), so they must not be able to introduce template fields."""
+
+    def test_a_plain_name_is_unchanged(self):
+        self.assertEqual(downloader.escape_outtmpl_literal("My Video"), "My Video")
+
+    def test_a_percent_is_doubled_so_it_means_itself(self):
+        self.assertEqual(downloader.escape_outtmpl_literal("Save 50% Now"), "Save 50%% Now")
+
+    def test_an_injected_field_reference_is_neutralised(self):
+        # Unescaped, yt-dlp expanded this into the real extension ("100mp4 weird").
+        self.assertEqual(
+            downloader.escape_outtmpl_literal("100%(ext)s weird"), "100%%(ext)s weird")
+
+    def test_a_padding_attack_is_neutralised(self):
+        # Unescaped, "%(title)200000s" rendered a 200,000-character filename.
+        self.assertEqual(
+            downloader.escape_outtmpl_literal("%(title)200000s"), "%%(title)200000s")
+
+
+class YtDlpVersionLookupTest(unittest.TestCase):
+    def test_returns_empty_string_when_yt_dlp_is_absent(self):
+        if downloader.yt_dlp is not None:
+            self.skipTest("ambient interpreter unexpectedly has yt_dlp installed")
+        self.assertEqual(downloader._yt_dlp_version_string(), "")
+
+    def test_reads_the_submodule_attribute_current_releases_actually_expose(self):
+        # Current yt-dlp has no `yt_dlp.__version__` at all -- only
+        # `yt_dlp.version.__version__` (verified against 2026.08.19). Reading the package
+        # attribute reported no version for every real install, which silently disabled the
+        # staleness warning. A stub module proves which name is consulted without needing
+        # yt_dlp installed (this suite deliberately runs without it).
+        import types
+
+        fake_pkg = types.ModuleType("yt_dlp")
+        fake_version_mod = types.ModuleType("yt_dlp.version")
+        fake_version_mod.__version__ = "2026.08.19"
+        fake_pkg.version = fake_version_mod  # type: ignore[attr-defined]
+        # Deliberately NOT setting fake_pkg.__version__: that attribute does not exist on a
+        # real modern build either.
+
+        original_pkg = sys.modules.get("yt_dlp")
+        original_version_mod = sys.modules.get("yt_dlp.version")
+        original_ref = downloader.yt_dlp
+        sys.modules["yt_dlp"] = fake_pkg
+        sys.modules["yt_dlp.version"] = fake_version_mod
+        downloader.yt_dlp = fake_pkg
+        try:
+            self.assertEqual(downloader._yt_dlp_version_string(), "2026.08.19")
+        finally:
+            downloader.yt_dlp = original_ref
+            for name, value in (("yt_dlp", original_pkg), ("yt_dlp.version", original_version_mod)):
+                if value is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = value
 
 
 class CommandStdinProtocolTest(unittest.TestCase):

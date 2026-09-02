@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <system_error>
@@ -311,6 +312,10 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     // encoder" -- so a bounded tail is kept and classified (FFmpegErrorClassifier.h).
     // Bounded because ffmpeg on a bad input can produce a line per frame, and the last few
     // lines are the ones that carry the failure.
+    // Captured by reference, and that is safe by declaration order rather than by luck:
+    // RealProcessRunner delivers these callbacks from its drain thread, which is joined by
+    // ~IProcess. `child` below is declared AFTER this ring, so it is destroyed BEFORE it --
+    // the thread is already joined by the time the ring dies, on the throw path included.
     std::mutex stderrMutex;
     std::deque<std::string> stderrRing;
     static constexpr std::size_t kMaxStderrLines = 20;
@@ -361,10 +366,22 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
         // Free space at the OUTPUT location, and only to make a disk-full message
         // concrete. Measured after the fact, so it is never what decides the
         // classification -- see ClassifyFfmpegFailure.
+        //
+        // The empty-parent guard is load-bearing, not defensive habit: outputPath with no
+        // directory component ("out.mp4") gives an empty parent_path(), and libstdc++'s
+        // WINDOWS fs::space() begins with an internal absolute(p) that throws
+        // filesystem_error for an empty path -- ignoring the error_code overload's promise
+        // not to throw. POSIX fs::space() reports it through the error_code instead, so
+        // this is invisible on Linux and fatal on the only platform Gravity ships to.
+        // Same `if (!parentDir.empty())` guard the stores use (JsonFileSettingsStore,
+        // InProgressJobStore, JobHistoryStore, PresetStore).
         std::optional<std::uint64_t> availableBytes;
-        std::error_code spaceError;
-        const auto space = fs::space(fs::path(outputPath).parent_path(), spaceError);
-        if (!spaceError) availableBytes = static_cast<std::uint64_t>(space.available);
+        const fs::path outputDirectory = fs::path(outputPath).parent_path();
+        if (!outputDirectory.empty()) {
+            std::error_code spaceError;
+            const auto space = fs::space(outputDirectory, spaceError);
+            if (!spaceError) availableBytes = static_cast<std::uint64_t>(space.available);
+        }
 
         throw MediaToolException(
             ClassifyFfmpegFailure(stderrTail, result.exitCode, availableBytes));

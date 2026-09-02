@@ -38,6 +38,17 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "MEDIATOOL_ENABLE_SANITIZERS": "ON"
       }
+    },
+    {
+      "name": "sanitizers-linux",
+      "displayName": "Sanitizers on Linux/WSL (ASan + UBSan, Debug)",
+      "description": "The sanitizer build that actually runs on a stock Linux/WSL box. Deliberately does NOT inherit windows-mingw-debug: that preset pins gcc.exe/g++.exe and the x64-mingw-static vcpkg triplet, neither of which exists here, so `sanitizers-debug` cannot be configured on Linux at all despite being the documented way to run these. Dependencies come from the system (nlohmann-json, spdlog, reproc++, gtest) rather than vcpkg.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/sanitizers-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MEDIATOOL_ENABLE_SANITIZERS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -52,6 +63,10 @@
     {
       "name": "sanitizers-debug",
       "configurePreset": "sanitizers-debug"
+    },
+    {
+      "name": "sanitizers-linux",
+      "configurePreset": "sanitizers-linux"
     }
   ],
   "testPresets": [
@@ -94,6 +109,13 @@
     {
       "name": "sanitizers-debug",
       "configurePreset": "sanitizers-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "sanitizers-linux",
+      "configurePreset": "sanitizers-linux",
       "output": {
         "outputOnFailure": true
       }

@@ -2,15 +2,28 @@
    for color/spacing/motion -- components reference these vars, never a hardcoded hex, so
    the one swappable accent color stays a one-line change here. */
 
+/* @fontsource/* are real npm packages: Vite bundles the woff/woff2 files into dist and
+   they are served from the app itself, which is the only kind of font reference that can
+   work here.
+
+   The brand wordmark's DOS font used to be pulled from two remote CDNs -- an @import of
+   fonts.cdnfonts.com and an @font-face pointing at cdn.jsdelivr.net. Both are gone:
+
+     - Gravity is local-first and must render correctly with no network at all.
+     - The Tauri window's CSP is `default-src 'self'` (tauri.conf.json), so the browser
+       refused both outright ("Refused to load the stylesheet ... violates ...
+       style-src 'self'"). They could never have loaded in the packaged app.
+     - The jsdelivr URL was pinned to `@latest`, so whatever that package published next
+       would have been fetched and trusted on every launch.
+
+   AppShell.module.css already declares `"Perfect DOS VGA 437", "Courier New", monospace`,
+   so the wordmark falls back to the local monospace face. Restoring the exact typeface is
+   a matter of vendoring the file into the repo and adding it to THIRD_PARTY_LICENSES.md --
+   deliberately not done here, because shipping a font is a licensing decision, not a
+   bug fix. */
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
 @import "@fontsource/inter/700.css";
-@import url('https://fonts.cdnfonts.com/css/perfect-dos-vga-437');   
-
-@font-face {
-  font-family: "Perfect DOS VGA 437";
-  src: url("https://cdn.jsdelivr.net/npm/perfect-dos-vga-437@latest/font.woff2") format("woff2");
-}
 
 :root {
   /* Backgrounds */

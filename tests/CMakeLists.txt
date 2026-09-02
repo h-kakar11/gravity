@@ -26,9 +26,20 @@ gtest_discover_tests(mediatool_tests)
 
 # --- Integration and stress suites ------------------------------------------------------
 # Separate binaries, not extra files in mediatool_tests, because they are slow and are run
-# deliberately (scripts/ci-local.ps1 -IntegrationTest / -StressTest) rather than on every
-# build. Keeping them out of the default suite is what keeps that suite fast enough to run
-# constantly, which is the only reason it gets run at all.
+# deliberately rather than on every build. Keeping them out of the default suite is what
+# keeps that suite fast enough to run constantly, which is the only reason it gets run at
+# all.
+#
+# Run them with the ctest presets that select them by label:
+#
+#   ctest --preset windows-mingw-debug-integration
+#   ctest --preset windows-mingw-debug-stress
+#
+# NOT via scripts/ci-local.ps1, which this comment used to claim ("-IntegrationTest /
+# -StressTest"): that script has no such switches and never has. Neither suite runs
+# anywhere automatically today -- .github/workflows/ci.yml's ctest step uses the default
+# preset, which excludes both labels -- so these commands are the only thing that runs
+# them. See docs/local-ci.md.
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 set(MEDIATOOL_TEST_PYTHON "${Python3_EXECUTABLE}")

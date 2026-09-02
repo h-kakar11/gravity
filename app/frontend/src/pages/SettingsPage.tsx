@@ -317,12 +317,12 @@ export default function SettingsPage() {
             <option value="MiBps">Mebibytes/sec (MiB/s)</option>
             <option value="GBps">Gigabytes/sec (GB/s)</option>
             <option value="GiBps">Gibibytes/sec (GiB/s)</option>
-            <option value="Kbps">Kilobits/sec (Kbps)</option>
-            <option value="Kibps">Kibibits/sec (Kibps)</option>
-            <option value="Mbps">Megabits/sec (Mbps)</option>
-            <option value="Mibps">Megabits/sec (Mibps)</option>
-            <option value="Gbps">Gigabits/sec (Gbps)</option>
-            <option value="Gibps">Gigabits/sec (Gibps)</option>
+            <option value="Kbps">Kilobits/sec (Kb/s)</option>
+            <option value="Kibps">Kibibits/sec (Kib/s)</option>
+            <option value="Mbps">Megabits/sec (Mb/s)</option>
+            <option value="Mibps">Mebibits/sec (Mib/s)</option>
+            <option value="Gbps">Gigabits/sec (Gb/s)</option>
+            <option value="Gibps">Gibibits/sec (Gib/s)</option>
           </select>
         </Field>
       </GlassCard>

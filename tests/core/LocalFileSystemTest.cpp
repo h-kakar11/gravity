@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "tests/support/TempTestDirectory.h"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -19,7 +21,7 @@ namespace {
 class LocalFileSystemTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        root_ = (stdfs::temp_directory_path() / "mediatool_lfs_test").string();
+        root_ = mediatool::testing::UniqueTempPath("mediatool_lfs_test").string();
         std::error_code ec;
         stdfs::remove_all(root_, ec);
         stdfs::create_directories(root_);
