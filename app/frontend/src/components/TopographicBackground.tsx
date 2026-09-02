@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
 import * as ChriscoursesPerlinNoise from "https://esm.sh/@chriscourses/perlin-noise";
+import { useTheme } from "../context/ThemeContext";
 import styles from "./TopographicBackground.module.css";
 
 export default function TopographicBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fpsCountRef = useRef<HTMLParagraphElement>(null);
+  const { colors } = useTheme();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -20,7 +22,7 @@ export default function TopographicBackground() {
     const thickLineThresholdMultiple = 3;
     const res = 8;
     const baseZOffset = 0.0001;
-    const lineColor = "#6366f1";
+    const lineColor = colors.topoLineColor;
 
     let frameValues: number[] = [];
     let inputValues: number[][] = [];
@@ -200,9 +202,12 @@ export default function TopographicBackground() {
       }
     };
 
+    let animationFrameId: number | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+
     const animate = () => {
       const startTime = performance.now();
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         const endTime = performance.now();
         const frameDuration = endTime - startTime;
         frameValues.push(Math.round(1000 / frameDuration));
@@ -210,7 +215,7 @@ export default function TopographicBackground() {
           fpsCountRef.current.innerText = Math.round(frameValues.reduce((a, b) => a + b) / frameValues.length).toString();
           frameValues = [];
         }
-        requestAnimationFrame(() => animate());
+        animationFrameId = requestAnimationFrame(() => animate());
       }, MAX_FPS === 0 ? 0 : 1000 / MAX_FPS);
 
       mouseOffset();
@@ -252,13 +257,15 @@ export default function TopographicBackground() {
     animate();
 
     return () => {
+      if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+      if (timeoutId !== null) clearTimeout(timeoutId);
       window.removeEventListener("resize", () => canvasSize());
       canvas.removeEventListener("mousemove", () => {});
       canvas.removeEventListener("mousedown", () => {});
       canvas.removeEventListener("mouseup", () => {});
       canvas.removeEventListener("mouseleave", () => {});
     };
-  }, []);
+  }, [colors.topoLineColor]);
 
   return (
     <>

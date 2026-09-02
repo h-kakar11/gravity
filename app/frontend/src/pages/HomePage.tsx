@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import GlassCard from "../components/GlassCard";
 import { useJobs } from "../hooks/useJobs";
@@ -34,77 +34,6 @@ function formatEta(seconds: number | undefined): string {
 function formatDuration(seconds: number | undefined): string {
   if (seconds === undefined) return "?";
   return formatEta(seconds);
-}
-
-interface CardBox {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}
-
-function measureCard(el: HTMLElement): CardBox {
-  // offset* rather than getBoundingClientRect(): these ignore CSS transforms, so a
-  // measurement taken while a previous FLIP is still settling isn't poisoned by it.
-  return { left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight };
-}
-
-// Animates the home cards between the side-by-side and stacked layouts.
-//
-// A plain CSS transition can't do this: the change is a flex reflow (the Convert card
-// moves from *beside* the download card to *below* it), and neither `flex-direction` nor
-// a reflow-driven position change is an animatable property -- which is why adding
-// `transition` here appeared to do nothing. So this is a FLIP: record where each card sat
-// (First), let React commit the new layout (Last), then start each card off at its old
-// geometry (Invert) and animate it to the new one (Play).
-//
-// `layoutKey` is what identifies a layout, not a render. The download card re-renders
-// constantly while a job reports progress, and those renders must not restart the
-// animation -- only a change of key does.
-function useCardLayoutFlip(containerRef: React.RefObject<HTMLDivElement | null>, layoutKey: string) {
-  const previousBoxes = useRef<CardBox[] | null>(null);
-  const previousKey = useRef<string | null>(null);
-
-  // Deliberately no dependency array: the boxes are re-measured after every commit so the
-  // "First" geometry is current when a layout change does land (a card that grew as
-  // metadata loaded has its real height recorded, not a stale one).
-  useLayoutEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const cards = Array.from(container.children) as HTMLElement[];
-    const layoutChanged = previousKey.current !== null && previousKey.current !== layoutKey;
-    const animating = cards.some((card) => card.getAnimations().some((a) => a.playState === "running"));
-
-    // Mid-flight geometry is the animation's, not the layout's -- sampling it would leave
-    // a bogus "First" for the next transition. Skip, unless the layout just changed, in
-    // which case cancelling first restores the true resting geometry to measure.
-    if (animating && !layoutChanged) return;
-    if (layoutChanged) cards.forEach((card) => card.getAnimations().forEach((a) => a.cancel()));
-
-    const from = previousBoxes.current;
-    const to = cards.map(measureCard);
-    previousBoxes.current = to;
-    previousKey.current = layoutKey;
-
-    if (!layoutChanged || !from || from.length !== to.length) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-    cards.forEach((card, i) => {
-      const a = from[i];
-      const b = to[i];
-      const dx = a.left - b.left;
-      const dy = a.top - b.top;
-      if (dx === 0 && dy === 0 && a.width === b.width && a.height === b.height) return;
-      card.animate(
-        [
-          { transform: `translate(${dx}px, ${dy}px)`, width: `${a.width}px`, height: `${a.height}px` },
-          { transform: "translate(0px, 0px)", width: `${b.width}px`, height: `${b.height}px` },
-        ],
-        { duration: 420, easing: "cubic-bezier(0.4, 0, 0.2, 1)" }
-      );
-    });
-  });
 }
 
 function ErrorBanner({ error }: { error: any }) {
@@ -352,11 +281,6 @@ export default function HomePage() {
   }, [navigate]);
 
   const showDownloadUI = (metadata !== null || playlist !== null || activeJobId !== null || inspectError !== null) && (url.length > 0 || activeJobId !== null);
-  const downloadInputActive = url.length > 0;
-
-  const boxesRef = useRef<HTMLDivElement>(null);
-  // Both flags change the cards' geometry, so either one is a new layout to animate to.
-  useCardLayoutFlip(boxesRef, `${downloadInputActive}:${showDownloadUI}`);
 
   return (
     <div className={styles.wrap}>
@@ -364,13 +288,12 @@ export default function HomePage() {
         <h1 className={styles.title}>What are we doing today?</h1>
         <p className={styles.subtitle}>Drag a file in, or pick a card to get started.</p>
       </div>
-      <div ref={boxesRef} className={`${styles.boxes} ${downloadInputActive ? styles.boxesExpanded : ""}`}>
+      <div className={styles.mainContainer}>
+        <div className={styles.cardsColumn}>
         <GlassCard className={`${styles.box} ${styles.downloadCard}`} ariaLabel="Download from a URL">
           <div className={styles.icon}>&#8595;</div>
           <h2 className={styles.boxTitle}>Download from any link</h2>
-          {!downloadInputActive && (
-            <p className={styles.boxSubtitle}>Paste a link. You can paste links to YT playlists, TikToks, Streamable Videos, Medal clips + more</p>
-          )}
+          <p className={styles.boxSubtitle}>Paste a link. You can paste links to YT playlists, TikToks, Streamable Videos, Medal clips + more</p>
           <div className={styles.urlInputContainer}>
             <input
               className={styles.urlInput}
@@ -545,9 +468,9 @@ export default function HomePage() {
             </button>
           </div>
         </GlassCard>
-      </div>
-      {history.length > 0 && (
-        <div className={styles.historyContainer}>
+        </div>
+        {history.length > 0 && (
+          <div className={styles.historyContainer}>
           <div className={styles.historyTitle}>Recent</div>
           <div className={styles.historyList}>
             {history.map((job) => {
@@ -569,8 +492,9 @@ export default function HomePage() {
               );
             })}
           </div>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import AppShell from "./components/AppShell";
+import { ThemeProvider } from "./context/ThemeContext";
 import { useNotifications } from "./hooks/useNotifications";
 import { NavigationProvider, useNavigation } from "./navigation/NavigationContext";
 import ConvertPage from "./pages/ConvertPage";
@@ -73,10 +74,12 @@ export default function App() {
   }
 
   return (
-    <NavigationProvider>
-      <AppShell>
-        <Screens />
-      </AppShell>
-    </NavigationProvider>
+    <ThemeProvider>
+      <NavigationProvider>
+        <AppShell>
+          <Screens />
+        </AppShell>
+      </NavigationProvider>
+    </ThemeProvider>
   );
 }

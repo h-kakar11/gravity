@@ -78,29 +78,26 @@
   padding: 4px 3px 3px 4px;
 }
 
-.boxes {
+.mainContainer {
   display: flex;
   gap: 10px;
-  justify-items: auto;
-  text-justify: distribute;
   justify-content: center;
-  flex-wrap: wrap;
+  align-items: flex-start;
 }
 
-.boxesExpanded {
+.cardsColumn {
+  display: flex;
   flex-direction: column;
-  align-items: center;
+  gap: 10px;
 }
 
 .box:hover{
-  transform-box: border-box; 
+  transform-box: border-box;
 }
 
 .box {
   height: 280px;
-  width: 40%;
-  min-width: 450px;
-  max-width: 550px;
+  width: 900;
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-rows: auto auto auto;
@@ -113,8 +110,6 @@
   border-radius: 24px;
   background: rgba(26, 26, 46, 0.7);
   backdrop-filter: blur(8px);
-  /* No width/height transition here on purpose: useCardLayoutFlip animates both, and a
-     CSS transition on the same properties would fight it. */
   overflow: hidden;
 }
 
@@ -154,13 +149,12 @@
 }
 
 .historyContainer {
-  width: calc(40% + 10px + 40%);
-  min-width: 910px;
-  max-width: 1110px;
+  width: 450px;
   padding: 16px;
   border-radius: 24px;
   background: rgba(26, 26, 46, 0.7);
   backdrop-filter: blur(8px);
+  height: fit-content;
 }
 
 .historyTitle {
@@ -174,7 +168,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 150px;
+  min-height: 510px;
+  max-height: 700px;
   overflow-y: auto;
 }
 
@@ -266,21 +261,6 @@
 
 .dropzoneLink:hover {
   opacity: 0.8;
-}
-
-/* Expanded layout: both cards stack and span the full width the pair used to occupy,
-   matching .historyContainer below them. */
-.boxesExpanded .box {
-  width: calc(40% + 10px + 40%);
-  min-width: 910px;
-  max-width: 1110px;
-  height: 180px;
-}
-
-/* The download card grows to fit whatever stage it's showing (metadata, quality
-   controls, job progress), so it's the one card that isn't a fixed height. */
-.boxesExpanded .box.downloadCard {
-  height: auto;
 }
 
 .downloadDetails {

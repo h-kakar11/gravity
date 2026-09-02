@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import GlassCard from "../components/GlassCard";
 import WatchFoldersSection from "../components/WatchFoldersSection";
+import { useTheme } from "../context/ThemeContext";
 import * as coreClient from "../services/coreClient";
 import type { CommandResult } from "../types/ipc";
 import type { Settings, SpeedUnit } from "../types/settings";
@@ -64,6 +65,36 @@ function Field({
   );
 }
 
+function ColorPickerField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className={styles.field}>
+      <div className={styles.fieldLabel}>{label}</div>
+      <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+        <input
+          type="color"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          style={{ width: "50px", height: "40px", cursor: "pointer", border: "none", borderRadius: "6px" }}
+        />
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          style={{ flex: 1, padding: "8px 12px", fontSize: "14px", borderRadius: "6px", border: "1px solid var(--color-surface-border)", background: "var(--color-surface)", color: "var(--color-text-primary)", fontFamily: "monospace" }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [originalSettings, setOriginalSettings] = useState<Settings | null>(null);
@@ -71,6 +102,7 @@ export default function SettingsPage() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<MediaEngineCapabilities | null>(null);
+  const { colors, updateColors, resetColors } = useTheme();
 
   useEffect(() => {
     coreClient
@@ -201,6 +233,48 @@ export default function SettingsPage() {
             onChange={(e) => update("general", { hotkeyFocusQueue: e.target.value })}
           />
         </Field>
+      </GlassCard>
+
+      <GlassCard className={styles.section}>
+        <h2 className={styles.sectionTitle}>Appearance</h2>
+        <ColorPickerField
+          label="Background"
+          value={colors.background}
+          onChange={(value) => updateColors({ background: value })}
+        />
+        <ColorPickerField
+          label="Accent Color"
+          value={colors.accent}
+          onChange={(value) => updateColors({ accent: value, accentSoft: `rgba(${parseInt(value.slice(1, 3), 16)}, ${parseInt(value.slice(3, 5), 16)}, ${parseInt(value.slice(5, 7), 16)}, 0.15)` })}
+        />
+        <ColorPickerField
+          label="Card/Surface Background"
+          value={colors.surface}
+          onChange={(value) => updateColors({ surface: value })}
+        />
+        <ColorPickerField
+          label="Topographic Line Color"
+          value={colors.topoLineColor}
+          onChange={(value) => updateColors({ topoLineColor: value })}
+        />
+        <ColorPickerField
+          label="Primary Text"
+          value={colors.textPrimary}
+          onChange={(value) => updateColors({ textPrimary: value })}
+        />
+        <ColorPickerField
+          label="Secondary Text"
+          value={colors.textSecondary}
+          onChange={(value) => updateColors({ textSecondary: value })}
+        />
+        <div style={{ marginTop: "16px" }}>
+          <button
+            onClick={resetColors}
+            style={{ padding: "8px 16px", fontSize: "14px", background: "var(--color-accent)", color: "white", border: "none", borderRadius: "6px", cursor: "pointer" }}
+          >
+            Reset to Default
+          </button>
+        </div>
       </GlassCard>
 
       <GlassCard className={styles.section}>
