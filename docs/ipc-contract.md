@@ -95,6 +95,7 @@ verified without hitting a real URL.
 | `pauseJob` | `{jobId: string}` | `{}` |
 | `resumeJob` | `{jobId: string}` | `{}` |
 | `retryJob` | `{jobId: string}` | `{}` |
+| `removeJob` | `{jobId: string}` | `{}` (drops a job from the active set and forgets its last-published state, so no further `jobUpdate` is emitted for it) |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` (fails with `E_PLAYLIST_NOT_SUPPORTED` when the URL is a playlist — the frontend treats that as "call `inspectPlaylistUrl` instead", see `docs/decisions.md`) |
 | `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video) |
@@ -104,6 +105,10 @@ verified without hitting a real URL.
 | `getSettings` | `{}` | `{settings: Settings}` |
 | `updateSettings` | `{settings: object}` (partial) | `{settings: Settings}` |
 | `getHardwareInfo` | `{}` | `{hardwareInfo: HardwareInfo}` |
+| `getMediaEngineCapabilities` | `{}` | `{availableEncoders: string[], hardwareEncodersAvailable: {nvenc: boolean, amf: boolean, qsv: boolean}}` — the three booleans are derived from `availableEncoders` by `_nvenc`/`_amf`/`_qsv` suffix, not probed independently |
+| `listPresets` | `{}` | `{presets: Preset[]}` |
+| `savePreset` | `{id?: string, name: string, kind: "DOWNLOAD" \| "CONVERSION" \| "COMPRESSION", options?: object}` | `{preset: Preset}` — omit `id` to create, pass an existing one to update |
+| `deletePreset` | `{id: string}` | `{}` (fails with `E_PRESET_NOT_FOUND` when no preset has that id) |
 
 Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
