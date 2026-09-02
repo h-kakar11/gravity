@@ -48,9 +48,25 @@ void SchedulerCore::Submit(Submission submission) {
         }
     }
 
+    // `runAfter` is validated more permissively than `dependsOn` on purpose: a predecessor
+    // that already finished as FAILED/CANCELLED is a *satisfied* sequencing edge (it is no
+    // longer going to run, so nothing is being waited for), whereas the same state makes a
+    // `dependsOn` edge permanently unsatisfiable. Existence and non-self-reference still
+    // hold -- they are what keep the graph acyclic.
+    for (const JobId& predecessor : submission.runAfter) {
+        if (predecessor == submission.id) {
+            ThrowInvalidDependency(submission.id, predecessor, "a job cannot run after itself");
+        }
+        if (!entries_.count(predecessor)) {
+            ThrowInvalidDependency(submission.id, predecessor,
+                                    "no such job (a runAfter must already be submitted)");
+        }
+    }
+
     Entry entry;
     entry.key = {submission.priority, nextSequence_++};
     entry.dependsOn = submission.dependsOn;
+    entry.runAfter = submission.runAfter;
     entry.phase = Phase::Pending;
 
     for (const JobId& dependency : entry.dependsOn) {
@@ -77,6 +93,12 @@ bool SchedulerCore::DependenciesSatisfied(const JobId& id) const {
         if (it == entries_.end()) continue;
         if (it->second.phase != Phase::Finished) return false;
         if (it->second.terminal != JobState::Completed) return false;
+    }
+    // Sequencing edges: finished is enough, whatever the outcome was.
+    for (const JobId& predecessor : entry.runAfter) {
+        const auto it = entries_.find(predecessor);
+        if (it == entries_.end()) continue;  // forgotten; see the note above
+        if (it->second.phase != Phase::Finished) return false;
     }
     return true;
 }

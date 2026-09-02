@@ -136,6 +136,9 @@ export const retryJob = (jobId: string) => sendCommand("retryJob", { jobId });
 export const removeJob = (jobId: string) => sendCommand("removeJob", { jobId });
 export const inspectFile = (path: string) => sendCommand("inspectFile", { path });
 export const inspectDownloadUrl = (url: string) => sendCommand("inspectDownloadUrl", { url });
+export const inspectPlaylistUrl = (url: string) => sendCommand("inspectPlaylistUrl", { url });
+export const suggestPlaylistFolder = (outputDirectory: string) =>
+  sendCommand("suggestPlaylistFolder", { outputDirectory });
 export const createDownloadJob = (params: DownloadJobParams) =>
   sendCommand("createJob", { type: "DOWNLOAD", params: params as unknown as Record<string, unknown> });
 export const createConversionJob = (params: MediaProcessingJobParams) =>

@@ -26,6 +26,18 @@ DownloadMetadata MockDownloadProvider::Inspect(const std::string& url, Cancelled
     return inspectResult;
 }
 
+PlaylistInfo MockDownloadProvider::InspectPlaylist(const std::string& url,
+                                                    CancelledCallback isCancelled) {
+    lastInspectedPlaylistUrl = url;
+    if (respectCancellation && isCancelled && isCancelled()) {
+        ThrowCancelled("E_INSPECT_PLAYLIST_CANCELLED");
+    }
+    if (inspectPlaylistError) {
+        throw errors::MediaToolException(*inspectPlaylistError);
+    }
+    return playlistResult;
+}
+
 void MockDownloadProvider::Download(const DownloadOptions& options, MetadataCallback onMetadata,
                                      ProgressCallback onProgress, CompletedCallback onCompleted,
                                      CancelledCallback isCancelled) {

@@ -179,6 +179,113 @@ TEST_F(SchedulerCoreTest, ADuplicateDependencyEdgeReportsTheDependentOnce) {
     EXPECT_EQ(scheduler_.RecordTerminal("a", JobState::Failed), (std::vector<JobId>{"b"}));
 }
 
+// --- runAfter: ordering without failure coupling (issue #41) ------------------------------
+//
+// The distinction these pin down is the whole reason runAfter exists: a playlist chained
+// with dependsOn loses every remaining entry to one unavailable video.
+
+TEST_F(SchedulerCoreTest, RunAfterHoldsAJobBackUntilItsPredecessorFinishes) {
+    scheduler_.Submit({"a", 0, {}, {}});
+    scheduler_.Submit({"b", 0, {}, /*runAfter=*/{"a"}});
+
+    EXPECT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("a"));
+    // "b" is not eligible while "a" is still running -- that is the sequencing.
+    EXPECT_FALSE(scheduler_.TakeNextEligible().has_value());
+
+    scheduler_.RecordTerminal("a", JobState::Completed);
+    EXPECT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("b"));
+}
+
+TEST_F(SchedulerCoreTest, RunAfterReleasesTheNextJobEvenWhenItsPredecessorFailed) {
+    scheduler_.Submit({"a", 0, {}, {}});
+    scheduler_.Submit({"b", 0, {}, /*runAfter=*/{"a"}});
+
+    ASSERT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("a"));
+    const std::vector<JobId> stranded = scheduler_.RecordTerminal("a", JobState::Failed);
+
+    // Nothing is cancelled: a sequencing edge carries no failure semantics at all.
+    EXPECT_TRUE(stranded.empty());
+    EXPECT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("b"));
+}
+
+TEST_F(SchedulerCoreTest, RunAfterReleasesTheNextJobWhenItsPredecessorWasCancelled) {
+    scheduler_.Submit({"a", 0, {}, {}});
+    scheduler_.Submit({"b", 0, {}, /*runAfter=*/{"a"}});
+
+    ASSERT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("a"));
+    EXPECT_TRUE(scheduler_.RecordTerminal("a", JobState::Cancelled).empty());
+    EXPECT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("b"));
+}
+
+TEST_F(SchedulerCoreTest, DependsOnStillCancelsDependentsWhenItsDependencyFails) {
+    // The contrast case, kept adjacent on purpose: runAfter must not have weakened the
+    // workflow guarantee that dependsOn exists to provide.
+    scheduler_.Submit({"a", 0, {}, {}});
+    scheduler_.Submit({"b", 0, /*dependsOn=*/{"a"}, {}});
+
+    ASSERT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("a"));
+    EXPECT_EQ(scheduler_.RecordTerminal("a", JobState::Failed), (std::vector<JobId>{"b"}));
+}
+
+TEST_F(SchedulerCoreTest, AChainOfRunAfterJobsRunsInOrderAndSurvivesAFailureMidway) {
+    // A three-entry playlist whose middle video is unavailable: the other two still run,
+    // and still in order.
+    scheduler_.Submit({"one", 0, {}, {}});
+    scheduler_.Submit({"two", 0, {}, /*runAfter=*/{"one"}});
+    scheduler_.Submit({"three", 0, {}, /*runAfter=*/{"two"}});
+
+    std::vector<JobId> order;
+    while (const std::optional<JobId> next = scheduler_.TakeNextEligible()) {
+        order.push_back(*next);
+        scheduler_.RecordTerminal(*next, *next == "two" ? JobState::Failed : JobState::Completed);
+    }
+    EXPECT_EQ(order, (std::vector<JobId>{"one", "two", "three"}));
+}
+
+TEST_F(SchedulerCoreTest, RunAfterOnlyOneJobRunsAtATimeEvenWithSpareCapacity) {
+    // TakeNextEligible is the scheduler's whole answer to "what may start now", so a second
+    // call returning nothing IS the concurrency guarantee, whatever the pool size is.
+    scheduler_.Submit({"one", 0, {}, {}});
+    scheduler_.Submit({"two", 0, {}, /*runAfter=*/{"one"}});
+    scheduler_.Submit({"three", 0, {}, /*runAfter=*/{"two"}});
+
+    ASSERT_TRUE(scheduler_.TakeNextEligible().has_value());
+    EXPECT_FALSE(scheduler_.TakeNextEligible().has_value());
+    EXPECT_FALSE(scheduler_.HasEligible());
+}
+
+TEST_F(SchedulerCoreTest, RunAfterAnAlreadyFailedJobIsAcceptedRatherThanRejected) {
+    // dependsOn refuses this (the edge could never be satisfied); runAfter must accept it,
+    // because a finished predecessor is a *satisfied* sequencing edge. Queueing the tail of
+    // a playlist after an early entry has already failed depends on this.
+    scheduler_.Submit({"a", 0, {}, {}});
+    ASSERT_TRUE(scheduler_.TakeNextEligible().has_value());
+    scheduler_.RecordTerminal("a", JobState::Failed);
+
+    scheduler_.Submit({"b", 0, {}, /*runAfter=*/{"a"}});
+    EXPECT_EQ(scheduler_.TakeNextEligible(), std::optional<JobId>("b"));
+}
+
+TEST_F(SchedulerCoreTest, SelfRunAfterIsRejected) {
+    try {
+        scheduler_.Submit({"a", 0, {}, /*runAfter=*/{"a"}});
+        FAIL() << "a job running after itself must be rejected";
+    } catch (const MediaToolException& e) {
+        EXPECT_EQ(e.Info().code, "E_INVALID_DEPENDENCY");
+    }
+}
+
+TEST_F(SchedulerCoreTest, RunAfterAnUnknownJobIsRejected) {
+    // Same guard as dependsOn, and for the same reason: an edge may only point backwards in
+    // submission order, which is what makes a cycle impossible rather than merely detected.
+    try {
+        scheduler_.Submit({"a", 0, {}, /*runAfter=*/{"nope"}});
+        FAIL() << "runAfter naming an unsubmitted job must be rejected";
+    } catch (const MediaToolException& e) {
+        EXPECT_EQ(e.Info().code, "E_INVALID_DEPENDENCY");
+    }
+}
+
 // --- rejected submissions ---------------------------------------------------------------
 
 TEST_F(SchedulerCoreTest, SelfDependencyIsRejected) {

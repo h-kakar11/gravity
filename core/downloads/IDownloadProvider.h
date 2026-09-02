@@ -69,6 +69,33 @@ struct DownloadMetadata {
     std::vector<DownloadFormat> formats;
 };
 
+// One downloadable video within a playlist, resolved shallowly -- id/title/url only, with
+// no per-video extractor round-trip. The full metadata (formats, thumbnail, exact duration)
+// is fetched later by each entry's own DownloadJob via Inspect(), the same way a
+// single-video download always has.
+struct PlaylistEntry {
+    // 1-based position among *downloadable* entries, already renumbered past any
+    // deleted/private videos, so it maps directly onto the `01 - `/`02 - ` filename prefix.
+    int index = 0;
+    std::string url;
+    std::string title;
+    std::optional<double> durationSeconds;
+};
+
+// The result of enumerating a playlist URL: what the core fans out into one DownloadJob per
+// entry (see docs/decisions.md, "Playlist URLs").
+struct PlaylistInfo {
+    std::string title;
+    std::optional<std::string> uploader;
+    std::optional<std::string> webpageUrl;
+    // True when the playlist had more entries than the enumeration cap and the tail was
+    // dropped -- the UI says so rather than silently downloading a prefix.
+    bool truncated = false;
+    std::vector<PlaylistEntry> entries;
+
+    nlohmann::json ToJson() const;
+};
+
 // What the downloader backend actually is on this machine, and whether it is healthy
 // enough to be worth using. Reported before a download fails for a reason the user cannot
 // see: yt-dlp's extractors for the big sites break on a scale of weeks, so a build a couple
@@ -110,6 +137,14 @@ public:
     // geo-restricted video, network failure, ...). Must poll isCancelled() periodically
     // and stop (throwing ErrorCategory::Cancelled) when it returns true, same as Download().
     virtual DownloadMetadata Inspect(const std::string& url, CancelledCallback isCancelled) = 0;
+
+    // Blocking; enumerates a playlist URL's entries WITHOUT downloading or fully resolving
+    // any of them. Throws errors::MediaToolException on failure -- including
+    // `E_NOT_A_PLAYLIST` when the URL turns out to be a single video, which is a normal
+    // outcome the caller is expected to handle rather than an internal error. Must poll
+    // isCancelled() periodically and stop (throwing ErrorCategory::Cancelled) when it
+    // returns true, same as Inspect().
+    virtual PlaylistInfo InspectPlaylist(const std::string& url, CancelledCallback isCancelled) = 0;
 
     // Blocking; intended to run on a job's worker thread. Throws
     // errors::MediaToolException on failure. Must poll isCancelled() periodically and

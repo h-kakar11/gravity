@@ -13,8 +13,10 @@ the way. See the root `README.md` for the authoritative working-vs-scaffolded ta
 Everything below is planned, not built.
 
 ## Downloads (remaining)
-- Playlists: sequential download, preserved order, per-item numbering (Phase 2
-  deliberately rejects playlist URLs rather than guessing — see `docs/decisions.md`)
+- ~~Playlists: sequential download, preserved order, per-item numbering~~ — **shipped**
+  (issue #41; see `docs/decisions.md`). Remaining playlist work, if wanted: a single
+  queue row that groups a playlist's jobs instead of N independent rows, and resuming a
+  partially-downloaded playlist by skipping entries already on disk.
 - A live speed-over-time graph (the event architecture already supports periodic speed
   samples; only the chart itself is unbuilt)
 - Bounded automatic retries (`RetryJob` already exists on `JobManager`; `DownloadJob`

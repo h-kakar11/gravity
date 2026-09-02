@@ -171,9 +171,12 @@ network-failure detection).
   cancel. yt-dlp has no clean "pause a download" primitive; a Phase 3+ implementation
   would need to stop and later resume via HTTP range requests, which is real design work,
   not a Phase 2 vertical-slice concern.
-- Playlist URLs are explicitly rejected (`E_PLAYLIST_NOT_SUPPORTED`) rather than silently
-  downloading only the first video — see spec section 30 ("prepare, don't fully
-  implement").
+- A playlist URL is decomposed by the frontend into one `DownloadJob` per entry, chained
+  with `dependsOn` so entries run strictly one at a time and in order, into a named
+  subfolder with `NN - ` numbered filenames (issue #41 — see `docs/decisions.md`). The
+  single-video commands still reject a playlist URL (`E_PLAYLIST_NOT_SUPPORTED`): a
+  `DownloadJob` downloads exactly one video, and that error is what routes the frontend to
+  `inspectPlaylistUrl` instead.
 
 ## Filesystem, temp files, and atomic output
 

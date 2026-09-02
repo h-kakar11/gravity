@@ -393,6 +393,11 @@ constexpr std::int64_t kMaxJobPriority = 1000;
 // meaningful product limit.
 constexpr std::size_t kMaxJobDependencies = 32;
 
+// Mirrors _MAX_PLAYLIST_ENTRIES in python/downloader/downloader.py -- the enumeration cap
+// there is what actually bounds a fan-out; this bounds the numbering params a caller may
+// send, so a hand-rolled createJob call cannot ask for a 2-billion-wide zero-padding.
+constexpr std::int64_t kMaxPlaylistEntries = 500;
+
 // The two scheduling parameters every job type accepts, applied identically for all of
 // them (jobs::SchedulerCore is what interprets them). Both are optional: absent means
 // priority 0 and no dependencies, which is the plain FIFO behavior. Invalid dependency ids
@@ -401,6 +406,12 @@ void ApplySchedulingParams(jobs::Job& job, const json& jobParams) {
     job.SetPriority(static_cast<int>(
         OptionalInt(jobParams, "priority", 0, kMinJobPriority, kMaxJobPriority)));
     job.SetDependsOn(ipc::OptionalStringArray(jobParams, "dependsOn", kMaxJobDependencies));
+    // Bounded by the playlist cap rather than kMaxJobDependencies: a playlist chain is the
+    // reason this exists, and each link names exactly one predecessor, so the list is
+    // short -- but the bound has to admit the longest chain a playlist can legitimately
+    // build if a caller ever declares one in a single call.
+    job.SetRunAfter(ipc::OptionalStringArray(jobParams, "runAfter",
+                                              static_cast<std::size_t>(kMaxPlaylistEntries)));
 }
 
 filesystem::FileInfo InspectFileEnriched(AppContext& app, const std::string& path) {
@@ -504,6 +515,59 @@ json HandleInspectDownloadUrl(AppContext& app, const json& params) {
     }
 }
 
+// Enumerates a playlist so the frontend can fan it out into one createJob call per entry
+// (docs/decisions.md, "Playlist URLs"). Deliberately does NOT create jobs itself: which
+// entries to take, what to name the folder, and which quality to apply are all choices the
+// user makes between this call and the createJob calls that follow.
+json HandleInspectPlaylistUrl(AppContext& app, const json& params) {
+    const std::string url = RequireNonEmptyString(params, "url");
+    ValidateDownloadUrl(app, url);
+    EnsureDownloaderAvailable(app);
+
+    const auto deadline = std::chrono::steady_clock::now() + kInspectDeadline;
+    auto isCancelled = [deadline] { return std::chrono::steady_clock::now() >= deadline; };
+
+    try {
+        const downloads::PlaylistInfo info = app.ytDlpProvider.InspectPlaylist(url, isCancelled);
+        return {{"playlist", info.ToJson()}};
+    } catch (const errors::MediaToolException& e) {
+        if (e.Info().code == "E_INSPECT_PLAYLIST_CANCELLED") {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INSPECT_PLAYLIST_TIMEOUT", errors::ErrorCategory::NetworkError,
+                "Reading this playlist took too long and was cancelled.", "url=" + url,
+                /*recoverable=*/true));
+        }
+        throw;
+    }
+}
+
+// How many "playlist #n" candidates to try before giving up. A user with 500 playlist
+// folders in one directory is past the point where an auto-generated name helps, and this
+// keeps a pathological directory from turning name suggestion into an unbounded stat loop.
+constexpr int kMaxPlaylistFolderProbes = 500;
+
+// Suggests the default name for a playlist's destination subfolder: "playlist #n" for the
+// lowest n not already present in `outputDirectory`. Only a suggestion -- the user is
+// expected to overwrite it with the real playlist name, and nothing reserves it, so two
+// suggestions taken concurrently can collide. That is acceptable because the actual
+// collision guard is downstream: each entry's DownloadJob still runs its filename through
+// FilenameReservationRegistry.
+json HandleSuggestPlaylistFolder(AppContext& app, const json& params) {
+    const std::string outputDirectory = RequireNonEmptyString(params, "outputDirectory");
+
+    for (int n = 1; n <= kMaxPlaylistFolderProbes; ++n) {
+        const std::string candidate = "playlist #" + std::to_string(n);
+        if (!app.fileSystem.Exists(filesystem::paths::Join(outputDirectory, candidate))) {
+            return {{"name", candidate}};
+        }
+    }
+    throw errors::MediaToolException(errors::ErrorInfo::Make(
+        "E_PLAYLIST_FOLDER_UNAVAILABLE", errors::ErrorCategory::InvalidFile,
+        "Could not find an unused playlist folder name. Name the folder yourself.",
+        "tried \"playlist #1\"..\"playlist #" + std::to_string(kMaxPlaylistFolderProbes) +
+            "\" in " + outputDirectory));
+}
+
 // The three builders below validate their params and hand back a constructed Job. They
 // deliberately do NOT submit, persist or publish: SubmitJobOfType() does all three for
 // every type, so the createJob path and the crash-recovery path cannot drift apart.
@@ -589,6 +653,31 @@ std::unique_ptr<jobs::Job> BuildDownloadJob(AppContext& app, const json& jobPara
     options.outputDirectory = outputDirectory;
     options.quality = quality;
     options.formatId = formatId;
+
+    // Playlist numbering (issue #41). Both or neither: an index with no total has no digit
+    // width to pad to, and a total with no index has nothing to place. Rejected rather than
+    // silently ignored, because a caller sending one of them is asking for numbering it
+    // would not get.
+    const bool hasIndex = jobParams.contains("playlistIndex") && !jobParams.at("playlistIndex").is_null();
+    const bool hasCount = jobParams.contains("playlistCount") && !jobParams.at("playlistCount").is_null();
+    if (hasIndex != hasCount) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PARAM_VALUE", errors::ErrorCategory::Unknown,
+            "playlistIndex and playlistCount must be provided together.",
+            std::string("field=") + (hasIndex ? "playlistCount" : "playlistIndex") + " is missing"));
+    }
+    if (hasIndex) {
+        const auto index = OptionalInt(jobParams, "playlistIndex", 0, 1, kMaxPlaylistEntries);
+        const auto count = OptionalInt(jobParams, "playlistCount", 0, 1, kMaxPlaylistEntries);
+        if (index > count) {
+            throw errors::MediaToolException(errors::ErrorInfo::Make(
+                "E_INVALID_PARAM_VALUE", errors::ErrorCategory::Unknown,
+                "playlistIndex must not exceed playlistCount.",
+                "playlistIndex=" + std::to_string(index) + " playlistCount=" + std::to_string(count)));
+        }
+        options.playlistIndex = static_cast<int>(index);
+        options.playlistCount = static_cast<int>(count);
+    }
 
     options.onArtifactLocation = std::move(onArtifactLocation);
 
@@ -957,6 +1046,8 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"removeJob", HandleRemoveJob},
         {"inspectFile", HandleInspectFile},
         {"inspectDownloadUrl", HandleInspectDownloadUrl},
+        {"inspectPlaylistUrl", HandleInspectPlaylistUrl},
+        {"suggestPlaylistFolder", HandleSuggestPlaylistFolder},
         {"getCapabilities", HandleGetCapabilities},
         {"getSettings", HandleGetSettings},
         {"updateSettings", HandleUpdateSettings},
@@ -977,7 +1068,8 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
 // thread -- see core/ipc/RequestExecutor.h for why. Everything else is memory-speed work on
 // already-loaded state and is faster to run inline than to hand to another thread.
 bool IsBlockingCommand(const std::string& command) {
-    return command == "inspectDownloadUrl" || command == "inspectFile";
+    return command == "inspectDownloadUrl" || command == "inspectPlaylistUrl" ||
+           command == "inspectFile";
 }
 
 // Four threads is enough to keep a burst of inspects moving without letting a burst turn
@@ -1072,14 +1164,18 @@ void RecoverInProgressJobs(AppContext& app) {
         }
 
         json jobParams = spec.params;
-        if (jobParams.contains("dependsOn") && jobParams.at("dependsOn").is_array()) {
+        // Both edge kinds are remapped identically -- a playlist's sequencing chain has to
+        // survive a restart the same way a workflow's dependency chain does, or a recovered
+        // playlist would resume downloading every remaining entry at once.
+        for (const char* edgeKey : {"dependsOn", "runAfter"}) {
+            if (!jobParams.contains(edgeKey) || !jobParams.at(edgeKey).is_array()) continue;
             json remapped = json::array();
-            for (const auto& dependency : jobParams.at("dependsOn")) {
+            for (const auto& dependency : jobParams.at(edgeKey)) {
                 if (!dependency.is_string()) continue;
                 auto rebuilt = rebuiltIds.find(dependency.get<std::string>());
                 if (rebuilt != rebuiltIds.end()) remapped.push_back(rebuilt->second);
             }
-            jobParams["dependsOn"] = std::move(remapped);
+            jobParams[edgeKey] = std::move(remapped);
         }
 
         try {

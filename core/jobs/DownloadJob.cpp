@@ -65,6 +65,13 @@ void DownloadJob::Execute() {
     SetMetadata(MetadataToJson(metadata));
 
     std::string safeTitle = filesystem::SanitizeWindowsFilename(metadata.title);
+    // Numbering goes on BEFORE the MAX_PATH truncation, not after: the prefix is part of
+    // the name that has to fit, and adding it afterwards could push an
+    // already-at-the-limit name back over it.
+    if (options_.playlistIndex && options_.playlistCount) {
+        safeTitle =
+            filesystem::WithPlaylistIndex(safeTitle, *options_.playlistIndex, *options_.playlistCount);
+    }
     safeTitle = filesystem::TruncateBaseNameForMaxPath(options_.outputDirectory, safeTitle);
     fileSystem_.CreateDirectory(options_.outputDirectory);
     // Reserve (not just probe) the output base name: DeduplicateBaseName alone only

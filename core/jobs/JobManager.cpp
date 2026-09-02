@@ -115,6 +115,7 @@ JobId JobManager::SubmitJob(std::unique_ptr<Job> job) {
     submission.id = id;
     submission.priority = job->Priority();
     submission.dependsOn = job->DependsOn();
+    submission.runAfter = job->RunAfter();
 
     job->SetCallbacks(
         [this, id](JobState state) { HandleJobStateChanged(id, state); },

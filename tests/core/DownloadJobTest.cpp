@@ -69,6 +69,101 @@ TEST(DownloadJob, CompletesAndVerifiesOutputWithoutMediaEngine) {
     EXPECT_EQ(metadata.at("title"), "My Video");
 }
 
+TEST(DownloadJob, PlaylistNumberingPrefixesTheOutputFilename) {
+    MockDownloadProvider provider;
+    provider.inspectResult.title = "My Video";
+    provider.completedOutputPath = "C:\\out\\03 - My Video.mp4";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\out");
+    provider.onDownloadStart = [&fs](const mediatool::downloads::DownloadOptions&) {
+        FileInfo outputInfo;
+        outputInfo.path = "C:\\out\\03 - My Video.mp4";
+        outputInfo.filename = "03 - My Video.mp4";
+        outputInfo.extension = "mp4";
+        outputInfo.sizeBytes = 4096;
+        fs.AddFile(outputInfo);
+    };
+
+    DownloadJob::Options options = MakeOptions();
+    options.playlistIndex = 3;
+    options.playlistCount = 42;  // two digits -> "03", not "3" or "003"
+
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(options, provider, fs, /*mediaEngine=*/nullptr, registry);
+    job.MarkStarting();
+    job.MarkRunning();
+    job.Execute();
+
+    ASSERT_TRUE(provider.lastDownloadOptions.has_value());
+    EXPECT_EQ(provider.lastDownloadOptions->filenameBase, "03 - My Video");
+}
+
+TEST(DownloadJob, WithoutPlaylistNumberingTheFilenameIsUnprefixed) {
+    // The single-video path must be completely unaffected by the playlist option existing.
+    MockDownloadProvider provider;
+    provider.inspectResult.title = "My Video";
+    provider.completedOutputPath = "C:\\out\\My Video.mp4";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\out");
+    provider.onDownloadStart = [&fs](const mediatool::downloads::DownloadOptions&) {
+        FileInfo outputInfo;
+        outputInfo.path = "C:\\out\\My Video.mp4";
+        outputInfo.filename = "My Video.mp4";
+        outputInfo.sizeBytes = 4096;
+        fs.AddFile(outputInfo);
+    };
+
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(MakeOptions(), provider, fs, /*mediaEngine=*/nullptr, registry);
+    job.MarkStarting();
+    job.MarkRunning();
+    job.Execute();
+
+    ASSERT_TRUE(provider.lastDownloadOptions.has_value());
+    EXPECT_EQ(provider.lastDownloadOptions->filenameBase, "My Video");
+}
+
+TEST(DownloadJob, PlaylistNumberingStillDeduplicatesAgainstAnExistingFile) {
+    // Two playlists downloaded into the same folder can legitimately collide on both the
+    // number and the title; the reservation registry has to keep working through the prefix.
+    MockDownloadProvider provider;
+    provider.inspectResult.title = "My Video";
+    provider.completedOutputPath = "C:\\out\\03 - My Video (1).mp4";
+
+    MockFileSystem fs;
+    fs.AddDirectory("C:\\out");
+    FileInfo existing;
+    existing.path = "C:\\out\\03 - My Video.mp4";
+    existing.filename = "03 - My Video.mp4";
+    existing.extension = "mp4";
+    existing.sizeBytes = 999;
+    fs.AddFile(existing);
+
+    provider.onDownloadStart = [&fs](const mediatool::downloads::DownloadOptions&) {
+        FileInfo outputInfo;
+        outputInfo.path = "C:\\out\\03 - My Video (1).mp4";
+        outputInfo.filename = "03 - My Video (1).mp4";
+        outputInfo.sizeBytes = 4096;
+        fs.AddFile(outputInfo);
+    };
+
+    DownloadJob::Options options = MakeOptions();
+    options.playlistIndex = 3;
+    options.playlistCount = 42;
+
+    mediatool::filesystem::FilenameReservationRegistry registry;
+    DownloadJob job(options, provider, fs, /*mediaEngine=*/nullptr, registry);
+    job.MarkStarting();
+    job.MarkRunning();
+    job.Execute();
+
+    ASSERT_TRUE(provider.lastDownloadOptions.has_value());
+    EXPECT_NE(provider.lastDownloadOptions->filenameBase, "03 - My Video");
+    EXPECT_EQ(provider.lastDownloadOptions->filenameBase.rfind("03 - My Video", 0), 0u);
+}
+
 TEST(DownloadJob, PassesFormatIdThroughToProviderWhenSet) {
     MockDownloadProvider provider;
     provider.inspectResult.title = "My Video";

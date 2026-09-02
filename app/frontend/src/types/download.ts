@@ -43,3 +43,25 @@ export interface DownloadMetadata {
   playlistCount?: number;
   formats: DownloadFormat[];
 }
+
+// One downloadable video inside a playlist, resolved shallowly -- no formats/thumbnail
+// here, because enumerating a playlist deliberately skips the per-video extractor round
+// trip. Each entry's own DownloadJob fetches its full metadata when it runs.
+export interface PlaylistEntry {
+  // 1-based position among downloadable entries (unavailable ones are already dropped), and
+  // the number used for the "01 - " filename prefix.
+  index: number;
+  url: string;
+  title: string;
+  durationSeconds?: number;
+}
+
+export interface PlaylistInfo {
+  title: string;
+  uploader?: string;
+  webpageUrl?: string;
+  count: number;
+  // The playlist had more entries than the backend's enumeration cap; the tail was dropped.
+  truncated: boolean;
+  entries: PlaylistEntry[];
+}

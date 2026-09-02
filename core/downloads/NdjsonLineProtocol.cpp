@@ -32,6 +32,7 @@ std::string EventField(const nlohmann::json& parsedLine) {
 DownloaderEventType GetDownloaderEventType(const nlohmann::json& parsedLine) {
     const std::string event = EventField(parsedLine);
     if (event == "metadata") return DownloaderEventType::Metadata;
+    if (event == "playlist") return DownloaderEventType::Playlist;
     if (event == "progress") return DownloaderEventType::Progress;
     if (event == "completed") return DownloaderEventType::Completed;
     if (event == "error") return DownloaderEventType::Error;

@@ -30,6 +30,13 @@ public:
         // when set. See downloads::DownloadOptions::formatId.
         std::optional<std::string> formatId;
 
+        // Set together, and only when this job is one entry of a playlist download: the
+        // output filename is then prefixed with the zero-padded position ("03 - Title"),
+        // so a playlist keeps its order on disk. Both unset is the ordinary single-video
+        // case and changes nothing. See filesystem::WithPlaylistIndex.
+        std::optional<int> playlistIndex;
+        std::optional<int> playlistCount;
+
         // Called once, on the worker thread, the instant this job has reserved the output
         // filename it is about to write to -- the first moment anything knows what a
         // killed run would leave behind. The crash-recovery store records it so a later

@@ -24,6 +24,8 @@ public:
 
     DownloadMetadata Inspect(const std::string& url, CancelledCallback isCancelled) override;
 
+    PlaylistInfo InspectPlaylist(const std::string& url, CancelledCallback isCancelled) override;
+
     void Download(const DownloadOptions& options, MetadataCallback onMetadata,
                   ProgressCallback onProgress, CompletedCallback onCompleted,
                   CancelledCallback isCancelled) override;
@@ -33,6 +35,9 @@ public:
     // Returned by Inspect(), and replayed to Download()'s onMetadata callback.
     DownloadMetadata inspectResult;
     std::optional<errors::ErrorInfo> inspectError;  // if set, Inspect() throws this instead
+
+    PlaylistInfo playlistResult;                            // returned by InspectPlaylist()
+    std::optional<errors::ErrorInfo> inspectPlaylistError;  // ...unless set, then it throws
 
     std::vector<jobs::Progress> progressSequence;    // replayed in order during Download()
     std::string completedOutputPath;                 // onCompleted() is called with this...
@@ -51,6 +56,7 @@ public:
     // --- observation -----------------------------------------------------------------
     std::optional<DownloadOptions> lastDownloadOptions;
     std::string lastInspectedUrl;
+    std::string lastInspectedPlaylistUrl;
 };
 
 }  // namespace mediatool::downloads

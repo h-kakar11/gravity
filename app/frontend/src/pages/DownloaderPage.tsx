@@ -5,11 +5,12 @@ import { useNavigation } from "../navigation/NavigationContext";
 import * as coreClient from "../services/coreClient";
 import { asErrorInfo } from "../utils/errors";
 import { formatSpeedWithUnit } from "../utils/format";
-import type { DownloadMetadata, QualityPreset } from "../types/download";
+import type { DownloadMetadata, PlaylistInfo, QualityPreset } from "../types/download";
 import { QUALITY_PRESET_LABELS } from "../types/download";
 import type { ErrorInfo } from "../types/error";
 import type { JobState } from "../types/job";
 import type { SpeedUnit } from "../types/settings";
+import { analyzePlaylistUrl, joinWindowsPath, withoutPlaylistParam } from "../utils/playlistUrl";
 
 // Functional Phase 2 downloader screen (spec section 34) -- proves URL -> metadata ->
 // quality selection -> real download -> progress -> cancellation -> verified completion
@@ -19,6 +20,11 @@ import type { SpeedUnit } from "../types/settings";
 
 const QUALITY_OPTIONS: QualityPreset[] = ["BEST", "2160P", "1440P", "1080P", "720P", "480P", "AUDIO_ONLY"];
 const ACTIVE_STATES: ReadonlySet<JobState> = new Set(["QUEUED", "STARTING", "RUNNING", "PAUSED"]);
+
+// The backend's answer for "this URL is a playlist, not a single video". Inspecting a bare
+// playlist link fails with this, which is the signal to enumerate it instead -- and it works
+// on any site, unlike guessing from the URL's shape. See docs/decisions.md, "Playlist URLs".
+const PLAYLIST_NOT_SUPPORTED = "E_PLAYLIST_NOT_SUPPORTED";
 
 function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "?";
@@ -95,6 +101,21 @@ export default function DownloaderPage() {
   const [outputDirectory, setOutputDirectory] = useState("");
   const [speedUnit, setSpeedUnit] = useState<SpeedUnit>("MBps");
 
+  // --- playlist state (issue #41) ---------------------------------------------------
+  // The enumerated playlist, once the user has asked for one. Mutually exclusive with
+  // `metadata` in practice: a URL resolves to one video or to a list, never both at once.
+  const [playlist, setPlaylist] = useState<PlaylistInfo | null>(null);
+  const [playlistLoading, setPlaylistLoading] = useState(false);
+  // Set when a pasted link points at one video *inside* a playlist. The user picked "ask me"
+  // for this case, so the page offers the choice rather than guessing -- see
+  // analyzePlaylistUrl and docs/decisions.md.
+  const [comboChoiceUrl, setComboChoiceUrl] = useState<string | null>(null);
+  // Destination subfolder for the playlist. Pre-filled with the backend's next unused
+  // "playlist #n" so two playlists never land on top of each other, but it is a plain
+  // editable field -- the expectation is that the user types the real playlist name.
+  const [playlistFolder, setPlaylistFolder] = useState("");
+  const [playlistJobIds, setPlaylistJobIds] = useState<string[]>([]);
+
   // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
   // started blank regardless of the user's configured default (issue #54), and the quality
   // selector always started at "BEST" regardless of downloads.defaultQuality (part of
@@ -128,6 +149,36 @@ export default function DownloaderPage() {
   const canCancel = activeJob !== null && ACTIVE_STATES.has(activeJob.state);
   const canStartDownload = metadata !== null && outputDirectory.trim().length > 0 && !creating && !canCancel;
 
+  // Enumerates a playlist and pre-fills its destination folder. Shared by the bare-playlist
+  // path (reached when `inspect` reports the URL is a list) and by the user answering
+  // "download the whole playlist" to a combo link.
+  const loadPlaylist = useCallback(
+    async (target: string) => {
+      setPlaylistLoading(true);
+      setInspectError(null);
+      setMetadata(null);
+      setPlaylist(null);
+      try {
+        const { playlist: result } = await coreClient.inspectPlaylistUrl(target);
+        setPlaylist(result);
+        // A suggestion, not a reservation -- see HandleSuggestPlaylistFolder in main.cpp.
+        // Failing to get one is not worth blocking the download over; the user can type a
+        // name themselves, and the field simply starts on the playlist's own title.
+        try {
+          const { name } = await coreClient.suggestPlaylistFolder(outputDirectory.trim());
+          setPlaylistFolder(name);
+        } catch {
+          setPlaylistFolder(result.title);
+        }
+      } catch (err) {
+        setInspectError(asErrorInfo(err));
+      } finally {
+        setPlaylistLoading(false);
+      }
+    },
+    [outputDirectory],
+  );
+
   // `urlOverride` lets a paste handler kick off inspection with the just-pasted text
   // immediately, without waiting for a `setUrl` re-render to land in the `url` state this
   // callback otherwise closes over (issue #62).
@@ -138,17 +189,32 @@ export default function DownloaderPage() {
       setInspecting(true);
       setInspectError(null);
       setMetadata(null);
+      setPlaylist(null);
+      setComboChoiceUrl(null);
       setSelectedFormatId(null);
       try {
         const { metadata: result } = await coreClient.inspectDownloadUrl(target);
         setMetadata(result);
+        // Inspect resolved one video, but the link also carries a playlist reference -- the
+        // "shared from a playlist" case. Offer the choice rather than assuming either way.
+        if (analyzePlaylistUrl(target).hasPlaylist) {
+          setComboChoiceUrl(target);
+        }
       } catch (err) {
-        setInspectError(asErrorInfo(err));
+        const info = asErrorInfo(err);
+        // Not an error the user needs to see: it means "this is a playlist", which is now a
+        // supported thing to be. Enumerate it instead.
+        if (info?.code === PLAYLIST_NOT_SUPPORTED) {
+          setInspecting(false);
+          await loadPlaylist(target);
+          return;
+        }
+        setInspectError(info);
       } finally {
         setInspecting(false);
       }
     },
-    [url],
+    [url, loadPlaylist],
   );
 
   // Auto-detect a pasted link and inspect it immediately instead of requiring a separate
@@ -194,6 +260,50 @@ export default function DownloaderPage() {
     }
   }, [url, outputDirectory, quality, selectedFormatId]);
 
+  // Fans a playlist out into one DownloadJob per entry, chained so they run strictly one at
+  // a time: each job declares the previous one as a `runAfter`.
+  //
+  // `runAfter`, not `dependsOn`, and the difference matters: `dependsOn` requires the
+  // predecessor to COMPLETE, and cancels its dependents when it doesn't -- so a single
+  // unavailable video (routine in a long playlist) would cancel every entry after it.
+  // `runAfter` only waits for the predecessor to reach a terminal state, so one failure
+  // costs exactly one video. See SchedulerCore::Submission.
+  //
+  // Jobs are created sequentially rather than in parallel because entry N+1 needs entry N's
+  // id, which only exists once its createJob call has returned.
+  const handleDownloadPlaylist = useCallback(async () => {
+    if (!playlist || playlist.entries.length === 0) return;
+    const folder = playlistFolder.trim();
+    if (!folder) return;
+
+    setCreating(true);
+    setCreateError(null);
+    const destination = joinWindowsPath(outputDirectory.trim(), folder);
+    const created: string[] = [];
+    try {
+      for (const entry of playlist.entries) {
+        const { jobId } = await coreClient.createDownloadJob({
+          url: entry.url,
+          outputDirectory: destination,
+          quality,
+          playlistIndex: entry.index,
+          playlistCount: playlist.entries.length,
+          ...(created.length > 0 ? { runAfter: [created[created.length - 1]] } : {}),
+        });
+        created.push(jobId);
+      }
+      setPlaylistJobIds(created);
+    } catch (err) {
+      // Partial failure is real: entries before the failure are already queued and running.
+      // Record what was created so the UI reports the true count rather than implying
+      // nothing happened.
+      setPlaylistJobIds(created);
+      setCreateError(asErrorInfo(err));
+    } finally {
+      setCreating(false);
+    }
+  }, [playlist, playlistFolder, outputDirectory, quality]);
+
   const handleCancel = useCallback(async () => {
     if (!activeJobId) return;
     setCancelBusy(true);
@@ -223,7 +333,24 @@ export default function DownloaderPage() {
     setSelectedFormatId(null);
     setUrl("");
     setCreateError(null);
+    setPlaylist(null);
+    setPlaylistJobIds([]);
+    setPlaylistFolder("");
+    setComboChoiceUrl(null);
   }, []);
+
+  // Live rollup of the fanned-out jobs, read straight from the shared job list rather than
+  // tracked separately -- the queue is the source of truth for how a playlist is going.
+  const playlistProgress = useMemo(() => {
+    if (playlistJobIds.length === 0) return null;
+    const mine = jobs.filter((j) => playlistJobIds.includes(j.id));
+    return {
+      total: playlistJobIds.length,
+      completed: mine.filter((j) => j.state === "COMPLETED").length,
+      failed: mine.filter((j) => j.state === "FAILED").length,
+      running: mine.filter((j) => j.state === "RUNNING" || j.state === "STARTING").length,
+    };
+  }, [jobs, playlistJobIds]);
 
   // Distinct from handleStartOver: retrying a FAILED job should not drop the user back to
   // a blank paste screen, or make them re-inspect a URL that was already successfully
@@ -273,20 +400,47 @@ export default function DownloaderPage() {
             {inspecting ? "Inspecting..." : "Inspect"}
           </button>
         </div>
-        {/* A bare input with no context otherwise -- issue #33 item 7. Checked against
-            build_metadata_payload() (downloader.py) before writing this: a link to one
-            video that also happens to be part of a playlist (e.g. "&list=..." in the URL)
-            still downloads just that video, but a link to the playlist itself is rejected
-            outright (E_PLAYLIST_NOT_SUPPORTED) -- #41 is the open question of whether to
-            support playlists at all, not promised here. */}
-        {!metadata && !inspecting && !inspectError ? (
+        {/* A bare input with no context otherwise -- issue #33 item 7. A link to one video
+            that also happens to be in a playlist offers the choice below rather than
+            guessing; a link to the playlist itself is enumerated (issue #41). */}
+        {!metadata && !playlist && !inspecting && !playlistLoading && !inspectError ? (
           <p style={styles.muted}>
-            Works with YouTube and most other sites yt-dlp supports. Paste a single video link
-            above and click Inspect to preview it before downloading. Playlist links aren&apos;t
-            supported yet.
+            Works with YouTube and most other sites yt-dlp supports. Paste a video or playlist
+            link above and click Inspect to preview it before downloading.
           </p>
         ) : null}
+        {playlistLoading ? <p style={styles.muted}>Reading playlist...</p> : null}
         <ErrorBanner error={inspectError} />
+
+        {/* The "shared from a playlist" fork. Deliberately shown after the single video
+            resolves, so choosing "just this video" needs no further waiting -- the metadata
+            is already on screen. */}
+        {comboChoiceUrl ? (
+          <div style={styles.choiceBanner} role="group" aria-label="This link is part of a playlist">
+            <div>This link is part of a playlist.</div>
+            <div style={styles.row}>
+              <button
+                type="button"
+                onClick={() => {
+                  setComboChoiceUrl(null);
+                  setUrl(withoutPlaylistParam(comboChoiceUrl));
+                }}
+              >
+                Just this video
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = comboChoiceUrl;
+                  setComboChoiceUrl(null);
+                  void loadPlaylist(target);
+                }}
+              >
+                The whole playlist
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {metadata ? (
           <div style={styles.card}>
@@ -352,6 +506,120 @@ export default function DownloaderPage() {
           </div>
         ) : null}
       </section>
+
+      {playlist ? (
+        <section style={styles.section}>
+          <h2 style={{ ...styles.h2, ...styles.overflowSafe }}>{playlist.title}</h2>
+          <p style={styles.muted}>
+            {playlist.count} video{playlist.count === 1 ? "" : "s"}
+            {playlist.uploader ? ` · ${playlist.uploader}` : ""} · downloaded one at a time, in
+            order.
+          </p>
+          {playlist.truncated ? (
+            <div style={styles.warnBanner} role="status">
+              This playlist is longer than the {playlist.count}-video limit. Only the first{" "}
+              {playlist.count} will be downloaded.
+            </div>
+          ) : null}
+
+          <details style={styles.formatsDisclosure}>
+            <summary>Show the {playlist.count} videos</summary>
+            <ol style={styles.playlistList}>
+              {playlist.entries.map((entry) => (
+                <li key={`${entry.index}-${entry.url}`} style={styles.overflowSafe}>
+                  {entry.title}
+                  {entry.durationSeconds !== undefined
+                    ? ` · ${formatDuration(entry.durationSeconds)}`
+                    : ""}
+                </li>
+              ))}
+            </ol>
+          </details>
+
+          <div style={styles.row}>
+            <label style={styles.label}>
+              Quality for all videos:{" "}
+              <select
+                value={quality}
+                onChange={(e) => setQuality(e.target.value as QualityPreset)}
+                disabled={creating}
+              >
+                {QUALITY_OPTIONS.map((preset) => (
+                  <option key={preset} value={preset}>
+                    {QUALITY_PRESET_LABELS[preset]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div style={styles.row}>
+            <label style={styles.label}>
+              Output folder:{" "}
+              <input
+                style={styles.input}
+                type="text"
+                placeholder="Choose an output folder"
+                value={outputDirectory}
+                onChange={(e) => setOutputDirectory(e.target.value)}
+                disabled={creating}
+              />
+            </label>
+          </div>
+          <div style={styles.row}>
+            <label style={styles.label}>
+              Playlist folder name:{" "}
+              <input
+                style={styles.input}
+                type="text"
+                placeholder="playlist #1"
+                value={playlistFolder}
+                onChange={(e) => setPlaylistFolder(e.target.value)}
+                disabled={creating}
+              />
+            </label>
+          </div>
+          {/* Showing the resolved destination because two editable fields combine into it,
+              and "where did my 47 files go" is otherwise only answerable after the fact. */}
+          {outputDirectory.trim() && playlistFolder.trim() ? (
+            <p style={{ ...styles.muted, ...styles.overflowSafe }}>
+              Files go to {joinWindowsPath(outputDirectory.trim(), playlistFolder.trim())}, named{" "}
+              <code>01 - Title</code>, <code>02 - Title</code>, ...
+            </p>
+          ) : null}
+
+          <div style={styles.row}>
+            <button
+              onClick={() => void handleDownloadPlaylist()}
+              disabled={
+                creating ||
+                playlist.entries.length === 0 ||
+                !outputDirectory.trim() ||
+                !playlistFolder.trim() ||
+                playlistJobIds.length > 0
+              }
+            >
+              {creating
+                ? `Queueing ${playlist.count} videos...`
+                : `Download all ${playlist.count}`}
+            </button>
+          </div>
+          <ErrorBanner error={createError} />
+
+          {playlistProgress ? (
+            <div style={styles.okBanner} role="status" aria-live="polite">
+              Queued {playlistProgress.total} downloads. {playlistProgress.completed} done
+              {playlistProgress.running > 0 ? `, ${playlistProgress.running} running` : ""}
+              {playlistProgress.failed > 0 ? `, ${playlistProgress.failed} failed` : ""}.
+              <div style={styles.muted}>
+                They run one at a time. Watch or cancel individual videos on the Queue screen.
+              </div>
+              <div style={styles.row}>
+                <button onClick={handleStartOver}>Download something else</button>
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       {metadata ? (
         <section style={styles.section}>
@@ -561,6 +829,33 @@ const styles: Record<string, CSSProperties> = {
     fontSize: "0.9rem",
   },
   errorDetails: { fontSize: "0.8rem", marginTop: "0.25rem", whiteSpace: "pre-wrap" },
+  choiceBanner: {
+    border: "1px solid #b6d4fe",
+    background: "#cfe2ff",
+    color: "#084298",
+    borderRadius: 6,
+    padding: "0.5rem 0.75rem",
+    fontSize: "0.9rem",
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.4rem",
+  },
+  warnBanner: {
+    border: "1px solid #ffe69c",
+    background: "#fff3cd",
+    color: "#664d03",
+    borderRadius: 6,
+    padding: "0.5rem 0.75rem",
+    fontSize: "0.9rem",
+  },
+  playlistList: {
+    margin: "0.4rem 0 0",
+    paddingLeft: "1.6rem",
+    fontSize: "0.8rem",
+    color: "#444",
+    maxHeight: 260,
+    overflowY: "auto",
+  },
   okBanner: {
     border: "1px solid #badbcc",
     background: "#d1e7dd",

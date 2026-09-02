@@ -52,6 +52,16 @@ public:
         // Ids of jobs that must COMPLETE before this one may start. Every id must already
         // be known to the scheduler -- see Submit().
         std::vector<JobId> dependsOn;
+        // Ids of jobs that must merely be FINISHED -- in any terminal state -- before this
+        // one may start. Ordering without coupling: unlike `dependsOn`, a predecessor that
+        // fails or is cancelled does NOT strand this job, it just stops holding it back.
+        //
+        // This is what "run these strictly one at a time" wants, and `dependsOn` is not:
+        // a playlist chained with `dependsOn` would cancel every remaining entry the
+        // moment one video turned out to be unavailable (issue #41). Every id must already
+        // be known to the scheduler, same as `dependsOn`, which is likewise what keeps the
+        // graph acyclic.
+        std::vector<JobId> runAfter;
     };
 
     // Registers a job as pending.
@@ -142,6 +152,10 @@ private:
     struct Entry {
         PendingKey key;  // also how a pending entry is found for removal
         std::vector<JobId> dependsOn;
+        // Sequencing-only edges; see Submission::runAfter. Deliberately absent from
+        // `dependents_`, which exists to drive failure propagation -- these edges must not
+        // propagate anything.
+        std::vector<JobId> runAfter;
         Phase phase = Phase::Pending;
         JobState terminal = JobState::Queued;  // meaningful only when phase == Finished
         // Epoch (the default-constructed TimePoint) means "no backoff", which is always

@@ -75,6 +75,16 @@ void Job::SetDependsOn(std::vector<JobId> dependsOn) {
     dependsOn_ = std::move(dependsOn);
 }
 
+std::vector<JobId> Job::RunAfter() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return runAfter_;
+}
+
+void Job::SetRunAfter(std::vector<JobId> runAfter) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    runAfter_ = std::move(runAfter);
+}
+
 void Job::SetCallbacks(StateChangedCallback onStateChanged, ProgressCallback onProgress) {
     std::lock_guard<std::mutex> lock(mutex_);
     onStateChanged_ = std::move(onStateChanged);

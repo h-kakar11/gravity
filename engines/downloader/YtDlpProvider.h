@@ -70,6 +70,9 @@ public:
     downloads::DownloadMetadata Inspect(const std::string& url,
                                          downloads::CancelledCallback isCancelled) override;
 
+    downloads::PlaylistInfo InspectPlaylist(const std::string& url,
+                                             downloads::CancelledCallback isCancelled) override;
+
     void Download(const downloads::DownloadOptions& options, downloads::MetadataCallback onMetadata,
                   downloads::ProgressCallback onProgress, downloads::CompletedCallback onCompleted,
                   downloads::CancelledCallback isCancelled) override;

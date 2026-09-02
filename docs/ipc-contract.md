@@ -96,7 +96,9 @@ verified without hitting a real URL.
 | `resumeJob` | `{jobId: string}` | `{}` |
 | `retryJob` | `{jobId: string}` | `{}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
-| `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` |
+| `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` (fails with `E_PLAYLIST_NOT_SUPPORTED` when the URL is a playlist — the frontend treats that as "call `inspectPlaylistUrl` instead", see `docs/decisions.md`) |
+| `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video) |
+| `suggestPlaylistFolder` | `{outputDirectory: string}` | `{name: string}` — the lowest unused `"playlist #n"` in that directory. A suggestion only: nothing is reserved, and the user is expected to replace it with the real playlist name |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[], deferredCapabilities: {capability: string, reason: string}[]}` |
 | `getDownloaderInfo` | `{}` | `{downloaderInfo: DownloaderInfo}` |
 | `getSettings` | `{}` | `{settings: Settings}` |
@@ -118,12 +120,12 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
   out-of-range or disallowed value is `E_INVALID_PARAM_VALUE`; each names the offending
   field in `error.details`. An explicit JSON `null` is treated as an absent field
   throughout.
-- **`inspectDownloadUrl` and `inspectFile` run off the request loop**, on a bounded pool
+- **`inspectDownloadUrl`, `inspectPlaylistUrl` and `inspectFile` run off the request loop**, on a bounded pool
   (`core/ipc/RequestExecutor.h`), so a slow network lookup cannot delay other commands.
   Responses are still correlated by `id`; as stated above, requests may complete out of
   order. If that pool is saturated the request is answered with `E_CORE_BUSY`
   (`recoverable: true`), never queued without limit.
-- **`inspectDownloadUrl` and `createJob{type: "DOWNLOAD"}` check that the Python downloader
+- **`inspectDownloadUrl`, `inspectPlaylistUrl` and `createJob{type: "DOWNLOAD"}` check that the Python downloader
   is actually present** before doing anything else, and answer `E_DOWNLOADER_NOT_FOUND`
   with every candidate path that was tried in `error.details` if it isn't (issue #79).
   A missing interpreter does not stop the core from starting or from running conversion,
@@ -133,9 +135,9 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
 | `type` | `params` |
 |---|---|
-| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[]}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31, and is validated before the job is accepted: see "Format id validation" below) |
-| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number, dependsOn?: string[]}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
-| `"TEST"` | `{priority?: number, dependsOn?: string[]}` |
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[], runAfter?: string[], playlistIndex?: number, playlistCount?: number}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31, and is validated before the job is accepted: see "Format id validation" below. `playlistIndex`/`playlistCount` must be sent together or not at all — together they prefix the output filename with the zero-padded position, e.g. `03 - Title`; each must be within `[1, 500]` and `playlistIndex <= playlistCount`) |
+| `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number, dependsOn?: string[], runAfter?: string[]}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
+| `"TEST"` | `{priority?: number, dependsOn?: string[], runAfter?: string[]}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
 
 #### Scheduling params (every job type)
@@ -147,11 +149,18 @@ Both are optional, and both are interpreted by `core/jobs/SchedulerCore.h` — s
 |---|---|
 | `priority` | Integer in `[-1000, 1000]`, default `0`. Higher runs first among queued jobs; ties keep submission (FIFO) order. Out of range → `E_INVALID_PARAM_VALUE`. |
 | `dependsOn` | Up to 32 job ids that must reach `COMPLETED` before this job may start. Each must be a job the core already knows about — an unknown id, this job itself, or a job that already ended in `FAILED`/`CANCELLED` is rejected at submission with `E_INVALID_DEPENDENCY`. Because a dependency must already exist, dependency cycles cannot be expressed. |
+| `runAfter` | Up to 500 job ids that must merely reach a **terminal state — any terminal state** — before this job may start. Ordering without failure coupling. Same existence and self-reference rules as `dependsOn` (so cycles remain inexpressible), but a predecessor that already ended in `FAILED`/`CANCELLED` is *accepted*: it is a satisfied edge, not an unsatisfiable one. |
 
-A job whose dependency does not complete is **cancelled**, transitively down the chain:
-its `state` becomes `CANCELLED` with no `error` field, and the reason is in the core log.
-`removeJob` on a job that a still-queued job depends on is rejected with
+A job whose `dependsOn` dependency does not complete is **cancelled**, transitively down the
+chain: its `state` becomes `CANCELLED` with no `error` field, and the reason is in the core
+log. `removeJob` on a job that a still-queued job depends on is rejected with
 `E_JOB_HAS_DEPENDENTS`.
+
+`runAfter` deliberately carries none of that: a predecessor ending in `FAILED`/`CANCELLED`
+simply stops holding its successor back. Use `dependsOn` for a workflow whose later steps are
+meaningless if an earlier one failed (download → convert → compress), and `runAfter` for work
+that is merely *serialized* — a playlist chains its entries this way so that one unavailable
+video costs exactly one video rather than cancelling every entry after it (issue #41).
 
 #### `MediaProcessingOptions` (CONVERSION/COMPRESSION's `options`)
 
@@ -467,6 +476,28 @@ selector string this maps to is decided in C++, not in Python or the frontend.
   playlistIndex?: number;
   playlistCount?: number;
   formats: DownloadFormat[];  // populated by inspectDownloadUrl; empty from mid-download events
+}
+```
+
+### `PlaylistInfo`
+Returned by `inspectPlaylistUrl`. Entries are resolved shallowly — no formats or thumbnail,
+because enumeration deliberately skips the per-video extractor round trip; each entry's own
+DOWNLOAD job fetches full metadata when it runs. Entries yt-dlp reports as unavailable
+(deleted/private) are dropped before this is built, and the survivors renumbered from 1, so
+`index` is contiguous and every entry listed is actually downloadable.
+```ts
+{
+  title: string;
+  uploader?: string;
+  webpageUrl?: string;
+  count: number;             // == entries.length
+  truncated: boolean;        // playlist was longer than the 500-entry enumeration cap
+  entries: {
+    index: number;           // 1-based; the number used for the "01 - " filename prefix
+    url: string;
+    title: string;
+    durationSeconds?: number;
+  }[];
 }
 ```
 

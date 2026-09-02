@@ -37,6 +37,31 @@ Emits exactly one `metadata` event (rich shape, see below) followed by one `comp
 event (empty `data`, just marks "this process is done, no error") on success, or one
 `error` event on failure. The process then exits.
 
+A playlist URL is an `error` here (`E_PLAYLIST_NOT_SUPPORTED`), deliberately and permanently:
+this command feeds `DownloadJob`, which downloads exactly one video. Enumerating a playlist
+is `inspectPlaylist` below. Because this command runs with `noplaylist: True`, a URL naming
+one video that also belongs to a playlist (`watch?v=X&list=Y`) resolves to just that video
+and succeeds normally.
+
+### `inspectPlaylist`
+
+Enumerates a playlist's entries without downloading anything and without resolving each
+entry's full metadata.
+
+```json
+{"command": "inspectPlaylist", "params": {"url": "https://example.com/playlist?list=abc123"}}
+```
+
+Emits exactly one `playlist` event followed by one `completed` event, or one `error` event.
+Unlike `inspect`, this runs with `noplaylist: False` (so a `watch?v=X&list=Y` URL resolves to
+the *list*, which is what the caller asked for by using this command) and `extract_flat: True`
+(so entries cost one request for the playlist page rather than one per video). A single-video
+URL is an `error`: `E_NOT_A_PLAYLIST`.
+
+Entries are capped at `_MAX_PLAYLIST_ENTRIES` (500) — the C++ core turns each entry into its
+own queued job, so an uncapped fan-out is a real resource problem, not a cosmetic one. When
+the cap truncates a playlist, `truncated` is `true`.
+
 ### `download`
 
 ```json
@@ -81,6 +106,30 @@ events, then either one `completed` event (with `outputPath`) or one `error` eve
 Lightweight shape (emitted mid-`download`):
 ```json
 {"event": "metadata", "data": {"title": "...", "duration": 123.4, "playlistIndex": null, "playlistCount": null}}
+```
+
+### `playlist`
+
+Emitted by `inspectPlaylist`, exactly once. `index` is 1-based and contiguous: entries yt-dlp
+reports as unavailable (deleted/private — they arrive as `None`, or with no resolvable URL)
+are dropped before this payload is built and the survivors renumbered, so no job is created
+that is certain to fail and the `01 - `/`02 - ` filename prefixes have no gaps.
+
+```json
+{
+  "event": "playlist",
+  "data": {
+    "title": "My Playlist",
+    "uploader": "Some Channel",
+    "webpageUrl": "https://example.com/playlist?list=abc123",
+    "count": 2,
+    "truncated": false,
+    "entries": [
+      {"index": 1, "url": "https://example.com/watch?v=a", "title": "First", "duration": 61.0},
+      {"index": 2, "url": "https://example.com/watch?v=b", "title": "Second", "duration": null}
+    ]
+  }
+}
 ```
 
 Rich shape (emitted by `inspect`) — every field beyond `title` is optional and may be
@@ -157,7 +206,8 @@ so this is inherently a heuristic — unmatched failures fall back to
 | `E_UNSUPPORTED_URL` | `UNSUPPORTED_FORMAT` | "unsupported url" |
 | `E_DISK_SPACE` | `DISK_SPACE_ERROR` | "no space left on device" |
 | `E_PERMISSION_DENIED` | `PERMISSION_ERROR` | "permission denied" |
-| `E_PLAYLIST_NOT_SUPPORTED` | `UNSUPPORTED_FORMAT` | raised directly (not text-matched) when `inspect`/`download` receives a playlist URL |
+| `E_PLAYLIST_NOT_SUPPORTED` | `UNSUPPORTED_FORMAT` | raised directly (not text-matched) when `inspect`/`download` receives a playlist URL. Not a dead end: the frontend reads this as "enumerate via `inspectPlaylist` instead" |
+| `E_NOT_A_PLAYLIST` | `UNSUPPORTED_FORMAT` | raised directly when `inspectPlaylist` receives a single-video URL |
 | `E_NETWORK` | `NETWORK_ERROR` | a real `socket`/`urllib` exception type, or Phase 1's original network-keyword list |
 | `E_DOWNLOAD_FAILED` | `UNKNOWN` | fallback — nothing else matched |
 
@@ -167,10 +217,13 @@ condition retrying the exact same request won't fix.
 ## Filename handling — who does what
 
 1. C++ (`DownloadJob::Execute()`) sanitizes the video title
-   (`FilenameSanitizer::SanitizeWindowsFilename`) and resolves it against the output
-   directory's existing contents (`FilenameSanitizer::DeduplicateBaseName`, matched
-   against any extension). This is the authoritative pass (spec section 12: "do not rely
-   on the frontend to sanitize filenames" — extended here to also not rely on Python).
+   (`FilenameSanitizer::SanitizeWindowsFilename`), applies the playlist number prefix when
+   the job carries one (`FilenameSanitizer::WithPlaylistIndex` — before the MAX_PATH
+   truncation, so the prefix is inside the length budget rather than pushing the name past
+   it), then resolves the result against the output directory's existing contents
+   (`FilenameSanitizer::DeduplicateBaseName`, matched against any extension). This is the
+   authoritative pass (spec section 12: "do not rely on the frontend to sanitize filenames"
+   — extended here to also not rely on Python).
 2. `downloader.py` applies its own local `sanitize_filename()` to whatever `filenameBase`
    it receives, as a defense-in-depth second pass only — it must never be the only thing
    standing between a raw video title and a Windows path.

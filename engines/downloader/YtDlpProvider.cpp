@@ -76,6 +76,32 @@ downloads::DownloadFormat ParseDownloadFormat(const nlohmann::json& f) {
 // Used for BOTH the lightweight metadata event Download() emits mid-flight (title/
 // duration/playlist fields only) and the rich one Inspect() emits (everything, including
 // formats) -- fields absent from `data` simply stay nullopt/empty.
+downloads::PlaylistInfo ParsePlaylistInfo(const nlohmann::json& data) {
+    downloads::PlaylistInfo info;
+    info.title = data.value("title", std::string());
+    info.uploader = OptionalString(data, "uploader");
+    info.webpageUrl = OptionalString(data, "webpageUrl");
+    info.truncated = data.value("truncated", false);
+
+    const auto entries = data.find("entries");
+    if (entries == data.end() || !entries->is_array()) {
+        return info;
+    }
+    for (const auto& raw : *entries) {
+        if (!raw.is_object()) continue;
+        downloads::PlaylistEntry entry;
+        entry.index = raw.value("index", 0);
+        entry.url = raw.value("url", std::string());
+        entry.title = raw.value("title", std::string());
+        entry.durationSeconds = OptionalDouble(raw, "durationSeconds");
+        // An entry with no URL is not downloadable; downloader.py already drops these, so
+        // this is defense against a malformed payload rather than an expected case.
+        if (entry.url.empty()) continue;
+        info.entries.push_back(std::move(entry));
+    }
+    return info;
+}
+
 downloads::DownloadMetadata ParseDownloadMetadata(const nlohmann::json& data) {
     downloads::DownloadMetadata metadata;
     metadata.title = data.value("title", std::string());
@@ -291,6 +317,46 @@ downloads::DownloadMetadata YtDlpProvider::Inspect(const std::string& url,
     }
 
     return *metadata;
+}
+
+downloads::PlaylistInfo YtDlpProvider::InspectPlaylist(const std::string& url,
+                                                        downloads::CancelledCallback isCancelled) {
+    nlohmann::json params;
+    params["url"] = url;
+    nlohmann::json command;
+    command["command"] = "inspectPlaylist";
+    command["params"] = params;
+
+    std::optional<downloads::PlaylistInfo> info;
+    auto onEvent = [&](downloads::DownloaderEventType type, const nlohmann::json& data) {
+        if (type == downloads::DownloaderEventType::Playlist) {
+            info = ParsePlaylistInfo(data);
+        }
+    };
+
+    // Shares Inspect()'s deadline: enumerating a playlist is one flat extraction, no
+    // per-video round-trips (see _PLAYLIST_PROBE_OPTS in downloader.py), so it is the same
+    // order of work as inspecting a single video and stalls the same way.
+    const RunOutcome outcome = RunPythonCommand(
+        command, onEvent, isCancelled, "E_INSPECT_PLAYLIST_CANCELLED",
+        "Playlist inspection was cancelled.", timeouts_.inspect, "E_INSPECT_PLAYLIST_TIMEOUT",
+        "Timed out reading this playlist. The site may be unreachable or very slow right now.");
+
+    if (outcome.error) {
+        throw *outcome.error;
+    }
+
+    if (!outcome.completedReceived || !info) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INSPECT_PLAYLIST_NO_RESULT", errors::ErrorCategory::EngineFailure,
+            "Downloader process exited without reporting playlist contents.",
+            "downloader.py exited with code " + std::to_string(outcome.processResult.exitCode) +
+                " without emitting a playlist event." +
+                (outcome.stderrTail.empty() ? "" : "\nstderr:\n" + outcome.stderrTail),
+            /*recoverable=*/false));
+    }
+
+    return *info;
 }
 
 void YtDlpProvider::Download(const downloads::DownloadOptions& options,

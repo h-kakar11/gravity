@@ -8,7 +8,7 @@ import type { HardwareInfo } from "./hardware";
 import type { Settings } from "./settings";
 import type { ErrorInfo } from "./error";
 import type { Progress } from "./progress";
-import type { DownloadMetadata, QualityPreset } from "./download";
+import type { DownloadMetadata, PlaylistInfo, QualityPreset } from "./download";
 import type { Preset, PresetKind } from "./preset";
 
 export type CoreCommand =
@@ -23,6 +23,8 @@ export type CoreCommand =
   | "removeJob"
   | "inspectFile"
   | "inspectDownloadUrl"
+  | "inspectPlaylistUrl"
+  | "suggestPlaylistFolder"
   | "getCapabilities"
   | "getDownloaderInfo"
   | "getSettings"
@@ -50,6 +52,16 @@ export interface DownloadJobParams {
   // job the core already knows about; a job whose dependency does not complete is
   // cancelled. See docs/ipc-contract.md "Scheduling params" and docs/concurrency-model.md.
   dependsOn?: string[];
+  // Ids of jobs that must FINISH (in any terminal state) before this one starts. Ordering
+  // without failure coupling -- unlike `dependsOn`, a predecessor that fails or is
+  // cancelled releases this job rather than stranding it. This is what chains a playlist so
+  // its entries run one at a time without one bad video cancelling the rest.
+  runAfter?: string[];
+  // Set together, and only for one entry of a playlist download: prefixes the output
+  // filename with the zero-padded position ("03 - Title") so playlist order survives on
+  // disk. Sending one without the other is rejected by the core.
+  playlistIndex?: number;
+  playlistCount?: number;
 }
 
 // Params for each command, keyed by command name.
@@ -67,6 +79,8 @@ export interface CommandParams {
   removeJob: { jobId: string };
   inspectFile: { path: string };
   inspectDownloadUrl: { url: string };
+  inspectPlaylistUrl: { url: string };
+  suggestPlaylistFolder: { outputDirectory: string };
   getCapabilities: { path: string };
   getDownloaderInfo: Record<string, never>;
   getSettings: Record<string, never>;
@@ -92,6 +106,8 @@ export interface CommandResult {
   removeJob: Record<string, never>;
   inspectFile: { fileInfo: FileInfo };
   inspectDownloadUrl: { metadata: DownloadMetadata };
+  inspectPlaylistUrl: { playlist: PlaylistInfo };
+  suggestPlaylistFolder: { name: string };
   getCapabilities: {
     capabilities: string[];
     // Operations that apply to this file but that the build cannot run. Attempting one

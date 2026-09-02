@@ -112,10 +112,23 @@ thread.
 **Ordering.** Highest priority first; equal priorities keep submission order (FIFO). A
 retried job re-enters at the back of its priority band -- it already had a turn.
 
-**Eligibility.** A job may start when every job it depends on has COMPLETED. A job whose
-dependencies are unmet is *skipped, not blocking*: a ready low-priority job runs ahead of
-a waiting high-priority one, because idling the pool on one stalled chain is worse than
-running the queue out of priority order.
+**Eligibility.** A job may start when every job it `dependsOn` has COMPLETED, and every job
+it `runAfter` has reached *any* terminal state. A job whose dependencies are unmet is
+*skipped, not blocking*: a ready low-priority job runs ahead of a waiting high-priority one,
+because idling the pool on one stalled chain is worse than running the queue out of priority
+order.
+
+**Two edge kinds, and the difference is failure semantics.** `dependsOn` couples outcomes:
+the successor is meaningless if the predecessor failed, so it is cancelled (see "Failure
+propagation" below). `runAfter` couples only *timing*: the predecessor merely has to be
+finished, and a predecessor that failed or was cancelled releases its successor rather than
+stranding it. Nothing propagates along a `runAfter` edge, which is why those edges are not
+recorded in the scheduler's reverse-edge map at all.
+
+Use `dependsOn` for a workflow (download → convert → compress). Use `runAfter` to serialize
+work that is otherwise independent: a playlist chains its entries with `runAfter` so they
+download strictly one at a time, and one unavailable video costs exactly one video instead
+of cancelling every entry after it (issue #41).
 
 **Concurrency cap.** The worker pool's size, and nothing else. There is no separate
 "running" counter to get out of sync: N threads each running one job is N concurrent jobs.
@@ -131,7 +144,7 @@ refused at submission too: a job that can never run is better rejected while the
 still has somewhere to put the error.
 
 **Failure propagation.** When a job ends in anything but COMPLETED, its direct pending
-dependents are cancelled. Each of those cancellations reports its own terminal state,
+`dependsOn` dependents are cancelled (`runAfter` successors are released, not cancelled). Each of those cancellations reports its own terminal state,
 which strands *its* dependents, and so on -- the chain unwinds one link at a time through
 the normal callback path rather than in a traversal, so there is one code path for
 "dependency did not complete" regardless of chain length.

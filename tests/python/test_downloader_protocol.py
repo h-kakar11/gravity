@@ -242,10 +242,80 @@ class BuildMetadataPayloadTest(unittest.TestCase):
         self.assertEqual(len(payload["formats"]), 1)  # storyboard-only format filtered out
 
     def test_playlist_raises_downloader_error(self):
+        # Still an error on `inspect` even though playlists are supported now: this command
+        # feeds DownloadJob, which downloads exactly one video. The frontend reads this code
+        # as "re-ask via inspectPlaylist" -- see BuildPlaylistPayloadTest below.
         with self.assertRaises(downloader.DownloaderError) as ctx:
             downloader.build_metadata_payload({"_type": "playlist"}, "https://example.com/playlist?list=x")
         self.assertEqual(ctx.exception.code, "E_PLAYLIST_NOT_SUPPORTED")
         self.assertEqual(ctx.exception.category, "UNSUPPORTED_FORMAT")
+
+
+class BuildPlaylistPayloadTest(unittest.TestCase):
+    @staticmethod
+    def _playlist(entries):
+        return {
+            "_type": "playlist", "title": "My Playlist", "uploader": "Someone",
+            "webpage_url": "https://example.com/playlist?list=x", "entries": entries,
+        }
+
+    def test_enumerates_entries_in_order_numbered_from_one(self):
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"url": "https://example.com/watch?v=a", "title": "First", "duration": 10},
+            {"url": "https://example.com/watch?v=b", "title": "Second", "duration": 20},
+        ]), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["title"], "My Playlist")
+        self.assertEqual(payload["count"], 2)
+        self.assertFalse(payload["truncated"])
+        self.assertEqual([e["index"] for e in payload["entries"]], [1, 2])
+        self.assertEqual([e["title"] for e in payload["entries"]], ["First", "Second"])
+        self.assertEqual(payload["entries"][0]["url"], "https://example.com/watch?v=a")
+
+    def test_unavailable_entries_are_dropped_and_numbering_stays_contiguous(self):
+        # yt-dlp yields None for a deleted/private entry. Passing those through would create
+        # one job per dead entry, each failing on its own; and numbering must not leave a
+        # hole where the dead entry was.
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"url": "https://example.com/watch?v=a", "title": "First"},
+            None,
+            {"title": "No URL at all"},
+            {"url": "https://example.com/watch?v=d", "title": "Fourth"},
+        ]), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual([e["index"] for e in payload["entries"]], [1, 2])
+        self.assertEqual([e["title"] for e in payload["entries"]], ["First", "Fourth"])
+
+    def test_falls_back_to_webpage_url_when_entry_has_no_flat_url(self):
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"webpage_url": "https://example.com/watch?v=z", "title": "Only webpage_url"},
+        ]), "https://example.com/playlist?list=x")
+        self.assertEqual(payload["entries"][0]["url"], "https://example.com/watch?v=z")
+
+    def test_caps_fan_out_and_reports_truncation(self):
+        oversized = [
+            {"url": f"https://example.com/watch?v={n}", "title": f"Video {n}"}
+            for n in range(downloader._MAX_PLAYLIST_ENTRIES + 25)
+        ]
+        payload = downloader.build_playlist_payload(
+            self._playlist(oversized), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["count"], downloader._MAX_PLAYLIST_ENTRIES)
+        self.assertTrue(payload["truncated"])
+
+    def test_single_video_raises_not_a_playlist(self):
+        with self.assertRaises(downloader.DownloaderError) as ctx:
+            downloader.build_playlist_payload(
+                {"_type": "video", "title": "Just a video"}, "https://example.com/watch?v=a")
+        self.assertEqual(ctx.exception.code, "E_NOT_A_PLAYLIST")
+        self.assertEqual(ctx.exception.category, "UNSUPPORTED_FORMAT")
+
+    def test_empty_playlist_yields_zero_entries_rather_than_failing(self):
+        payload = downloader.build_playlist_payload(
+            self._playlist([]), "https://example.com/playlist?list=x")
+        self.assertEqual(payload["count"], 0)
+        self.assertEqual(payload["entries"], [])
 
 
 class CommandStdinProtocolTest(unittest.TestCase):
@@ -278,6 +348,20 @@ class CommandStdinProtocolTest(unittest.TestCase):
             self.skipTest("ambient interpreter unexpectedly has yt_dlp installed")
         result, events = run_command_stdin(
             json.dumps({"command": "inspect", "params": {"url": "https://example.com/watch?v=x"}}))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertIn("yt_dlp", events[-1]["data"]["message"])
+
+    def test_inspect_playlist_missing_url_emits_error(self):
+        result, events = run_command_stdin(json.dumps({"command": "inspectPlaylist", "params": {}}))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(events[0]["event"], "error")
+
+    def test_inspect_playlist_without_yt_dlp_installed_emits_clean_error(self):
+        if downloader.yt_dlp is not None:
+            self.skipTest("ambient interpreter unexpectedly has yt_dlp installed")
+        result, events = run_command_stdin(json.dumps(
+            {"command": "inspectPlaylist", "params": {"url": "https://example.com/playlist?list=x"}}))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(events[-1]["event"], "error")
         self.assertIn("yt_dlp", events[-1]["data"]["message"])

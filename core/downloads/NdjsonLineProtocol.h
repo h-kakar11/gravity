@@ -19,6 +19,7 @@ std::optional<nlohmann::json> ParseNdjsonLine(const std::string& line);
 
 enum class DownloaderEventType {
     Metadata,
+    Playlist,  // one `inspectPlaylist` result: the entry list to fan out into jobs
     Progress,
     Completed,
     Error,

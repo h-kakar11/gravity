@@ -77,27 +77,68 @@ section 47. Newest entries at the bottom of each phase's section.
   change to an internal (C++<->Python only, never frontend-visible) protocol detail;
   documented in `docs/protocols/downloader.md`.
 
-### Playlist URLs: rejected with `E_PLAYLIST_NOT_SUPPORTED`, not implemented (issue #41)
-- **Context:** `downloader.py`'s single-video probe options (`noplaylist`, `extract_flat:
-  "in_playlist"`) and `WithPlaylistIndex`/playlist-count scaffolding already exist in the
-  data structures, but nothing above them ever decomposes a playlist into per-video jobs --
-  a bare playlist URL is rejected outright. `docs/roadmap.md` referenced this decision
-  without it actually being recorded anywhere, which is what issue #41 flagged.
-- **Options considered:** (a) implement full playlist support now -- decompose a playlist
-  URL into one queued DownloadJob per entry, using the existing `WithPlaylistIndex`
-  numbering; (b) keep rejecting playlist URLs and say so explicitly, leaving the
-  scaffolding in place for a later phase rather than ripping it out.
-- **Choice:** (b), for this pass.
-- **Reason:** decomposing a playlist into N jobs touches job creation, queue behavior
-  under #17's new priority ordering, per-item failure/retry UX, and progress reporting
-  across N jobs -- a real feature, not a bug fix, and one this audit pass has no product
-  sign-off to design unilaterally. The existing `WithPlaylistIndex`/playlist-count fields
-  are cheap to keep parked (they cost nothing unused) so the day playlist support does
-  ship, the numbering scheme doesn't need re-deriving from scratch.
-- **Consequences:** a playlist URL reliably fails fast today (`E_PLAYLIST_NOT_SUPPORTED`)
-  instead of silently downloading one entry or hanging on a full playlist walk. Playlist
-  support remains a scoped, trackable future feature (issue #41 stays open for that) rather
-  than a vague TODO.
+### Playlist URLs: decomposed into one DownloadJob per entry, run sequentially (issue #41)
+
+*Supersedes the earlier decision to reject playlist URLs outright; that rationale is kept
+below because the constraints it named are exactly what this design had to answer.*
+
+- **Context:** `downloader.py`'s probe options and the `WithPlaylistIndex`/playlist-count
+  scaffolding always existed, but nothing above them decomposed a playlist into per-video
+  jobs -- a bare playlist URL was rejected with `E_PLAYLIST_NOT_SUPPORTED`. The earlier pass
+  deferred this for want of product sign-off on the UX; that sign-off has now been given,
+  with the specific answers recorded under "Choice" below.
+- **Options considered:** (a) one job per entry, chained; (b) a single playlist job that
+  loops internally; (c) keep rejecting.
+- **Choice:** (a), with these product decisions:
+  - **A combo URL (`watch?v=X&list=Y`) asks.** The page offers "just this video" or "the
+    whole playlist" instead of guessing. Guessing "whole playlist" would turn an ordinary
+    shared link into hundreds of downloads; guessing "just this video" would make a
+    deliberately-pasted playlist link silently do the wrong thing.
+  - **Destination is a named subfolder.** `<output>/<name>/`, with the name field
+    pre-filled from `suggestPlaylistFolder` ("playlist #n" for the lowest unused n in that
+    directory) and expected to be overwritten with the real playlist name. The default is
+    collision-free so an unedited name can never merge two playlists; the field is editable
+    because "playlist #3" is a poor thing to find on disk a month later.
+  - **Entries download one at a time, in order,** via a `runAfter` chain (entry N+1 runs
+    after entry N *finishes*, whatever the outcome).
+  - **One quality/definition applies to the whole playlist,** chosen before download.
+    Per-entry `formatId` is deliberately not offered: format ids are per-video and mean
+    nothing across a list.
+- **Reason:** one job per entry is what the existing machinery already supports properly.
+  Per-item cancel/retry, progress, and the queue view all work unmodified, because each
+  entry is an ordinary DownloadJob; a single looping job would have needed its own
+  parallel implementation of all four. Numbering reuses `WithPlaylistIndex`, applied before
+  the MAX_PATH truncation so the prefix is inside the length budget rather than pushing a
+  name past it.
+- **Why sequencing needed a new edge kind (`runAfter`).** The obvious way to chain entries
+  was the existing `dependsOn`, and it is wrong here: `dependsOn` requires the predecessor
+  to reach COMPLETED and *cancels* dependents when it doesn't, transitively. A playlist
+  chained that way would lose every remaining entry the first time a video turned out to be
+  private, deleted or geo-blocked -- routine in a long playlist, and the opposite of what
+  "download all of them" means. `runAfter` waits only for a terminal state, so one bad video
+  costs exactly one video. It is a separate edge kind rather than a flag on `dependsOn`
+  because the workflow guarantee (download → convert → compress must not continue past a
+  failure) is still exactly right for `dependsOn` and must not be weakened; the two are
+  tested side by side in `SchedulerCoreTest`. Crash recovery remaps both edge kinds when it
+  replays specs, so a recovered playlist resumes sequentially instead of starting every
+  remaining entry at once.
+- **Consequences:** fan-out is bounded (`_MAX_PLAYLIST_ENTRIES` = 500 in `downloader.py`,
+  mirrored by `kMaxPlaylistEntries` in `main.cpp`); a longer playlist is truncated and the
+  UI says so, rather than flooding the scheduler and the recovery store. `inspect` still
+  fails with `E_PLAYLIST_NOT_SUPPORTED` for a playlist URL -- DownloadJob downloads exactly
+  one video, so that guard stays -- and the frontend reads that code as "enumerate this
+  instead", which is what makes playlist support work on any site rather than only on URLs
+  whose shape we recognize. Entries yt-dlp reports as unavailable are dropped at enumeration
+  and the remainder renumbered contiguously, so numbering has no gaps and no job is created
+  that is certain to fail. A failed entry does not stop the rest — that is what `runAfter`
+  buys, and `SchedulerCoreTest` pins it.
+
+*Superseded rationale (kept for the record):* the original decision was to reject playlist
+URLs, on the grounds that decomposing one touches job creation, queue behavior under #17's
+priority ordering, per-item failure/retry UX, and progress reporting across N jobs -- a real
+feature rather than a bug fix, which that audit pass had no sign-off to design unilaterally.
+The `WithPlaylistIndex`/playlist-count fields were kept parked precisely so the numbering
+scheme would not need re-deriving when support did ship, which is what happened.
 
 ### Video/audio merge strategy: yt-dlp's own ffmpeg invocation, pointed at our resolved path
 - **Context:** "Best" quality and every resolution preset select separate video+audio

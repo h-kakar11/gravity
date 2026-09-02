@@ -71,6 +71,12 @@ public:
     std::vector<JobId> DependsOn() const;
     void SetDependsOn(std::vector<JobId> dependsOn);
 
+    // Ids of jobs that must merely FINISH (any terminal state) before this one may start --
+    // ordering without failure coupling. Set and owned exactly like DependsOn(); see
+    // SchedulerCore::Submission::runAfter for why the two are distinct.
+    std::vector<JobId> RunAfter() const;
+    void SetRunAfter(std::vector<JobId> runAfter);
+
     // How many times Execute() has been entered for this job, including the run in
     // progress -- 0 before the first, 1 while the first is running. Incremented by the
     // one transition every attempt goes through (MarkRunning), so it counts attempts
@@ -216,6 +222,7 @@ private:
     // running, and since when" is answered from one consistent read.
     std::optional<std::chrono::steady_clock::time_point> runningSince_;
     std::vector<JobId> dependsOn_;
+    std::vector<JobId> runAfter_;
 
     StateChangedCallback onStateChanged_;
     ProgressCallback onProgress_;

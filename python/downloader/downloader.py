@@ -236,10 +236,17 @@ def format_entry(f: dict) -> dict:
 
 
 def build_metadata_payload(info: dict, url: str) -> dict:
+    # Still a hard error on THIS command: a DownloadJob downloads exactly one video, so a
+    # playlist reaching it is a bug, not a feature. Playlists are supported via the separate
+    # `inspectPlaylist` command, which enumerates entries the caller then submits as one
+    # DownloadJob each -- see run_inspect_playlist() below. The frontend treats this specific
+    # code as "ask inspectPlaylist instead", which is what makes playlist support work on any
+    # site rather than only URLs whose shape we recognize.
     if info.get("_type") == "playlist":
         raise DownloaderError(
             "E_PLAYLIST_NOT_SUPPORTED", "UNSUPPORTED_FORMAT",
-            "This URL is a playlist. MediaTool currently supports single-video URLs only.")
+            "This URL is a playlist, not a single video. Use the playlist flow to download "
+            "its entries.")
 
     formats = []
     for f in info.get("formats") or []:
@@ -257,6 +264,59 @@ def build_metadata_payload(info: dict, url: str) -> dict:
         "playlistIndex": info.get("playlist_index"),
         "playlistCount": info.get("n_entries") or info.get("playlist_count"),
         "formats": formats,
+    }
+
+
+# A playlist becomes one queued DownloadJob per entry, so this bound is a real resource
+# limit, not cosmetics: an unbounded fan-out (YouTube allows playlists in the thousands, and
+# a channel "uploads" pseudo-playlist can be far larger) would flood the scheduler and the
+# recovery store with jobs the user never meant to create. Entries past the cap are dropped
+# and reported via `truncated`, so the UI can say so plainly instead of silently downloading
+# a prefix.
+_MAX_PLAYLIST_ENTRIES = 500
+
+
+def build_playlist_payload(info: dict, url: str) -> dict:
+    """Flattens a yt-dlp playlist extraction into the entry list the core fans out into jobs.
+
+    Entries yt-dlp reports as unavailable (deleted/private videos surface as None, or with no
+    resolvable URL) are dropped rather than passed through as jobs that would each fail
+    individually. Surviving entries are renumbered contiguously from 1, so the `01 - `,
+    `02 - ` prefixes on disk have no gaps where a dead entry used to be.
+    """
+    if info.get("_type") != "playlist":
+        raise DownloaderError(
+            "E_NOT_A_PLAYLIST", "UNSUPPORTED_FORMAT",
+            "This URL is a single video, not a playlist.")
+
+    raw_entries = info.get("entries") or []
+    entries = []
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            continue  # unavailable entry -- yt-dlp yields None for these
+        entry_url = raw.get("url") or raw.get("webpage_url")
+        if not entry_url:
+            continue
+        entries.append({
+            # Assigned after the loop: index must count surviving entries, not raw position.
+            "index": 0,
+            "url": entry_url,
+            "title": raw.get("title") or "Untitled",
+            "duration": raw.get("duration"),
+        })
+        if len(entries) >= _MAX_PLAYLIST_ENTRIES:
+            break
+
+    for position, entry in enumerate(entries, start=1):
+        entry["index"] = position
+
+    return {
+        "title": info.get("title") or "Untitled playlist",
+        "uploader": info.get("uploader") or info.get("channel"),
+        "webpageUrl": info.get("webpage_url") or url,
+        "count": len(entries),
+        "truncated": len(entries) >= _MAX_PLAYLIST_ENTRIES,
+        "entries": entries,
     }
 
 
@@ -367,6 +427,28 @@ _SINGLE_VIDEO_PROBE_OPTS = {
     "socket_timeout": _SOCKET_TIMEOUT_SECONDS,
 }
 
+# The playlist counterpart of the options above, and the two differences are the whole point:
+#   noplaylist: False -- a "watch?v=X&list=Y" URL must resolve to the LIST here, which is
+#                        exactly what the single-video probe suppresses. The frontend only
+#                        sends such a URL to this command after the user explicitly chose
+#                        "the whole playlist" over "just this video".
+#   extract_flat: True -- enumerate every entry shallowly (id/title/url, no per-video
+#                        extractor round-trip). "in_playlist" would stop at the first level;
+#                        for a bare playlist URL that is the level we actually want walked.
+# Entries are cheap this way: one request for the playlist page rather than one per video,
+# which is what keeps enumerating a 200-video playlist a sub-second operation.
+_PLAYLIST_PROBE_OPTS = {
+    "quiet": True,
+    "no_warnings": True,
+    "noprogress": True,
+    "logger": _StderrLogger(),
+    "skip_download": True,
+    "noplaylist": False,
+    "extract_flat": True,
+    "playlistend": _MAX_PLAYLIST_ENTRIES,
+    "socket_timeout": _SOCKET_TIMEOUT_SECONDS,
+}
+
 
 def run_inspect(url: str) -> int:
     if yt_dlp is None:
@@ -376,6 +458,21 @@ def run_inspect(url: str) -> int:
         with yt_dlp.YoutubeDL(dict(_SINGLE_VIDEO_PROBE_OPTS)) as probe:
             info = probe.extract_info(url, download=False)
         emit("metadata", build_metadata_payload(info, url))
+        emit("completed", {})
+        return 0
+    except Exception as exc:
+        emit_error(exc)
+        return 1
+
+
+def run_inspect_playlist(url: str) -> int:
+    if yt_dlp is None:
+        emit_error(RuntimeError("yt_dlp is not installed in this environment"))
+        return 1
+    try:
+        with yt_dlp.YoutubeDL(dict(_PLAYLIST_PROBE_OPTS)) as probe:
+            info = probe.extract_info(url, download=False)
+        emit("playlist", build_playlist_payload(info, url))
         emit("completed", {})
         return 0
     except Exception as exc:
@@ -496,6 +593,14 @@ def run_command_stdin() -> int:
             return 1
         return run_inspect(url)
 
+    if command == "inspectPlaylist":
+        try:
+            url = params["url"]
+        except Exception as exc:
+            emit_error(exc)
+            return 1
+        return run_inspect_playlist(url)
+
     if command == "version":
         return run_version()
 
@@ -518,7 +623,8 @@ def main() -> int:
     mode.add_argument("--selftest", action="store_true",
                        help="Emit a canned NDJSON sequence, no network access")
     mode.add_argument("--command-stdin", action="store_true",
-                       help="Read one JSON command from stdin (inspect or download)")
+                       help="Read one JSON command from stdin (inspect, inspectPlaylist, "
+                            "download or version)")
     args = parser.parse_args()
 
     if args.selftest:

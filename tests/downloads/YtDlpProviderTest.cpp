@@ -345,6 +345,87 @@ TEST(YtDlpProvider, InspectSendsInspectCommandAndReturnsRichMetadata) {
     EXPECT_TRUE(metadata.formats[1].hasAudio);
 }
 
+TEST(YtDlpProvider, InspectPlaylistSendsPlaylistCommandAndReturnsEntries) {
+    FakeProcessRunner runner({
+        R"({"event":"playlist","data":{)"
+        R"("title":"My Playlist","uploader":"Some Channel",)"
+        R"("webpageUrl":"https://example.com/playlist?list=abc","truncated":false,"count":2,)"
+        R"("entries":[)"
+        R"({"index":1,"url":"https://example.com/watch?v=a","title":"First","durationSeconds":10.5},)"
+        R"({"index":2,"url":"https://example.com/watch?v=b","title":"Second","durationSeconds":null})"
+        R"(]}})",
+        R"({"event":"completed","data":{}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    const auto info =
+        provider.InspectPlaylist("https://example.com/playlist?list=abc", [] { return false; });
+
+    const auto sentCommand = nlohmann::json::parse(runner.lastProcessState->writtenLines[0]);
+    EXPECT_EQ(sentCommand.at("command"), "inspectPlaylist");
+    EXPECT_EQ(sentCommand.at("params").at("url"), "https://example.com/playlist?list=abc");
+
+    EXPECT_EQ(info.title, "My Playlist");
+    EXPECT_FALSE(info.truncated);
+    ASSERT_EQ(info.entries.size(), 2u);
+    EXPECT_EQ(info.entries[0].index, 1);
+    EXPECT_EQ(info.entries[0].url, "https://example.com/watch?v=a");
+    EXPECT_EQ(info.entries[0].title, "First");
+    ASSERT_TRUE(info.entries[0].durationSeconds.has_value());
+    EXPECT_DOUBLE_EQ(*info.entries[0].durationSeconds, 10.5);
+    EXPECT_EQ(info.entries[1].index, 2);
+    EXPECT_FALSE(info.entries[1].durationSeconds.has_value());
+}
+
+TEST(YtDlpProvider, InspectPlaylistDropsEntriesWithNoUrl) {
+    // downloader.py already filters these; this is the parser refusing to build an
+    // undownloadable job out of a malformed payload rather than trusting its input.
+    FakeProcessRunner runner({
+        R"({"event":"playlist","data":{"title":"P","truncated":false,"count":2,"entries":[)"
+        R"({"index":1,"url":"","title":"No URL"},)"
+        R"({"index":2,"url":"https://example.com/watch?v=b","title":"Fine"})"
+        R"(]}})",
+        R"({"event":"completed","data":{}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    const auto info = provider.InspectPlaylist("https://example.com/playlist?list=x", [] { return false; });
+    ASSERT_EQ(info.entries.size(), 1u);
+    EXPECT_EQ(info.entries[0].title, "Fine");
+}
+
+TEST(YtDlpProvider, InspectPlaylistThrowsEngineFailureWhenNoPlaylistEventArrives) {
+    FakeProcessRunner runner({R"({"event":"completed","data":{}})"});
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    bool threw = false;
+    try {
+        provider.InspectPlaylist("https://example.com/playlist?list=x", [] { return false; });
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        threw = true;
+        EXPECT_EQ(ex.Info().code, "E_INSPECT_PLAYLIST_NO_RESULT");
+        EXPECT_EQ(ex.Info().category, mediatool::errors::ErrorCategory::EngineFailure);
+    }
+    EXPECT_TRUE(threw);
+}
+
+TEST(YtDlpProvider, InspectPlaylistSurfacesNotAPlaylistAsAnError) {
+    FakeProcessRunner runner({
+        R"({"event":"error","data":{"code":"E_NOT_A_PLAYLIST","category":"UNSUPPORTED_FORMAT",)"
+        R"("message":"single video","details":"","recoverable":false}})",
+    });
+    mediatool::downloader::YtDlpProvider provider(runner, "python.exe", "downloader.py");
+
+    bool threw = false;
+    try {
+        provider.InspectPlaylist("https://example.com/watch?v=a", [] { return false; });
+    } catch (const mediatool::errors::MediaToolException& ex) {
+        threw = true;
+        EXPECT_EQ(ex.Info().code, "E_NOT_A_PLAYLIST");
+    }
+    EXPECT_TRUE(threw);
+}
+
 TEST(YtDlpProvider, InspectThrowsMediaToolExceptionOnErrorEvent) {
     FakeProcessRunner runner({
         R"({"event":"error","data":{"code":"E_PLAYLIST_NOT_SUPPORTED","category":"UNSUPPORTED_FORMAT",)"
