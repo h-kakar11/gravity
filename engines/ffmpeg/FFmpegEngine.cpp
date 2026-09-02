@@ -312,18 +312,17 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     // encoder" -- so a bounded tail is kept and classified (FFmpegErrorClassifier.h).
     // Bounded because ffmpeg on a bad input can produce a line per frame, and the last few
     // lines are the ones that carry the failure.
-    // Shared ownership ensures the resources stay alive even if stderr callbacks are still
-    // in flight when this function returns (possible on Windows with async I/O).
-    struct StderrCapture {
-        std::mutex mutex;
-        std::deque<std::string> ring;
-    };
-    constexpr std::size_t kMaxStderrLines = 20;
-    auto stderrCapture = std::make_shared<StderrCapture>();
-    auto captureStderr = [stderrCapture](const std::string& line) {
-        std::lock_guard<std::mutex> lock(stderrCapture->mutex);
-        stderrCapture->ring.push_back(line);
-        if (stderrCapture->ring.size() > kMaxStderrLines) stderrCapture->ring.pop_front();
+    // Captured by reference, and that is safe by declaration order rather than by luck:
+    // RealProcessRunner delivers these callbacks from its drain thread, which is joined by
+    // ~IProcess. `child` below is declared AFTER this ring, so it is destroyed BEFORE it --
+    // the thread is already joined by the time the ring dies, on the throw path included.
+    std::mutex stderrMutex;
+    std::deque<std::string> stderrRing;
+    static constexpr std::size_t kMaxStderrLines = 20;
+    auto captureStderr = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(stderrMutex);
+        stderrRing.push_back(line);
+        if (stderrRing.size() > kMaxStderrLines) stderrRing.pop_front();
     };
 
     process::ProcessOptions processOptions;
@@ -361,16 +360,28 @@ void FFmpegEngine::RunFfmpegJob(const std::string& inputPath, const std::string&
     if (result.exitCode != 0) {
         std::string stderrTail;
         {
-            std::lock_guard<std::mutex> lock(stderrCapture->mutex);
-            for (const std::string& line : stderrCapture->ring) stderrTail += line + "\n";
+            std::lock_guard<std::mutex> lock(stderrMutex);
+            for (const std::string& line : stderrRing) stderrTail += line + "\n";
         }
         // Free space at the OUTPUT location, and only to make a disk-full message
         // concrete. Measured after the fact, so it is never what decides the
         // classification -- see ClassifyFfmpegFailure.
+        //
+        // The empty-parent guard is load-bearing, not defensive habit: outputPath with no
+        // directory component ("out.mp4") gives an empty parent_path(), and libstdc++'s
+        // WINDOWS fs::space() begins with an internal absolute(p) that throws
+        // filesystem_error for an empty path -- ignoring the error_code overload's promise
+        // not to throw. POSIX fs::space() reports it through the error_code instead, so
+        // this is invisible on Linux and fatal on the only platform Gravity ships to.
+        // Same `if (!parentDir.empty())` guard the stores use (JsonFileSettingsStore,
+        // InProgressJobStore, JobHistoryStore, PresetStore).
         std::optional<std::uint64_t> availableBytes;
-        std::error_code spaceError;
-        const auto space = fs::space(fs::path(outputPath).parent_path(), spaceError);
-        if (!spaceError) availableBytes = static_cast<std::uint64_t>(space.available);
+        const fs::path outputDirectory = fs::path(outputPath).parent_path();
+        if (!outputDirectory.empty()) {
+            std::error_code spaceError;
+            const auto space = fs::space(outputDirectory, spaceError);
+            if (!spaceError) availableBytes = static_cast<std::uint64_t>(space.available);
+        }
 
         throw MediaToolException(
             ClassifyFfmpegFailure(stderrTail, result.exitCode, availableBytes));
