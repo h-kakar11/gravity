@@ -32,6 +32,82 @@ bool IsWindowsIllegalChar(unsigned char c) {
     }
 }
 
+// Replaces any byte sequence that is not well-formed UTF-8 with '_', one bad sequence at
+// a time, leaving everything else untouched.
+//
+// A video title arrives from a source this process doesn't control the encoding of, and
+// yt-dlp/YouTube metadata has been observed to contain unpaired UTF-16 surrogates. Python's
+// json.dumps() and nlohmann::json's parser both pass these through -- as a 3-byte sequence
+// in the D800-DFFF range that is syntactically shaped like UTF-8 but which the Unicode
+// standard explicitly forbids UTF-8 from encoding. std::filesystem::path's Windows
+// implementation enforces that prohibition strictly: constructing a path from such a string
+// throws std::filesystem_error ("Cannot convert character sequence: Illegal byte
+// sequence"), which was crashing the whole job (E_JOB_UNHANDLED_EXCEPTION) the moment a
+// title like this reached SanitizeWindowsFilename's own stdfs::path construction below --
+// the one place in this codebase that handles externally-influenced text without the
+// defensive treatment used everywhere else (main.cpp's WriteLine, JobHistoryStore,
+// InProgressJobStore all reach for json::error_handler_t::replace for exactly this class of
+// problem; std::filesystem::path has no equivalent "replace and continue" option, so this
+// function is that option, applied before the title ever reaches a path).
+std::string RepairUtf8(const std::string& input) {
+    std::string result;
+    result.reserve(input.size());
+    std::size_t i = 0;
+    while (i < input.size()) {
+        const unsigned char lead = static_cast<unsigned char>(input[i]);
+        std::size_t seqLen;
+        char32_t codepoint;
+        char32_t minCodepoint;
+        if ((lead & 0x80) == 0x00) {
+            result.push_back(static_cast<char>(lead));
+            ++i;
+            continue;
+        } else if ((lead & 0xE0) == 0xC0) {
+            seqLen = 2; codepoint = lead & 0x1F; minCodepoint = 0x80;
+        } else if ((lead & 0xF0) == 0xE0) {
+            seqLen = 3; codepoint = lead & 0x0F; minCodepoint = 0x800;
+        } else if ((lead & 0xF8) == 0xF0) {
+            seqLen = 4; codepoint = lead & 0x07; minCodepoint = 0x10000;
+        } else {
+            result.push_back('_');  // stray continuation byte or an invalid lead byte
+            ++i;
+            continue;
+        }
+
+        bool structurallyValid = i + seqLen <= input.size();
+        for (std::size_t j = 1; structurallyValid && j < seqLen; ++j) {
+            const unsigned char cont = static_cast<unsigned char>(input[i + j]);
+            if ((cont & 0xC0) != 0x80) {
+                structurallyValid = false;
+                break;
+            }
+            codepoint = (codepoint << 6) | (cont & 0x3F);
+        }
+        if (!structurallyValid) {
+            // Truncated or malformed sequence -- only the lead byte is known to be bad, so
+            // skip just that one byte and let the next byte be re-examined on its own.
+            result.push_back('_');
+            ++i;
+            continue;
+        }
+
+        // Rejects overlong encodings, values past the Unicode range, and -- the case this
+        // function exists for -- an encoded UTF-16 surrogate (D800-DFFF). The sequence is
+        // structurally well-formed UTF-8 shape, so the whole seqLen bytes are consumed as one
+        // bad sequence rather than leaving its continuation bytes to be reprocessed as stray
+        // lead bytes (which would emit one '_' per byte instead of one '_' for the sequence).
+        if (codepoint < minCodepoint || codepoint > 0x10FFFF ||
+            (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+            result.push_back('_');
+            i += seqLen;
+            continue;
+        }
+        result.append(input, i, seqLen);
+        i += seqLen;
+    }
+    return result;
+}
+
 // Truncates to at most `maxCodepoints` UTF-8 codepoints without splitting a multi-byte
 // sequence (a byte-length cap could sever an emoji/accented character mid-encoding and
 // produce invalid UTF-8). Treats each Unicode scalar value as one "character"; a
@@ -105,9 +181,10 @@ constexpr std::size_t kPathReserveForSuffixAndExtension = 20;
 }  // namespace
 
 std::string SanitizeWindowsFilename(const std::string& rawTitle) {
+    const std::string repaired = RepairUtf8(rawTitle);
     std::string result;
-    result.reserve(rawTitle.size());
-    for (unsigned char c : rawTitle) {
+    result.reserve(repaired.size());
+    for (unsigned char c : repaired) {
         if (c < 0x20) {
             continue;  // control characters have no visual form; drop rather than replace
         }

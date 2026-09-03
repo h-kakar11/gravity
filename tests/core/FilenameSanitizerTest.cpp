@@ -74,6 +74,31 @@ TEST(FilenameSanitizerTest, PreservesUnicodeAndEmojiUntouched) {
     EXPECT_EQ(SanitizeWindowsFilename(title), title);
 }
 
+TEST(FilenameSanitizerTest, PreservesValidNonAsciiTitles) {
+    // A real title that reached this function un-sanitized before the fix below (issue:
+    // a playlist download reported here failed on roughly 40% of its entries). Plain
+    // well-formed UTF-8 like this was never the problem -- see the surrogate case below.
+    const std::string title = "\xE3\x83\xAD\xE3\x83\xB3\xE3\x83\xAA\xE3\x83\xBC\xE3\x82\xB9\xE3\x82\xBF\xE3\x83\xBC";
+    EXPECT_EQ(SanitizeWindowsFilename(title), title);
+}
+
+// Regression test: yt-dlp/YouTube metadata has been observed to contain an unpaired
+// UTF-16 surrogate in a title. Python's json.dumps() and nlohmann::json's parser both
+// pass it through as a WTF-8-style 3-byte sequence (0xED 0xA0 0x80 here, encoding
+// U+D800) -- syntactically shaped like UTF-8 but a value the Unicode standard forbids
+// UTF-8 from encoding. Before this fix, std::filesystem::path's Windows implementation
+// enforced that prohibition strictly and threw the moment such a title reached this
+// function's own path construction below, crashing the whole job
+// (E_JOB_UNHANDLED_EXCEPTION, "Cannot convert character sequence: Illegal byte
+// sequence") -- reproduced with a real playlist where every entry whose title carried
+// this defect failed the same way.
+TEST(FilenameSanitizerTest, RepairsAnEncodedUtf16SurrogateInsteadOfThrowing) {
+    const std::string title = "before \xED\xA0\x80 after";
+    std::string result;
+    EXPECT_NO_THROW(result = SanitizeWindowsFilename(title));
+    EXPECT_EQ(result, "before _ after");
+}
+
 TEST(FilenameSanitizerTest, FallsBackToUntitledWhenNothingSurvives) {
     EXPECT_EQ(SanitizeWindowsFilename(""), "untitled");
     EXPECT_EQ(SanitizeWindowsFilename("..."), "untitled");
