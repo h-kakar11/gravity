@@ -114,6 +114,7 @@ function playlistOf(count: number) {
       title: "My Playlist",
       count,
       truncated: false,
+      unavailableCount: 0,
       entries: Array.from({ length: count }, (_, i) => ({
         index: i + 1,
         url: `https://example.com/watch?v=v${i + 1}`,

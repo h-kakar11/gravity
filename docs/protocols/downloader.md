@@ -60,7 +60,11 @@ URL is an `error`: `E_NOT_A_PLAYLIST`.
 
 Entries are capped at `_MAX_PLAYLIST_ENTRIES` (500) — the C++ core turns each entry into its
 own queued job, so an uncapped fan-out is a real resource problem, not a cosmetic one. When
-the cap truncates a playlist, `truncated` is `true`.
+the cap truncates a playlist, `truncated` is `true`. Separately, `unavailableCount` counts
+raw entries yt-dlp reported unavailable (deleted/private/no resolvable URL) and dropped
+before `entries` was built — this is why `count` can be less than the playlist's real length
+even when `truncated` is `false`, and the caller should say so rather than let a dropped
+entry read as a miscount.
 
 ### `download`
 
@@ -124,6 +128,7 @@ that is certain to fail and the `01 - `/`02 - ` filename prefixes have no gaps.
     "webpageUrl": "https://example.com/playlist?list=abc123",
     "count": 2,
     "truncated": false,
+    "unavailableCount": 0,
     "entries": [
       {"index": 1, "url": "https://example.com/watch?v=a", "title": "First", "duration": 61.0},
       {"index": 2, "url": "https://example.com/watch?v=b", "title": "Second", "duration": null}

@@ -492,6 +492,9 @@ DOWNLOAD job fetches full metadata when it runs. Entries yt-dlp reports as unava
   webpageUrl?: string;
   count: number;             // == entries.length
   truncated: boolean;        // playlist was longer than the 500-entry enumeration cap
+  unavailableCount: number;  // raw entries dropped as unavailable (deleted/private) --
+                              // distinct from truncated, and why count can be short of the
+                              // playlist's real length even when truncated is false
   entries: {
     index: number;           // 1-based; the number used for the "01 - " filename prefix
     url: string;

@@ -295,11 +295,18 @@ def build_playlist_payload(info: dict, url: str) -> dict:
     # `len(entries) >= cap` instead claimed truncation for a playlist of exactly 500
     # complete videos, and the UI told the user entries had been dropped when none had.
     truncated = False
+    # Counts entries dropped because yt-dlp reported them unavailable (deleted/private),
+    # separately from `truncated` (which means "hit the cap"). Without this, a playlist
+    # with one dead video silently reported `count: 499` out of a 500-entry list with no
+    # signal anything was skipped -- indistinguishable from a bug to whoever read it.
+    unavailable_count = 0
     for raw in raw_entries:
         if not isinstance(raw, dict):
-            continue  # unavailable entry -- yt-dlp yields None for these
+            unavailable_count += 1  # unavailable entry -- yt-dlp yields None for these
+            continue
         entry_url = raw.get("url") or raw.get("webpage_url")
         if not entry_url:
+            unavailable_count += 1
             continue
         if len(entries) >= _MAX_PLAYLIST_ENTRIES:
             truncated = True
@@ -321,6 +328,7 @@ def build_playlist_payload(info: dict, url: str) -> dict:
         "webpageUrl": info.get("webpage_url") or url,
         "count": len(entries),
         "truncated": truncated,
+        "unavailableCount": unavailable_count,
         "entries": entries,
     }
 

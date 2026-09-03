@@ -356,6 +356,7 @@ TEST(YtDlpProvider, InspectPlaylistSendsPlaylistCommandAndReturnsEntries) {
         R"({"event":"playlist","data":{)"
         R"("title":"My Playlist","uploader":"Some Channel",)"
         R"("webpageUrl":"https://example.com/playlist?list=abc","truncated":false,"count":2,)"
+        R"("unavailableCount":1,)"
         R"("entries":[)"
         R"({"index":1,"url":"https://example.com/watch?v=a","title":"First","duration":10.5},)"
         R"({"index":2,"url":"https://example.com/watch?v=b","title":"Second","duration":null})"
@@ -373,6 +374,7 @@ TEST(YtDlpProvider, InspectPlaylistSendsPlaylistCommandAndReturnsEntries) {
 
     EXPECT_EQ(info.title, "My Playlist");
     EXPECT_FALSE(info.truncated);
+    EXPECT_EQ(info.unavailableCount, 1);
     ASSERT_EQ(info.entries.size(), 2u);
     EXPECT_EQ(info.entries[0].index, 1);
     EXPECT_EQ(info.entries[0].url, "https://example.com/watch?v=a");
@@ -398,6 +400,9 @@ TEST(YtDlpProvider, InspectPlaylistDropsEntriesWithNoUrl) {
     const auto info = provider.InspectPlaylist("https://example.com/playlist?list=x", [] { return false; });
     ASSERT_EQ(info.entries.size(), 1u);
     EXPECT_EQ(info.entries[0].title, "Fine");
+    // No "unavailableCount" key in this fixture's payload -- defaults to 0 rather than
+    // failing to parse, since older/mismatched payload shapes should not break inspection.
+    EXPECT_EQ(info.unavailableCount, 0);
 }
 
 TEST(YtDlpProvider, InspectPlaylistThrowsEngineFailureWhenNoPlaylistEventArrives) {

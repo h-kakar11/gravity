@@ -63,5 +63,9 @@ export interface PlaylistInfo {
   count: number;
   // The playlist had more entries than the backend's enumeration cap; the tail was dropped.
   truncated: boolean;
+  // Raw entries dropped because yt-dlp reported them unavailable (deleted/private) --
+  // distinct from `truncated`; this is why `count` can be short of the playlist's real
+  // length even when `truncated` is false.
+  unavailableCount: number;
   entries: PlaylistEntry[];
 }

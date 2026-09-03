@@ -12,6 +12,7 @@ nlohmann::json PlaylistInfo::ToJson() const {
     // documents it (docs/ipc-contract.md) and it keeps the shape identical to the Python
     // payload this is parsed from.
     json["count"] = static_cast<int>(entries.size());
+    json["unavailableCount"] = unavailableCount;
 
     nlohmann::json entryArray = nlohmann::json::array();
     for (const auto& entry : entries) {

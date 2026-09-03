@@ -569,6 +569,12 @@ export default function HomePage() {
                       first {playlist.count} will be downloaded.
                     </div>
                   )}
+                  {playlist.unavailableCount > 0 && (
+                    <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 6, padding: "0.5rem 0.75rem", fontSize: "0.85rem" }} role="status">
+                      {playlist.unavailableCount} video{playlist.unavailableCount === 1 ? " is" : "s are"} unavailable
+                      (deleted or private) and {playlist.unavailableCount === 1 ? "was" : "were"} skipped.
+                    </div>
+                  )}
 
                   <details style={{ fontSize: "0.85rem", color: "var(--color-text-secondary)" }}>
                     <summary>Show the {playlist.count} videos</summary>

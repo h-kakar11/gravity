@@ -268,6 +268,7 @@ class BuildPlaylistPayloadTest(unittest.TestCase):
         self.assertEqual(payload["title"], "My Playlist")
         self.assertEqual(payload["count"], 2)
         self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["unavailableCount"], 0)
         self.assertEqual([e["index"] for e in payload["entries"]], [1, 2])
         self.assertEqual([e["title"] for e in payload["entries"]], ["First", "Second"])
         self.assertEqual(payload["entries"][0]["url"], "https://example.com/watch?v=a")
@@ -286,6 +287,10 @@ class BuildPlaylistPayloadTest(unittest.TestCase):
         self.assertEqual(payload["count"], 2)
         self.assertEqual([e["index"] for e in payload["entries"]], [1, 2])
         self.assertEqual([e["title"] for e in payload["entries"]], ["First", "Fourth"])
+        # Two entries dropped (None, and one with no resolvable URL) -- reported distinctly
+        # from truncation, which this playlist never hit.
+        self.assertEqual(payload["unavailableCount"], 2)
+        self.assertFalse(payload["truncated"])
 
     def test_falls_back_to_webpage_url_when_entry_has_no_flat_url(self):
         payload = downloader.build_playlist_payload(self._playlist([
@@ -330,6 +335,7 @@ class BuildPlaylistPayloadTest(unittest.TestCase):
 
         self.assertEqual(payload["count"], downloader._MAX_PLAYLIST_ENTRIES)
         self.assertFalse(payload["truncated"])
+        self.assertEqual(payload["unavailableCount"], 2)
 
     def test_entry_duration_is_emitted_under_the_key_the_core_parses(self):
         # The C++ side (YtDlpProvider::ParsePlaylistInfo) reads "duration" here, and read

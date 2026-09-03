@@ -521,6 +521,13 @@ export default function DownloaderPage() {
               {playlist.count} will be downloaded.
             </div>
           ) : null}
+          {playlist.unavailableCount > 0 ? (
+            <div style={styles.warnBanner} role="status">
+              {playlist.unavailableCount} video{playlist.unavailableCount === 1 ? " is" : "s are"}{" "}
+              unavailable (deleted or private) and {playlist.unavailableCount === 1 ? "was" : "were"}{" "}
+              skipped.
+            </div>
+          ) : null}
 
           <details style={styles.formatsDisclosure}>
             <summary>Show the {playlist.count} videos</summary>

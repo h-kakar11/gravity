@@ -91,6 +91,11 @@ struct PlaylistInfo {
     // True when the playlist had more entries than the enumeration cap and the tail was
     // dropped -- the UI says so rather than silently downloading a prefix.
     bool truncated = false;
+    // How many raw entries yt-dlp reported unavailable (deleted/private/no resolvable URL)
+    // and were dropped before `entries` was built. Distinct from `truncated`: this is why
+    // `entries.size()` can be less than the raw playlist length even when the cap was never
+    // hit, and the UI needs to say so or a dropped entry looks like a miscount.
+    int unavailableCount = 0;
     std::vector<PlaylistEntry> entries;
 
     nlohmann::json ToJson() const;

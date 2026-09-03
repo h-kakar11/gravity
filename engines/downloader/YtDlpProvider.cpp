@@ -82,6 +82,7 @@ downloads::PlaylistInfo ParsePlaylistInfo(const nlohmann::json& data) {
     info.uploader = OptionalString(data, "uploader");
     info.webpageUrl = OptionalString(data, "webpageUrl");
     info.truncated = data.value("truncated", false);
+    info.unavailableCount = data.value("unavailableCount", 0);
 
     const auto entries = data.find("entries");
     if (entries == data.end() || !entries->is_array()) {

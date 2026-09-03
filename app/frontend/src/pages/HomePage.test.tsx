@@ -82,6 +82,7 @@ describe("HomePage playlist flow", () => {
         uploader: "Some Channel",
         count: 3,
         truncated: false,
+        unavailableCount: 0,
         entries: [
           { index: 1, url: "https://example.com/watch?v=a", title: "First", durationSeconds: 61 },
           { index: 2, url: "https://example.com/watch?v=b", title: "Second" },
