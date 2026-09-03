@@ -456,7 +456,11 @@ void JobManager::WatchdogLoop() {
                     watchdogCancelledAt_.erase(id);  // not running: nothing outstanding
                     continue;
                 }
-                if (*runningFor < watchdogPolicy_.maxJobDuration) continue;
+                const auto threshold = (job->Type() == JobType::Download &&
+                                         watchdogPolicy_.downloadMaxJobDuration.has_value())
+                                            ? *watchdogPolicy_.downloadMaxJobDuration
+                                            : watchdogPolicy_.maxJobDuration;
+                if (*runningFor < threshold) continue;
 
                 const auto cancelled = watchdogCancelledAt_.find(id);
                 if (cancelled == watchdogCancelledAt_.end()) {
@@ -471,12 +475,15 @@ void JobManager::WatchdogLoop() {
 
         // Outside the lock: RequestCancel fires state-changed callbacks that re-enter here.
         for (Job* job : overdue) {
-            logging::Log::Warning("JobManager",
-                                   "Job " + job->Id() + " has been running past the " +
-                                       std::to_string(std::chrono::duration_cast<std::chrono::hours>(
-                                                          watchdogPolicy_.maxJobDuration)
-                                                          .count()) +
-                                       "h limit; cancelling it.");
+            const auto threshold = (job->Type() == JobType::Download &&
+                                     watchdogPolicy_.downloadMaxJobDuration.has_value())
+                                        ? *watchdogPolicy_.downloadMaxJobDuration
+                                        : watchdogPolicy_.maxJobDuration;
+            logging::Log::Warning(
+                "JobManager", "Job " + job->Id() + " has been running past the " +
+                                   std::to_string(std::chrono::duration_cast<std::chrono::minutes>(threshold)
+                                                      .count()) +
+                                   "m limit; cancelling it.");
             job->RequestCancel();
         }
         for (const JobId& id : unresponsive) {

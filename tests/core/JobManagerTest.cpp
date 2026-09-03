@@ -586,7 +586,7 @@ namespace {
 // is supposed to be able to stop.
 class RunsUntilCancelledJob final : public mediatool::jobs::Job {
 public:
-    RunsUntilCancelledJob() : Job(JobType::Test) {}
+    explicit RunsUntilCancelledJob(JobType type = JobType::Test) : Job(type) {}
     void Execute() override {
         while (!IsCancellationRequested()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -619,6 +619,45 @@ TEST(JobManagerWatchdog, AJobThatRunsPastItsLimitIsCancelled) {
     JobManager manager(1, NoRetryPolicy(), ImpatientWatchdog());
     const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>());
 
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+TEST(JobManagerWatchdog, ADownloadJobIsCancelledByItsOwnShorterLimitEvenWhenMaxJobDurationIsLong) {
+    // A stuck download blocks every entry behind it in a playlist's runAfter chain
+    // (docs/decisions.md, "Playlist URLs"), so it must not have to wait out the generic
+    // 12h backstop -- downloadMaxJobDuration is the shorter leash that applies instead.
+    mediatool::jobs::JobWatchdogPolicy policy;
+    policy.maxJobDuration = std::chrono::hours(12);
+    policy.downloadMaxJobDuration = std::chrono::milliseconds(50);
+    policy.cancellationGrace = std::chrono::milliseconds(50);
+    policy.checkInterval = std::chrono::milliseconds(10);
+
+    JobManager manager(1, NoRetryPolicy(), policy);
+    const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>(JobType::Download));
+
+    EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
+                            [](JobState s) { return s == JobState::Cancelled; }),
+               JobState::Cancelled);
+}
+
+TEST(JobManagerWatchdog, ANonDownloadJobIgnoresDownloadMaxJobDurationAndUsesTheGeneralLimit) {
+    // downloadMaxJobDuration must only shorten the leash for Download jobs -- a Conversion
+    // or Compression job (an "all-night transcode") still gets the full maxJobDuration.
+    mediatool::jobs::JobWatchdogPolicy policy;
+    policy.maxJobDuration = std::chrono::hours(12);
+    policy.downloadMaxJobDuration = std::chrono::milliseconds(50);
+    policy.checkInterval = std::chrono::milliseconds(10);
+
+    JobManager manager(1, NoRetryPolicy(), policy);
+    const auto id = manager.SubmitJob(std::make_unique<RunsUntilCancelledJob>(JobType::Compression));
+
+    // Long enough that the 50ms download limit would have fired if it applied here.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(manager.GetJob(id).state, JobState::Running);
+
+    manager.CancelJob(id);
     EXPECT_EQ(WaitForState(manager, id, std::chrono::seconds(10),
                             [](JobState s) { return s == JobState::Cancelled; }),
                JobState::Cancelled);

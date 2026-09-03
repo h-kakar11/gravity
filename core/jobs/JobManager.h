@@ -48,6 +48,20 @@ struct JobWatchdogPolicy {
     // Zero disables the watchdog entirely, which is what a test that wants a job to run
     // as long as it likes should pass.
     std::chrono::steady_clock::duration maxJobDuration = std::chrono::hours(12);
+    // Download jobs get a much shorter leash than the 12h default. A playlist fans out
+    // into a strict runAfter chain (docs/decisions.md, "Playlist URLs") -- entry N+1 only
+    // becomes eligible once entry N reaches a terminal state -- so a single wedged
+    // download (a network read that never returns, a yt-dlp subprocess that hangs instead
+    // of erroring) parks every remaining entry behind it for as long as the watchdog takes
+    // to notice. At 12h that reads to a user as "the playlist is broken: the queue is full
+    // and nothing is downloading," when what actually happened is one stuck entry. This
+    // does mean a single legitimately slow download (a large file on a slow line) can hit
+    // this sooner than it would have under the 12h default; that trade favors playlists
+    // recovering promptly over tolerating an outlier single download, which is the more
+    // common real-world shape of "download got stuck." std::nullopt keeps `maxJobDuration`
+    // as the threshold for every job type, which is what pre-existing callers/tests get.
+    std::optional<std::chrono::steady_clock::duration> downloadMaxJobDuration =
+        std::chrono::minutes(20);
     // After cancellation is requested, how long a job gets to notice and stop before
     // the manager gives up on it and says so. There is deliberately nothing stronger
     // to escalate to -- see the note on the watchdog in JobManager.cpp.

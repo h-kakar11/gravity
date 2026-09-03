@@ -807,6 +807,17 @@ So after the grace period the watchdog logs the job as unresponsive and leaves i
 alternative — marking it `FAILED` while its worker thread is still running — would report a
 worker slot as free when it is not, which is a worse failure than the one being reported.
 
+**Download jobs get a shorter leash than the 12h default** (`JobWatchdogPolicy::
+downloadMaxJobDuration`, 20 minutes). A playlist download is a strict `runAfter` chain (see
+"Playlist URLs" above) — entry N+1 only becomes eligible once entry N reaches a terminal
+state — so one wedged entry (a network read that never returns, a yt-dlp subprocess that
+hangs rather than erroring) parks every remaining entry behind it until the watchdog acts.
+At 12h that reads to a user as "the playlist is broken, the queue is full and nothing
+downloads," not "one entry is stuck." The 20-minute figure trades tolerance for an
+outlier legitimately-slow single download (large file, slow line) for a playlist recovering
+promptly, which is judged the more common real shape of "a download got stuck." Every other
+job type — including an all-night transcode — still gets the full `maxJobDuration`.
+
 The watchdog sleeps on the same condition variable the workers use, so `Shutdown()` wakes it
 immediately rather than waiting out its 30-second interval, and it measures the **current
 attempt** (`Job::RunningFor()`, on `steady_clock`) rather than the job's lifetime — a job on
