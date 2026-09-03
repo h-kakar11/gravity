@@ -132,6 +132,7 @@ export default function QueuePage() {
   const { jobs, connectionError, cancelJob, pauseJob, resumeJob, retryJob } = useJobs();
   const [history, setHistory] = useState<JobSnapshot[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [stoppingAll, setStoppingAll] = useState(false);
 
   const refreshHistory = () => {
     coreClient
@@ -154,12 +155,36 @@ export default function QueuePage() {
     .filter((job) => !TERMINAL_STATES.has(job.state))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
+  const stopAll = async () => {
+    setStoppingAll(true);
+    try {
+      // Each cancel is independent: one job that's already terminal or otherwise
+      // rejects the cancel must not stop the rest from being stopped too -- this is the
+      // recovery path for exactly that kind of stuck state (e.g. a stalled playlist
+      // chain), so it needs to be as robust as possible.
+      await Promise.allSettled(activeJobs.map((job) => cancelJob(job.id)));
+    } finally {
+      setStoppingAll(false);
+    }
+  };
+
   return (
     <div className={styles.wrap}>
       {connectionError && <div className={styles.errorText}>{connectionError}</div>}
 
       <section>
-        <h2 className={styles.sectionTitle}>Active ({activeJobs.length})</h2>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.sectionTitle}>Active ({activeJobs.length})</h2>
+          {activeJobs.length > 0 && (
+            <button
+              className={styles.stopAllButton}
+              onClick={() => void stopAll()}
+              disabled={stoppingAll}
+            >
+              {stoppingAll ? "Stopping..." : "Stop all"}
+            </button>
+          )}
+        </div>
         {activeJobs.length === 0 ? (
           <div className={styles.emptyState}>Nothing running right now.</div>
         ) : (

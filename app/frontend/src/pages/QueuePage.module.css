@@ -16,6 +16,42 @@
   margin: 0 0 12px;
 }
 
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.sectionHeader .sectionTitle {
+  margin-bottom: 0;
+}
+
+.stopAllButton {
+  background: var(--color-surface);
+  border: 1px solid var(--color-surface-border);
+  color: var(--color-error);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.stopAllButton:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  border-color: var(--color-surface-border-hover);
+}
+
+.stopAllButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .list {
   display: flex;
   flex-direction: column;
