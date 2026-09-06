@@ -97,7 +97,7 @@ verified without hitting a real URL.
 | `retryJob` | `{jobId: string}` | `{}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` (fails with `E_PLAYLIST_NOT_SUPPORTED` when the URL is a playlist — the frontend treats that as "call `inspectPlaylistUrl` instead", see `docs/decisions.md`) |
-| `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video) |
+| `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video, and with `E_PLAYLIST_IS_MIX` when it is a YouTube Mix — an endless auto-generated radio with no fixed entry list) |
 | `suggestPlaylistFolder` | `{outputDirectory: string}` | `{name: string}` — the lowest unused `"playlist #n"` in that directory. A suggestion only: nothing is reserved, and the user is expected to replace it with the real playlist name |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[], deferredCapabilities: {capability: string, reason: string}[]}` |
 | `getDownloaderInfo` | `{}` | `{downloaderInfo: DownloaderInfo}` |

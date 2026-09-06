@@ -31,6 +31,7 @@ import socket
 import sys
 import traceback
 import urllib.error
+import urllib.parse
 
 try:
     import yt_dlp
@@ -333,6 +334,94 @@ def build_playlist_payload(info: dict, url: str) -> dict:
     }
 
 
+# --- YouTube "list=" ids: which of them name a real list, and which only look like one ---
+#
+# A YouTube `list=` id encodes what kind of list it is, and one common kind is not a fixed
+# list at all: `RD...` is an auto-generated *mix* (YouTube's own UI calls it a radio) --
+# an endless stream synthesized around a seed video, which yt-dlp will happily page through
+# continuation after continuation. Enumerating one does not converge on "the songs in the
+# playlist"; it converges on `playlistend`. That is the whole bug: a user pastes what
+# they think is their 40-song playlist and the app reports hundreds of videos, because the
+# link they copied while the music was playing carries a mix id rather than the playlist's.
+#
+# Measured against yt-dlp 2026.8.19 with this script's own probe options:
+#   list=PLbpi6...      real playlist         ->  19 entries, enumeration terminates
+#   list=RDCLAK5uy_...  curated (see below)   ->  51 entries, enumeration terminates
+#   list=RDdQw4w9WgXcQ  mix seeded by a video -> 349-500 entries, capped, entries repeat
+#   list=RDAMVMgJYj...  YouTube Music radio   -> 500 entries (379 unique), capped
+_YOUTUBE_HOSTS = frozenset({
+    "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+    "youtu.be", "www.youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com",
+})
+
+# The exception to "RD means mix": YouTube Music's *curated* playlists carry RD-prefixed ids
+# and are ordinary finite lists. Rejecting those would break a legitimate case, so the check
+# below is a prefix test with this hole in it rather than a bare `startswith("RD")`.
+_CURATED_LIST_ID_PREFIXES = ("RDCLAK",)
+
+# The other exception, and a more useful one: `RDAMPL<playlist id>` is the radio seeded from
+# a real playlist -- pressing play on your own playlist in YouTube Music produces exactly
+# this. The id of the list the user actually meant is embedded in the mix id, so it is
+# recovered rather than rejected. (Left alone, yt-dlp resolves such a URL to the single
+# seed video and `inspectPlaylist` fails with the flatly wrong "this is a single video".)
+_PLAYLIST_SEEDED_MIX_PREFIX = "RDAMPL"
+
+
+def _youtube_list_id(url: str):
+    """The `list=` id of a YouTube URL, or None if the URL is not YouTube or carries none.
+
+    Scoped to YouTube hosts on purpose: "an id starting with RD" is a fact about YouTube's
+    URL scheme, not about playlist ids in general, and must not be applied to the other
+    sites yt-dlp supports.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    if (parsed.hostname or "").lower() not in _YOUTUBE_HOSTS:
+        return None
+    for key, value in urllib.parse.parse_qsl(parsed.query):
+        if key == "list" and value:
+            return value
+    return None
+
+
+def normalize_playlist_url(url: str) -> str:
+    """Rewrites a playlist-seeded mix URL to the playlist it was seeded from.
+
+    Everything else is returned unchanged -- this resolves one specific, very common
+    mis-copied link shape, it is not a general URL cleaner.
+    """
+    list_id = _youtube_list_id(url)
+    if not list_id or not list_id.startswith(_PLAYLIST_SEEDED_MIX_PREFIX):
+        return url
+    seed = list_id[len(_PLAYLIST_SEEDED_MIX_PREFIX):]
+    if not seed:
+        return url
+    parsed = urllib.parse.urlsplit(url.strip())
+    # Rebuilt as a bare playlist URL rather than patched in place: the original also carries
+    # `v=`, `index=` and `start_radio=`, and every one of them pulls the extraction back
+    # towards the single seed video.
+    return urllib.parse.urlunsplit((
+        parsed.scheme or "https", parsed.netloc, "/playlist",
+        urllib.parse.urlencode([("list", seed)]), ""))
+
+
+def auto_generated_mix_id(url: str):
+    """The mix/radio id when `url` names one of YouTube's endless auto-generated streams.
+
+    Returns None for real playlists (including the curated RD-prefixed ones) and for every
+    non-YouTube URL. Call `normalize_playlist_url` first: a playlist-seeded mix is a
+    recoverable playlist, not a mix, and normalizing turns it into the former.
+    """
+    list_id = _youtube_list_id(url)
+    if not list_id or not list_id.startswith("RD"):
+        return None
+    if list_id.startswith(_CURATED_LIST_ID_PREFIXES):
+        return None
+    return list_id
+
+
 # yt-dlp releases are dated (e.g. "2026.8.19"), so its own version string says how stale
 # the extractors are. Two years is generous: extractors for the big sites break on a scale
 # of weeks, so a build this old is almost certainly failing on real URLs and the user should
@@ -463,16 +552,21 @@ _SINGLE_VIDEO_PROBE_OPTS = {
     "socket_timeout": _SOCKET_TIMEOUT_SECONDS,
 }
 
-# The playlist counterpart of the options above, and the two differences are the whole point:
-#   noplaylist: False -- a "watch?v=X&list=Y" URL must resolve to the LIST here, which is
-#                        exactly what the single-video probe suppresses. The frontend only
-#                        sends such a URL to this command after the user explicitly chose
-#                        "the whole playlist" over "just this video".
-#   extract_flat: True -- enumerate every entry shallowly (id/title/url, no per-video
-#                        extractor round-trip). "in_playlist" would stop at the first level;
-#                        for a bare playlist URL that is the level we actually want walked.
-# Entries are cheap this way: one request for the playlist page rather than one per video,
-# which is what keeps enumerating a 200-video playlist a sub-second operation.
+# The playlist counterpart of the options above, and the one intended difference is
+# `noplaylist: False` -- a "watch?v=X&list=Y" URL must resolve to the LIST here, which is
+# exactly what the single-video probe suppresses. The frontend only sends such a URL to this
+# command after the user explicitly chose "the whole playlist" over "just this video".
+#
+# `extract_flat` stays "in_playlist" (same as the single-video probe), and the distinction
+# matters more than it reads. Both values keep entries shallow -- one request for the
+# playlist page rather than one per video, which is what makes enumerating a 200-video
+# playlist a sub-second operation. But `extract_flat: True` also flattens the *root*: for a
+# combo URL, YouTube's extractor hands back an unresolved `{"_type": "url"}` pointing at the
+# playlist, and True returns that as-is instead of following it. The result had no entries
+# and no "playlist" _type, so build_playlist_payload() rejected the user's own playlist link
+# with "This URL is a single video, not a playlist." Verified against yt-dlp 2026.8.19:
+# watch?v=X&list=PL... yields 0 entries with True and all 19 with "in_playlist"; a bare
+# playlist URL yields the same 19 either way.
 _PLAYLIST_PROBE_OPTS = {
     "quiet": True,
     "no_warnings": True,
@@ -480,7 +574,7 @@ _PLAYLIST_PROBE_OPTS = {
     "logger": _StderrLogger(),
     "skip_download": True,
     "noplaylist": False,
-    "extract_flat": True,
+    "extract_flat": "in_playlist",
     "playlistend": _MAX_PLAYLIST_ENTRIES,
     "socket_timeout": _SOCKET_TIMEOUT_SECONDS,
 }
@@ -502,10 +596,20 @@ def run_inspect(url: str) -> int:
 
 
 def run_inspect_playlist(url: str) -> int:
-    if yt_dlp is None:
-        emit_error(RuntimeError("yt_dlp is not installed in this environment"))
-        return 1
     try:
+        # Both checks are pure URL inspection, so they run before the probe: enumerating a
+        # mix is the slowest thing this command can do and the most useless.
+        url = normalize_playlist_url(url)
+        mix_id = auto_generated_mix_id(url)
+        if mix_id is not None:
+            raise DownloaderError(
+                "E_PLAYLIST_IS_MIX", "UNSUPPORTED_FORMAT",
+                "This link is a YouTube Mix -- an endless auto-generated radio, not a "
+                "fixed playlist, so there is no \"all of it\" to download. Open the "
+                "playlist itself on YouTube and paste that link, or download just this "
+                "video.")
+        if yt_dlp is None:
+            raise RuntimeError("yt_dlp is not installed in this environment")
         with yt_dlp.YoutubeDL(dict(_PLAYLIST_PROBE_OPTS)) as probe:
             info = probe.extract_info(url, download=False)
         emit("playlist", build_playlist_payload(info, url))

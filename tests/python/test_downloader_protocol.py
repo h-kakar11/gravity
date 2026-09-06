@@ -251,6 +251,83 @@ class BuildMetadataPayloadTest(unittest.TestCase):
         self.assertEqual(ctx.exception.category, "UNSUPPORTED_FORMAT")
 
 
+class PlaylistUrlShapeTest(unittest.TestCase):
+    """The `list=` ids that only look like playlists.
+
+    A YouTube Mix ("radio") is an endless stream synthesized around a seed video, so
+    enumerating one does not stop at "the songs in the playlist" -- it stops at
+    _MAX_PLAYLIST_ENTRIES. That is how a 40-song playlist came to be reported as hundreds
+    of videos: the link was copied while the mix was playing, not from the playlist page.
+    The prefixes below were checked against live extractions (yt-dlp 2026.8.19); see the
+    table in downloader.py.
+    """
+
+    def test_a_video_seeded_mix_is_reported_as_a_mix(self):
+        self.assertEqual(
+            downloader.auto_generated_mix_id(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1"),
+            "RDdQw4w9WgXcQ")
+
+    def test_a_youtube_music_radio_is_reported_as_a_mix(self):
+        self.assertEqual(
+            downloader.auto_generated_mix_id(
+                "https://music.youtube.com/watch?v=gJYjbDnyx-o&list=RDAMVMgJYjbDnyx-o"),
+            "RDAMVMgJYjbDnyx-o")
+
+    def test_an_ordinary_playlist_is_not_a_mix(self):
+        self.assertIsNone(downloader.auto_generated_mix_id(
+            "https://www.youtube.com/playlist?list=PLbpi6ZahtOH6Blw3RGYpWkSByi_T7Rygb"))
+
+    def test_a_curated_music_playlist_is_not_a_mix(self):
+        # RD-prefixed but a real, finite list (51 entries when checked) -- a bare
+        # startswith("RD") test would wrongly refuse every YouTube Music curated playlist.
+        self.assertIsNone(downloader.auto_generated_mix_id(
+            "https://music.youtube.com/playlist?list=RDCLAK5uy_kLWIr9gv1XLlPbaDS965-Db4TrBoUTxQ8"))
+
+    def test_a_non_youtube_list_id_starting_with_rd_is_not_a_mix(self):
+        # "RD means radio" is a fact about YouTube's URL scheme and nothing else.
+        self.assertIsNone(downloader.auto_generated_mix_id(
+            "https://example.com/playlist?list=RDsomething"))
+
+    def test_a_url_with_no_list_is_not_a_mix(self):
+        self.assertIsNone(downloader.auto_generated_mix_id(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
+
+    def test_a_playlist_seeded_mix_normalizes_back_to_its_playlist(self):
+        # Pressing play on your own playlist in YouTube Music yields RDAMPL<playlist id>.
+        # Left as-is yt-dlp resolves it to the seed video alone and the user is told their
+        # playlist link is "a single video"; rewritten, it enumerates the real playlist.
+        self.assertEqual(
+            downloader.normalize_playlist_url(
+                "https://music.youtube.com/watch?v=Vh4O04Bpovw&list=RDAMPLPL123&index=2"),
+            "https://music.youtube.com/playlist?list=PL123")
+
+    def test_a_normalized_playlist_seeded_mix_is_not_treated_as_a_mix(self):
+        normalized = downloader.normalize_playlist_url(
+            "https://music.youtube.com/watch?v=Vh4O04Bpovw&list=RDAMPLPL123")
+        self.assertIsNone(downloader.auto_generated_mix_id(normalized))
+
+    def test_normalize_leaves_every_other_url_alone(self):
+        for url in ("https://www.youtube.com/playlist?list=PL123",
+                    "https://www.youtube.com/watch?v=abc&list=RDabc",
+                    "https://example.com/playlist?list=RDAMPLx",
+                    "not a url at all"):
+            self.assertEqual(downloader.normalize_playlist_url(url), url)
+
+
+class InspectPlaylistMixRejectionTest(unittest.TestCase):
+    """A mix is refused before the probe, so this holds with or without yt_dlp installed."""
+
+    def test_mix_url_is_refused_with_its_own_code(self):
+        result, events = run_command_stdin(json.dumps({
+            "command": "inspectPlaylist",
+            "params": {"url": "https://www.youtube.com/watch?v=abc&list=RDabc"}}))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["data"]["code"], "E_PLAYLIST_IS_MIX")
+        self.assertEqual(events[-1]["data"]["category"], "UNSUPPORTED_FORMAT")
+
+
 class BuildPlaylistPayloadTest(unittest.TestCase):
     @staticmethod
     def _playlist(entries):

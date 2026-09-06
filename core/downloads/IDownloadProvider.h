@@ -145,8 +145,10 @@ public:
 
     // Blocking; enumerates a playlist URL's entries WITHOUT downloading or fully resolving
     // any of them. Throws errors::MediaToolException on failure -- including
-    // `E_NOT_A_PLAYLIST` when the URL turns out to be a single video, which is a normal
-    // outcome the caller is expected to handle rather than an internal error. Must poll
+    // `E_NOT_A_PLAYLIST` when the URL turns out to be a single video, and
+    // `E_PLAYLIST_IS_MIX` when it names one of YouTube's endless auto-generated radios
+    // (which has no fixed entry list to return -- see docs/decisions.md). Both are normal
+    // outcomes the caller is expected to handle rather than internal errors. Must poll
     // isCancelled() periodically and stop (throwing ErrorCategory::Cancelled) when it
     // returns true, same as Inspect().
     virtual PlaylistInfo InspectPlaylist(const std::string& url, CancelledCallback isCancelled) = 0;
