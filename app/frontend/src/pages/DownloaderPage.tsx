@@ -26,6 +26,15 @@ const ACTIVE_STATES: ReadonlySet<JobState> = new Set(["QUEUED", "STARTING", "RUN
 // on any site, unlike guessing from the URL's shape. See docs/decisions.md, "Playlist URLs".
 const PLAYLIST_NOT_SUPPORTED = "E_PLAYLIST_NOT_SUPPORTED";
 
+// Shown instead of the playlist fork when the pasted link's `list=` is one of YouTube's
+// auto-generated mixes. There is no fixed set of videos behind a mix, so "the whole
+// playlist" is not a choice that can be honoured -- the backend rejects it outright with
+// E_PLAYLIST_IS_MIX, and offering the button anyway is what used to send the user to a
+// 500-video enumeration of a list they thought held forty songs.
+const MIX_EXPLANATION =
+  "This link carries a YouTube Mix -- an endless auto-generated radio, not a fixed " +
+  "playlist. Only the video itself can be downloaded.";
+
 function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "?";
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -148,6 +157,8 @@ export default function DownloaderPage() {
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
   const canCancel = activeJob !== null && ACTIVE_STATES.has(activeJob.state);
   const canStartDownload = metadata !== null && outputDirectory.trim().length > 0 && !creating && !canCancel;
+  // Derived, never state: the banner's shape is a pure function of the URL that produced it.
+  const comboIsMix = comboChoiceUrl !== null && analyzePlaylistUrl(comboChoiceUrl).isMix;
 
   // Enumerates a playlist and pre-fills its destination folder. Shared by the bare-playlist
   // path (reached when `inspect` reports the URL is a list) and by the user answering
@@ -416,8 +427,12 @@ export default function DownloaderPage() {
             resolves, so choosing "just this video" needs no further waiting -- the metadata
             is already on screen. */}
         {comboChoiceUrl ? (
-          <div style={styles.choiceBanner} role="group" aria-label="This link is part of a playlist">
-            <div>This link is part of a playlist.</div>
+          <div
+            style={styles.choiceBanner}
+            role="group"
+            aria-label={comboIsMix ? "This link is a YouTube Mix" : "This link is part of a playlist"}
+          >
+            <div>{comboIsMix ? MIX_EXPLANATION : "This link is part of a playlist."}</div>
             <div style={styles.row}>
               <button
                 type="button"
@@ -428,16 +443,18 @@ export default function DownloaderPage() {
               >
                 Just this video
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const target = comboChoiceUrl;
-                  setComboChoiceUrl(null);
-                  void loadPlaylist(target);
-                }}
-              >
-                The whole playlist
-              </button>
+              {comboIsMix ? null : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = comboChoiceUrl;
+                    setComboChoiceUrl(null);
+                    void loadPlaylist(target);
+                  }}
+                >
+                  The whole playlist
+                </button>
+              )}
             </div>
           </div>
         ) : null}

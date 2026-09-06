@@ -14,10 +14,42 @@ export interface PlaylistUrlShape {
   // The URL also identifies one specific video -- the "shared from a playlist" case, where
   // downloading the whole list would almost certainly be the wrong guess.
   hasVideo: boolean;
+  // The `list=` names one of YouTube's auto-generated mixes (radios) rather than a real
+  // playlist: an endless stream synthesized around a seed video, which has no "all of it"
+  // to download. Offering "the whole playlist" for one of these is how a 40-song playlist
+  // came to be reported as hundreds of videos -- the enumeration only stops at the cap.
+  // Same caveat as the rest of this file: a hint, not the gate. The backend rejects a mix
+  // with E_PLAYLIST_IS_MIX regardless of what this says.
+  isMix: boolean;
 }
 
 // Path-based single-video forms that carry the id in the path rather than a `v=` param.
 const VIDEO_PATH_PREFIXES = ["/shorts/", "/embed/", "/live/", "/v/"];
+
+// Mirrors normalize_playlist_url / auto_generated_mix_id in python/downloader/downloader.py,
+// which is where the reasoning behind each prefix is written down. Kept scoped to YouTube
+// hosts for the same reason it is there: "an id starting with RD" is a fact about YouTube's
+// URL scheme, not about playlist ids generally.
+const YOUTUBE_HOSTS = new Set([
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+  "music.youtube.com",
+  "youtu.be",
+  "www.youtu.be",
+  "youtube-nocookie.com",
+  "www.youtube-nocookie.com",
+]);
+
+// RDCLAK... are YouTube Music's curated playlists -- RD-prefixed but genuinely finite.
+// RDAMPL<playlist id> is the radio seeded from a real playlist, which the backend rewrites
+// back to that playlist, so the whole-playlist choice stays meaningful for it.
+const NOT_A_MIX_PREFIXES = ["RDCLAK", "RDAMPL"];
+
+function isMixListId(listId: string): boolean {
+  if (!listId.startsWith("RD")) return false;
+  return !NOT_A_MIX_PREFIXES.some((prefix) => listId.startsWith(prefix));
+}
 
 export function analyzePlaylistUrl(raw: string): PlaylistUrlShape {
   let parsed: URL;
@@ -25,11 +57,11 @@ export function analyzePlaylistUrl(raw: string): PlaylistUrlShape {
     parsed = new URL(raw.trim());
   } catch {
     // Not a URL yet (the user is still typing, or pasted something else) -- no hint to give.
-    return { hasPlaylist: false, hasVideo: false };
+    return { hasPlaylist: false, hasVideo: false, isMix: false };
   }
 
-  const hasPlaylist = parsed.searchParams.has("list");
-  if (!hasPlaylist) return { hasPlaylist: false, hasVideo: false };
+  const listId = parsed.searchParams.get("list");
+  if (listId === null) return { hasPlaylist: false, hasVideo: false, isMix: false };
 
   // youtu.be/<id> puts the video id in the path with nothing to distinguish it from a
   // playlist path, so treat any non-empty path on that host as a video reference.
@@ -41,7 +73,9 @@ export function analyzePlaylistUrl(raw: string): PlaylistUrlShape {
       (prefix) => parsed.pathname.startsWith(prefix) && parsed.pathname.length > prefix.length,
     );
 
-  return { hasPlaylist, hasVideo };
+  const isMix = YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase()) && isMixListId(listId);
+
+  return { hasPlaylist: true, hasVideo, isMix };
 }
 
 // Strips the playlist reference from a combo URL, leaving the single video it points at.

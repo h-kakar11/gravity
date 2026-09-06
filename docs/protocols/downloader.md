@@ -54,9 +54,25 @@ entry's full metadata.
 
 Emits exactly one `playlist` event followed by one `completed` event, or one `error` event.
 Unlike `inspect`, this runs with `noplaylist: False` (so a `watch?v=X&list=Y` URL resolves to
-the *list*, which is what the caller asked for by using this command) and `extract_flat: True`
-(so entries cost one request for the playlist page rather than one per video). A single-video
-URL is an `error`: `E_NOT_A_PLAYLIST`.
+the *list*, which is what the caller asked for by using this command). `extract_flat` is
+`"in_playlist"`, the same as `inspect`: entries stay shallow, so they cost one request for
+the playlist page rather than one per video, while the *root* URL is still resolved. (It was
+`True` briefly, which also flattens the root — a combo URL then came back as an unresolved
+`{"_type": "url"}` with no entries and `inspectPlaylist` rejected the user's own playlist
+link as "a single video".) A genuinely single-video URL is an `error`: `E_NOT_A_PLAYLIST`.
+
+Two YouTube `list=` shapes are handled by URL before the probe runs, because yt-dlp cannot
+tell the caller anything useful about either one:
+
+- `list=RDAMPL<playlist id>` — the radio seeded from a real playlist, which is what pressing
+  play on your own playlist in YouTube Music produces. Rewritten to
+  `<host>/playlist?list=<playlist id>` and enumerated normally.
+- Any other `list=RD…` (except the finite curated `RDCLAK…` lists) — a YouTube *Mix*, an
+  endless auto-generated radio. There is no fixed set of entries to return, so enumeration
+  only ever stops at the cap; refused with `E_PLAYLIST_IS_MIX` instead.
+
+Both checks are scoped to YouTube hosts: "an id beginning with `RD`" describes YouTube's URL
+scheme, not playlist ids in general.
 
 Entries are capped at `_MAX_PLAYLIST_ENTRIES` (500) — the C++ core turns each entry into its
 own queued job, so an uncapped fan-out is a real resource problem, not a cosmetic one. When
@@ -213,6 +229,7 @@ so this is inherently a heuristic — unmatched failures fall back to
 | `E_PERMISSION_DENIED` | `PERMISSION_ERROR` | "permission denied" |
 | `E_PLAYLIST_NOT_SUPPORTED` | `UNSUPPORTED_FORMAT` | raised directly (not text-matched) when `inspect`/`download` receives a playlist URL. Not a dead end: the frontend reads this as "enumerate via `inspectPlaylist` instead" |
 | `E_NOT_A_PLAYLIST` | `UNSUPPORTED_FORMAT` | raised directly when `inspectPlaylist` receives a single-video URL |
+| `E_PLAYLIST_IS_MIX` | `UNSUPPORTED_FORMAT` | raised directly when `inspectPlaylist` receives a YouTube Mix/radio URL — an endless auto-generated stream with no fixed entry list |
 | `E_NETWORK` | `NETWORK_ERROR` | a real `socket`/`urllib` exception type, or Phase 1's original network-keyword list |
 | `E_DOWNLOAD_FAILED` | `UNKNOWN` | fallback — nothing else matched |
 
