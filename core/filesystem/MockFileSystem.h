@@ -20,6 +20,7 @@ namespace mediatool::filesystem {
 class MockFileSystem : public IFileSystem {
 public:
     bool Exists(const std::string& path) const override;
+    bool IsDirectory(const std::string& path) const override;
     FileInfo Inspect(const std::string& path) const override;
     void Copy(const std::string& from, const std::string& to) override;
     void Move(const std::string& from, const std::string& to) override;

@@ -129,7 +129,9 @@ TEST(SettingsTest, DefaultsHaveExpectedSentinelValues) {
     EXPECT_EQ(defaults.downloads.speedUnits, "MBps");
     EXPECT_TRUE(defaults.processing.hardwareAccelerationEnabled);
     EXPECT_EQ(defaults.processing.defaultCompressionQuality, "medium");
-    EXPECT_EQ(defaults.processing.concurrentJobs, 1);
+    // Not 1: batch convert submits a whole folder at once and a single-worker pool runs
+    // that strictly one at a time. See ProcessingSettings::concurrentJobs.
+    EXPECT_EQ(defaults.processing.concurrentJobs, 3);
     // Not user-configurable to true in Phase 1 -- no telemetry backend exists.
     EXPECT_FALSE(defaults.privacy.analyticsEnabled);
     EXPECT_FALSE(defaults.privacy.crashReportingEnabled);

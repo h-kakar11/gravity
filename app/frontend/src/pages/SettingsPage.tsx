@@ -356,7 +356,7 @@ export default function SettingsPage() {
         </Field>
         <Field
           label="Concurrent jobs"
-          hint="1-25. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
+          hint="1-25. How many downloads/conversions run at the same time — this is what stops a batch of files from crawling through one at a time. Raising it applies immediately; lowering it takes effect next launch. Hardware encoders often cap how many sessions actually run at once, regardless of this setting."
         >
           <input
             className={styles.numberInput}

@@ -851,3 +851,67 @@ It failed loudly and immediately -- three retry tests and two IPC integration te
 from passing to timing out -- which is the argument for having written them. `watchdogCv_`
 uses the same `mutex_` (it reads `jobs_`) but is signalled only by `Shutdown()`, so the
 two wakeup paths cannot steal from each other.
+
+### Batch convert: one screen, N jobs, and a folder listing in the core
+
+- **Context:** the Convert/Compress screen took exactly one file. Its picker was opened
+  with `multiple: false`, a drag-and-drop of several files kept `paths[0]`, and the submit
+  button was disabled while a job was in flight (`!jobInFlight`) — so converting a folder
+  meant driving the whole form once per file and waiting each time. There was no way to
+  ask for a batch at all, and the pool that would have run one was sized 1.
+- **Options considered for turning a folder into a file list:** (a) enumerate it in Rust
+  with `std::fs` and hand the paths to the frontend; (b) enumerate in Rust and then call
+  `inspectFile` per entry to learn each file's category; (c) a new core command that lists
+  and categorizes in one round trip.
+- **Choice:** (c), `listFolderFiles`.
+- **Reason:** the frontend needs each file's *category* (a batch of video and stills needs
+  two different output formats, not one), and the extension→category table lives in
+  `core/filesystem/LocalFileSystem.cpp`. (a) would mean a second copy of that table in
+  TypeScript, drifting from the first. (b) keeps one table but pays an ffprobe run per
+  file against a four-thread executor — a folder of 200 videos would spend minutes
+  producing a *file list* and answer `E_CORE_BUSY` for much of it. `IFileSystem::Inspect`
+  already does the cheap half (extension, size, no probe), so the command is a directory
+  listing plus a map lookup per entry, and runs inline on the request loop.
+- **Consequences:** non-recursive, matching Watch Folders — "convert this folder" means
+  the files in it, and a recursive walk of a folder picked by accident ends in a few
+  thousand queued jobs. Capped at 500 with a `truncated` flag rather than silently
+  shortened. Needed `IFileSystem::IsDirectory`, because an extension cannot tell a folder
+  from a file (a directory may be named `clips.mp4`).
+
+### Output format is per category, not per batch
+
+- **Context:** a batch assembled from a folder is routinely mixed — video, audio and
+  stills in one selection.
+- **Options considered:** (a) one output format for the whole batch; (b) refuse mixed
+  batches; (c) one format row per category present.
+- **Choice:** (c).
+- **Reason:** (a) means "convert everything to mp4" is offered for a PNG, which is not a
+  conversion, just a job that fails. (b) makes the user sort their own folder by hand,
+  which is the chore this feature exists to remove. (c) collapses to exactly the old
+  single-dropdown form when the batch is all one category, which is the common case.
+- **Consequences:** presets are one set of options, so applying one to a mixed batch has
+  to nominate a target; it goes to whichever category actually offers that format (an
+  "MP3 320" preset changes the audio row and leaves the video row alone), falling back to
+  the first category present.
+
+### `concurrentJobs` defaults to 3, and applies without a restart
+
+- **Context:** the worker pool was sized once, in `JobManager`'s constructor, from a
+  setting that defaulted to 1. Submitting a batch therefore ran it strictly one file at a
+  time, and a user who found the Settings field and raised it saw no change until they
+  quit and relaunched — with nothing in the UI saying so.
+- **Options considered:** (a) raise the default and leave sizing at startup; (b) make the
+  pool fully resizable, up and down; (c) grow-only resize, wired to `updateSettings`.
+- **Choice:** (c), plus a default of 3.
+- **Reason:** (a) does nothing for anyone who already has a `settings.json` — the value is
+  read with `at()`, so an existing file pins 1 forever. (b) is not the mirror image of
+  growth: a worker can only leave the pool between jobs, so a lowered limit takes effect at
+  an unpredictable later moment and the exited threads still need reaping out of
+  `workers_`. The case that matters is *raising* it to get a stalled-looking queue moving;
+  lowering it can wait for the next launch, where it costs only some extra parallelism in
+  the meantime. 3 rather than a core-count derivation because ffmpeg already threads a
+  single encode across the CPU — the win from running several at once is filling the gaps
+  (probe, mux, disk I/O) around that, and past a handful they mostly contend.
+- **Consequences:** `SetMaxConcurrentJobs` is documented as grow-only and refuses to add
+  workers once `stopping_` is set, so it can never hand a teardown a thread it has stopped
+  waiting for. See `docs/concurrency-model.md`.

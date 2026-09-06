@@ -36,11 +36,11 @@ function Screens() {
   // this component -- and therefore its listener -- is already mounted by then).
   useEffect(() => {
     coreClient.getStartupFileAction().then((action) => {
-      if (action) navigate({ kind: "convert", prefillFilePath: action.path, mode: action.mode });
+      if (action) navigate({ kind: "convert", prefillFilePaths: [action.path], mode: action.mode });
     }).catch(() => {});
 
     return coreClient.subscribeToCliFileOpened((action) => {
-      navigate({ kind: "convert", prefillFilePath: action.path, mode: action.mode });
+      navigate({ kind: "convert", prefillFilePaths: [action.path], mode: action.mode });
     });
   }, [navigate]);
 

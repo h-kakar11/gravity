@@ -68,9 +68,10 @@ Job (core/jobs/Job.h)
 whether a state transition is valid — see `docs/ipc-contract.md` for the transition
 table. `JobManager` (`core/jobs/JobManager.h`) owns job lifecycle (create, queue, start,
 track, pause/resume where supported, cancel, retry, remove) against a configurable
-`maxConcurrentJobs`, deliberately not hardcoded to 1 even though Phase 1 runs with a
-concurrency of 1 — batch processing and concurrent downloads in later phases raise this
-without any structural change (spec section 6).
+`maxConcurrentJobs`, deliberately not hardcoded to 1 — batch processing and concurrent
+downloads raise this without any structural change (spec section 6). That is now cashed in:
+`processing.concurrentJobs` defaults to 3, and `updateSettings` grows the live pool rather
+than waiting for the next launch (see `docs/concurrency-model.md`).
 
 ## The event system
 

@@ -12,7 +12,7 @@ function NavigateButtons() {
   return (
     <>
       <button onClick={() => navigate({ kind: "queue" })}>go queue</button>
-      <button onClick={() => navigate({ kind: "convert", mode: "compress", prefillFilePath: "C:\\a.mov" })}>
+      <button onClick={() => navigate({ kind: "convert", mode: "compress", prefillFilePaths: ["C:\\a.mov"] })}>
         go convert
       </button>
     </>
@@ -57,7 +57,7 @@ describe("NavigationContext", () => {
     );
 
     fireEvent.click(screen.getByText("go convert"));
-    expect(capturedScreen).toEqual({ kind: "convert", mode: "compress", prefillFilePath: "C:\\a.mov" });
+    expect(capturedScreen).toEqual({ kind: "convert", mode: "compress", prefillFilePaths: ["C:\\a.mov"] });
   });
 
   it("useNavigation() throws when used outside a NavigationProvider", () => {

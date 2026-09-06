@@ -219,6 +219,66 @@ TEST(JobManager, AllJobsRunConcurrentlyWhenMaxConcurrentJobsAllowsIt) {
     }
 }
 
+// --- runtime pool growth (batch convert) -------------------------------------------------
+// Raising processing.concurrentJobs used to only take effect on the next launch, because
+// the pool was sized once in JobManager's constructor. A user whose batch of conversions
+// was crawling through one at a time had no way to tell that from "the setting does
+// nothing", so updateSettings now applies it to the live pool.
+
+TEST(JobManager, GrowingThePoolStartsAlreadyQueuedJobsWithoutANewSubmission) {
+    JobManager manager(1);
+
+    // Two jobs, one worker: the second is parked behind the first with nothing else
+    // arriving that would notify the pool.
+    const auto id1 = manager.SubmitJob(std::make_unique<TestJob>());
+    const auto id2 = manager.SubmitJob(std::make_unique<TestJob>());
+
+    ASSERT_EQ(WaitForState(manager, id1, std::chrono::seconds(2),
+                           [](JobState s) { return s == JobState::Running; }),
+              JobState::Running);
+    ASSERT_EQ(manager.GetJob(id2).state, JobState::Queued);
+
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(2), 2u);
+
+    // The new worker must wake on the queue that already exists -- if growth only took
+    // effect on the next SubmitJob, this would sit Queued until job 1 finished ~1s later.
+    EXPECT_EQ(WaitForState(manager, id2, std::chrono::milliseconds(500),
+                           [](JobState s) { return s == JobState::Running; }),
+              JobState::Running)
+        << "the worker added by SetMaxConcurrentJobs never picked up the waiting job";
+
+    EXPECT_EQ(WaitForState(manager, id1, std::chrono::seconds(5), IsTerminal), JobState::Completed);
+    EXPECT_EQ(WaitForState(manager, id2, std::chrono::seconds(5), IsTerminal), JobState::Completed);
+}
+
+TEST(JobManager, SetMaxConcurrentJobsGrowsOnlyAndClampsToTheSupportedRange) {
+    JobManager manager(4);
+    ASSERT_EQ(manager.MaxConcurrentJobs(), 4u);
+
+    // Lowering is not a shrink: it is persisted by the caller and applies on next launch.
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(1), 4u);
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(4), 4u) << "equal is a no-op, not a restart";
+    EXPECT_EQ(manager.MaxConcurrentJobs(), 4u);
+
+    // 0 means "one worker", which the pool already exceeds, so it is also a no-op.
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(0), 4u);
+
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(6), 6u);
+
+    // Never past the ceiling settings validation enforces, whatever a caller asks for.
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(100000), mediatool::jobs::kMaxWorkerPoolSize);
+}
+
+TEST(JobManager, SetMaxConcurrentJobsIsANoOpAfterShutdown) {
+    JobManager manager(1);
+    manager.Shutdown();
+
+    // Adding a worker here would hand the completed teardown a thread it has already
+    // stopped waiting for.
+    EXPECT_EQ(manager.SetMaxConcurrentJobs(4), 1u);
+    EXPECT_EQ(manager.MaxConcurrentJobs(), 1u);
+}
+
 // --- dependencies, end to end through the worker pool ------------------------------------
 // SchedulerCoreTest covers the policy exhaustively without threads; these prove JobManager
 // actually drives that policy -- that a dependent is not started early, that a failed

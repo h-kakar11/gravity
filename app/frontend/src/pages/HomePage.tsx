@@ -325,17 +325,24 @@ export default function HomePage() {
     if (activeJob?.state === "COMPLETED") openFolderButtonRef.current?.focus();
   }, [activeJob?.state]);
 
+  // Every dropped path, not just the first: dropping a selection of files onto this box is
+  // the most natural way to ask for a batch conversion, and taking paths[0] silently threw
+  // the rest away.
   const handleConvertDrop = (paths: string[]) => {
-    navigate({ kind: "convert", prefillFilePath: paths[0], mode: "convert" });
+    if (paths.length === 0) return;
+    navigate({ kind: "convert", prefillFilePaths: paths, mode: "convert" });
   };
 
   const handleBrowseConvertFile = useCallback(async () => {
     const selected = await openFilePicker({
-      multiple: false,
-      title: "Choose a file to convert or compress",
+      multiple: true,
+      title: "Choose files to convert or compress",
     });
-    if (typeof selected === "string") {
-      navigate({ kind: "convert", prefillFilePath: selected, mode: "convert" });
+    // The plugin's return type is string | string[] | null across its option shapes;
+    // normalizing here rather than assuming the array keeps a single-file selection working.
+    const paths = Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
+    if (paths.length > 0) {
+      navigate({ kind: "convert", prefillFilePaths: paths, mode: "convert" });
     }
   }, [navigate]);
 

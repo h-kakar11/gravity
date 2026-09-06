@@ -70,6 +70,12 @@ struct JobWatchdogPolicy {
     std::chrono::steady_clock::duration checkInterval = std::chrono::seconds(30);
 };
 
+// Hard ceiling on the worker pool, independent of what any caller or settings file asks
+// for. Matches the upper bound settings validation already enforces on
+// processing.concurrentJobs; repeated here because JobManager is callable without going
+// through Settings at all.
+inline constexpr std::size_t kMaxWorkerPoolSize = 25;
+
 class JobManager {
 public:
     using JobStateChangedCallback = std::function<void(const JobId&, JobState)>;
@@ -132,7 +138,27 @@ public:
 
     // The number of worker threads that actually exist, which is what bounds concurrency.
     // May be lower than the constructor's argument (see above).
-    std::size_t MaxConcurrentJobs() const { return maxConcurrentJobs_; }
+    std::size_t MaxConcurrentJobs() const;
+
+    // Raises the pool to `target` worker threads by starting the difference, and returns
+    // the size the pool actually reached. GROW-ONLY on purpose: a `target` at or below the
+    // current size is a no-op that returns the current size, not a shrink.
+    //
+    // Growing is a matter of starting more threads that run the same WorkerLoop, and a new
+    // worker is indistinguishable from one the constructor started. Shrinking is not the
+    // mirror image of that -- a worker can only leave the pool between jobs, so a lowered
+    // limit would take effect at some unpredictable later moment, and the threads that
+    // exited would still need reaping out of `workers_`. Since the case that matters is a
+    // user raising the limit to get their queue moving (a batch of conversions that would
+    // otherwise run strictly one at a time), and the case that does not is lowering it --
+    // where waiting for the next launch costs nothing but a little extra parallelism --
+    // grow-only buys the useful half for none of the complexity. Lowering the setting is
+    // still persisted and still applies on the next launch.
+    //
+    // Same failure posture as the constructor: if the OS refuses a thread, the pool keeps
+    // the workers it has and the smaller size is returned rather than throwing. Never
+    // grows past `kMaxWorkerPoolSize`, and does nothing once Shutdown() has begun.
+    std::size_t SetMaxConcurrentJobs(std::size_t target);
 
     // Registers `job` and enqueues it for execution on the worker pool. Ownership of
     // `job` passes to the JobManager. Returns its JobId (job->Id()).
@@ -212,7 +238,13 @@ private:
     [[noreturn]] void ThrowNotFound(const JobId& id) const;
     [[noreturn]] void ThrowInvalidOperation(const JobId& id, const std::string& reason) const;
 
-    // Not const: fixed up in the constructor body once the pool's real size is known.
+    // Starts `count` additional workers, appending them to workers_, and returns how many
+    // it managed. Caller must hold mutex_ (workers_ is otherwise only touched by the
+    // constructor, which has no readers yet, and by Shutdown()).
+    std::size_t StartWorkersLocked(std::size_t count);
+
+    // Guarded by mutex_ since SetMaxConcurrentJobs can change it: the pool that actually
+    // exists, fixed up in the constructor body once its real size is known.
     std::size_t maxConcurrentJobs_ = 0;
     // Immutable after construction, so they need no lock.
     RetryPolicy retryPolicy_;

@@ -9,6 +9,12 @@ bool MockFileSystem::Exists(const std::string& path) const {
     return files_.count(path) > 0 || directories_.count(path) > 0;
 }
 
+bool MockFileSystem::IsDirectory(const std::string& path) const {
+    // A path registered as both (AddFile implicitly registers its parent) is a directory
+    // only if no file was registered at exactly that path.
+    return files_.count(path) == 0 && directories_.count(path) > 0;
+}
+
 FileInfo MockFileSystem::Inspect(const std::string& path) const {
     const auto it = files_.find(path);
     if (it == files_.end()) {

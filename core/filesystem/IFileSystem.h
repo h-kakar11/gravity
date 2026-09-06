@@ -20,6 +20,12 @@ public:
 
     virtual bool Exists(const std::string& path) const = 0;
 
+    // True only for an existing directory. False for a file, and false (never throws) for
+    // a path that does not exist -- callers enumerating a folder need to tell "this entry
+    // is a subfolder" from "this entry is a file", and an extension is not that answer
+    // (a directory may perfectly well be named "clips.mp4").
+    virtual bool IsDirectory(const std::string& path) const = 0;
+
     // Throws errors::MediaToolException{ErrorCategory::FileNotFound, ...} if `path`
     // doesn't exist. Populates media-specific fields via ffprobe when the media engine
     // is available; leaves them std::nullopt otherwise (never throws for that reason).

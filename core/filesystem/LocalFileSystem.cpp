@@ -76,6 +76,14 @@ bool LocalFileSystem::Exists(const std::string& path) const {
     return stdfs::exists(path, ec);
 }
 
+bool LocalFileSystem::IsDirectory(const std::string& path) const {
+    std::error_code ec;
+    // is_directory() reports false on error (a permission-denied stat, a broken symlink),
+    // which is the answer a caller enumerating a folder wants anyway: an entry we cannot
+    // even stat is not a folder worth descending into.
+    return stdfs::is_directory(path, ec) && !ec;
+}
+
 FileInfo LocalFileSystem::Inspect(const std::string& path) const {
     std::error_code existsEc;
     if (!stdfs::exists(path, existsEc)) {

@@ -232,7 +232,7 @@ Settings Settings::Defaults() {
     settings.processing.hardwareAccelerationEnabled = true;
     settings.processing.defaultCompressionQuality = "medium";
     settings.processing.defaultOutputFormat = "";
-    settings.processing.concurrentJobs = 1;
+    settings.processing.concurrentJobs = 3;
     settings.processing.maxRetryAttempts = 3;
 
     settings.privacy.analyticsEnabled = false;

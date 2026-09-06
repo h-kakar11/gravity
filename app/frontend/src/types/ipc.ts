@@ -22,6 +22,7 @@ export type CoreCommand =
   | "retryJob"
   | "removeJob"
   | "inspectFile"
+  | "listFolderFiles"
   | "inspectDownloadUrl"
   | "inspectPlaylistUrl"
   | "suggestPlaylistFolder"
@@ -78,6 +79,9 @@ export interface CommandParams {
   // anything else with E_INVALID_OPERATION.
   removeJob: { jobId: string };
   inspectFile: { path: string };
+  // Batch convert: the convertible files sitting directly in `path`. Non-recursive, and
+  // one round trip rather than a per-file inspectFile (which runs ffprobe).
+  listFolderFiles: { path: string };
   inspectDownloadUrl: { url: string };
   inspectPlaylistUrl: { url: string };
   suggestPlaylistFolder: { outputDirectory: string };
@@ -105,6 +109,11 @@ export interface CommandResult {
   retryJob: Record<string, never>;
   removeJob: Record<string, never>;
   inspectFile: { fileInfo: FileInfo };
+  // `files` holds only VIDEO/AUDIO/IMAGE entries, sorted by filename, with the cheap
+  // filesystem-only fields filled in (no duration/dimensions -- those need ffprobe).
+  // `skipped` counts files in the folder that are not convertible at all; `truncated` says
+  // the folder held more convertible files than one listing returns.
+  listFolderFiles: { files: FileInfo[]; skipped: number; truncated: boolean };
   inspectDownloadUrl: { metadata: DownloadMetadata };
   inspectPlaylistUrl: { playlist: PlaylistInfo };
   suggestPlaylistFolder: { name: string };

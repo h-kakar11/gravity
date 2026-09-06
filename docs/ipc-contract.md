@@ -96,6 +96,7 @@ verified without hitting a real URL.
 | `resumeJob` | `{jobId: string}` | `{}` |
 | `retryJob` | `{jobId: string}` | `{}` |
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
+| `listFolderFiles` | `{path: string}` | `{files: FileInfo[], skipped: number, truncated: boolean}` — the convertible files (VIDEO/AUDIO/IMAGE) sitting **directly** in that folder, sorted by filename. Non-recursive, capped at 500 (`truncated` says the folder held more); `skipped` counts entries that are not convertible at all. Fails with `E_NOT_A_DIRECTORY` when `path` is a file. Fills in the cheap filesystem fields only — no `durationSeconds`/`width`/`height`, since those need an ffprobe run per file |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` (fails with `E_PLAYLIST_NOT_SUPPORTED` when the URL is a playlist — the frontend treats that as "call `inspectPlaylistUrl` instead", see `docs/decisions.md`) |
 | `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video) |
 | `suggestPlaylistFolder` | `{outputDirectory: string}` | `{name: string}` — the lowest unused `"playlist #n"` in that directory. A suggestion only: nothing is reserved, and the user is expected to replace it with the real playlist name |
@@ -120,6 +121,11 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
   out-of-range or disallowed value is `E_INVALID_PARAM_VALUE`; each names the offending
   field in `error.details`. An explicit JSON `null` is treated as an absent field
   throughout.
+- **`listFolderFiles` deliberately runs ON the request loop**, unlike `inspectFile`. It is
+  a directory listing plus one extension lookup per entry -- memory-speed work with no
+  subprocess in it -- and it is what the Convert screen calls to turn "this folder" into a
+  batch. Routing it to the executor would put it behind whatever inspects are queued there,
+  for no gain.
 - **`inspectDownloadUrl`, `inspectPlaylistUrl` and `inspectFile` run off the request loop**, on a bounded pool
   (`core/ipc/RequestExecutor.h`), so a slow network lookup cannot delay other commands.
   Responses are still correlated by `id`; as stated above, requests may complete out of

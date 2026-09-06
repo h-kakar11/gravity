@@ -1,5 +1,6 @@
 #include "core/jobs/JobManager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <system_error>
 #include <vector>
@@ -12,28 +13,16 @@ namespace mediatool::jobs {
 JobManager::JobManager(std::size_t requestedConcurrentJobs, RetryPolicy retryPolicy,
                         JobWatchdogPolicy watchdogPolicy)
     : retryPolicy_(retryPolicy), watchdogPolicy_(watchdogPolicy) {
-    const std::size_t requested = requestedConcurrentJobs == 0 ? 1 : requestedConcurrentJobs;
+    const std::size_t requested =
+        std::min(requestedConcurrentJobs == 0 ? std::size_t{1} : requestedConcurrentJobs,
+                 kMaxWorkerPoolSize);
     workers_.reserve(requested);
-    for (std::size_t i = 0; i < requested; ++i) {
-        try {
-            workers_.emplace_back([this] { WorkerLoop(); });
-        } catch (const std::system_error& e) {
-            // The OS refused to create a thread (EAGAIN: process/system thread limit, or
-            // address space for another stack). Two things must not happen here. First,
-            // letting this escape would destroy a half-built workers_ vector whose live
-            // threads are still joinable, and destroying a joinable std::thread calls
-            // std::terminate -- the same "one bad settings value aborts the process"
-            // failure mode as #5, just one layer down. Second, refusing to start at all
-            // would let an ambitious concurrentJobs value make the app unusable when a
-            // smaller pool would have run every job perfectly well, only slower.
-            // So: keep the workers that did start, and carry on with a smaller pool.
-            logging::Log::Warning("JobManager",
-                                   "Could only start " + std::to_string(workers_.size()) + " of " +
-                                       std::to_string(requested) +
-                                       " job worker threads; continuing with the smaller pool (" +
-                                       e.what() + ")");
-            break;
-        }
+    const std::size_t started = StartWorkersLocked(requested);
+    if (started < requested) {
+        logging::Log::Warning("JobManager",
+                               "Could only start " + std::to_string(started) + " of " +
+                                   std::to_string(requested) +
+                                   " job worker threads; continuing with the smaller pool");
     }
 
     if (workers_.empty()) {
@@ -69,6 +58,64 @@ JobManager::JobManager(std::size_t requestedConcurrentJobs, RetryPolicy retryPol
 }
 
 JobManager::~JobManager() { Shutdown(); }
+
+std::size_t JobManager::StartWorkersLocked(std::size_t count) {
+    std::size_t started = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        try {
+            workers_.emplace_back([this] { WorkerLoop(); });
+            ++started;
+        } catch (const std::system_error& e) {
+            // The OS refused to create a thread (EAGAIN: process/system thread limit, or
+            // address space for another stack). Two things must not happen here. First,
+            // letting this escape would destroy a half-built workers_ vector whose live
+            // threads are still joinable, and destroying a joinable std::thread calls
+            // std::terminate -- the same "one bad settings value aborts the process"
+            // failure mode as #5, just one layer down. Second, refusing to start at all
+            // would let an ambitious concurrentJobs value make the app unusable when a
+            // smaller pool would have run every job perfectly well, only slower.
+            // So: keep the workers that did start, and carry on with a smaller pool.
+            logging::Log::Warning("JobManager",
+                                   std::string("The OS refused another job worker thread: ") +
+                                       e.what());
+            break;
+        }
+    }
+    return started;
+}
+
+std::size_t JobManager::MaxConcurrentJobs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return maxConcurrentJobs_;
+}
+
+std::size_t JobManager::SetMaxConcurrentJobs(std::size_t target) {
+    const std::size_t wanted = std::min(target == 0 ? std::size_t{1} : target, kMaxWorkerPoolSize);
+
+    std::size_t reached = 0;
+    std::size_t startedNow = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Starting a worker during shutdown would hand the teardown a thread it has
+        // already decided to stop waiting for.
+        if (stopping_) return maxConcurrentJobs_;
+        if (wanted > maxConcurrentJobs_) {
+            startedNow = StartWorkersLocked(wanted - maxConcurrentJobs_);
+            maxConcurrentJobs_ = workers_.size();
+        }
+        reached = maxConcurrentJobs_;
+    }
+
+    if (startedNow > 0) {
+        // A fresh worker starts by waiting on queueCv_, so a queue that is already full of
+        // eligible jobs would otherwise leave it asleep until the next submission. Notify
+        // outside the lock: the workers being woken need it to do anything.
+        queueCv_.notify_all();
+        logging::Log::Info("JobManager", "Job worker pool grown to " + std::to_string(reached) +
+                                              " (started " + std::to_string(startedNow) + ")");
+    }
+    return reached;
+}
 
 void JobManager::Shutdown() {
     std::vector<Job*> toCancel;

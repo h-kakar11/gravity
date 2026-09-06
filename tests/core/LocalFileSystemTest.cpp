@@ -173,6 +173,23 @@ TEST_F(LocalFileSystemTest, ListDirectoryReturnsImmediateFilenamesOnly) {
     EXPECT_NE(std::find(names.begin(), names.end(), "sub"), names.end());
 }
 
+// Batch convert enumerates a folder and has to tell subfolders from files. An extension
+// is not that answer: a directory can be named "clips.mp4", and queuing it as a conversion
+// input would fail the job rather than skip the entry.
+TEST_F(LocalFileSystemTest, IsDirectoryDistinguishesFoldersFromFilesAndMissingPaths) {
+    WriteFile("a.txt", "1");
+    stdfs::create_directories(stdfs::path(root_) / "sub");
+    stdfs::create_directories(stdfs::path(root_) / "clips.mp4");
+
+    EXPECT_TRUE(fs_.IsDirectory(root_));
+    EXPECT_TRUE(fs_.IsDirectory((stdfs::path(root_) / "sub").string()));
+    EXPECT_TRUE(fs_.IsDirectory((stdfs::path(root_) / "clips.mp4").string()))
+        << "a media-looking name does not make an entry a file";
+    EXPECT_FALSE(fs_.IsDirectory((stdfs::path(root_) / "a.txt").string()));
+    EXPECT_FALSE(fs_.IsDirectory((stdfs::path(root_) / "does_not_exist").string()))
+        << "a missing path must answer false, never throw";
+}
+
 TEST_F(LocalFileSystemTest, ListDirectoryReturnsEmptyForNonexistentDirectory) {
     const std::string missing = (stdfs::path(root_) / "does_not_exist").string();
     EXPECT_TRUE(fs_.ListDirectory(missing).empty());

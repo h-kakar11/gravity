@@ -14,7 +14,7 @@ guarantee is weaker than it sounds, that is said explicitly.
 |---|---|---|---|
 | Request loop | 1 | `main()` | Reads NDJSON from stdin, validates, routes, writes responses for non-blocking commands |
 | Request executor | 4 (bounded) | `ipc::RequestExecutor` | Blocking commands only: `inspectDownloadUrl`, `inspectFile` |
-| Job workers | `processing.concurrentJobs` (1–25, settings-bounded) | `jobs::JobManager` | `Job::Execute()`, one job at a time per thread |
+| Job workers | `processing.concurrentJobs` (1–25, settings-bounded; default 3) | `jobs::JobManager` | `Job::Execute()`, one job at a time per thread |
 | Subprocess readers | 2 per running subprocess | `process::RealProcessRunner` | Draining a child's stdout/stderr |
 
 There is no thread pool anywhere else. In particular there is no timer thread: the
@@ -135,6 +135,22 @@ of cancelling every entry after it (issue #41).
 `MaxConcurrentJobs()` reports the pool that actually started, which can be smaller than
 the one requested if the OS refused a thread -- a smaller pool runs everything correctly,
 just less of it at once, and is much better than a process that fails to start.
+
+**The pool can grow after construction, and only grow.** `SetMaxConcurrentJobs(n)` starts
+`n - current` more threads on the same `WorkerLoop` and notifies `queueCv_`, so the new
+workers pick up jobs that are already queued rather than waiting for the next submission.
+`updateSettings` calls it, which is what makes raising `processing.concurrentJobs` take
+effect on the queue the user is currently staring at instead of on the next launch. The
+call takes `mutex_`, appends to `workers_`, and returns; `Shutdown()` takes the same lock
+before it joins, and `SetMaxConcurrentJobs` refuses once `stopping_` is set, so the two can
+never touch `workers_` at once.
+
+Shrinking is not offered. A worker can only leave between jobs, so a lowered limit would
+apply at an unpredictable later moment and the exited threads would still need reaping out
+of `workers_` -- real complexity for the case where waiting until the next launch costs
+nothing but a little extra parallelism. A lowered `concurrentJobs` is still persisted and
+still applies then. `kMaxWorkerPoolSize` (25) caps growth regardless of caller, matching the
+bound `Settings::Validate()` enforces.
 
 **Cycles are impossible, not detected.** A dependency must name a job that has already
 been submitted, so every edge points backwards in submission order and the graph is a DAG

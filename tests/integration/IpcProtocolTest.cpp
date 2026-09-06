@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "tests/integration/CoreProcessFixture.h"
@@ -191,6 +193,68 @@ TEST_F(IpcProtocolTest, AHostileFormatIdIsRejectedBeforeAnyJobIsCreated) {
     ASSERT_TRUE(jobs.has_value());
     EXPECT_TRUE(jobs->at("result").at("jobs").empty());
 }
+
+// --- listFolderFiles (batch convert) -----------------------------------------------------
+
+TEST_F(IpcProtocolTest, ListFolderFilesRejectsTraversalAndNonDirectoryPaths) {
+    const auto traversal =
+        core_->Send("listFolderFiles", {{"path", "C:\\Users\\hamim\\..\\..\\Windows"}});
+    ASSERT_TRUE(traversal.has_value());
+    EXPECT_FALSE(traversal->at("ok").get<bool>());
+    EXPECT_EQ(traversal->at("error").at("code").get<std::string>(), "E_INVALID_PATH");
+
+    // A well-formed path that is not a folder must say so specifically, not answer with
+    // an empty list -- "this folder has nothing to convert" and "you picked a file" are
+    // different things for the UI to show.
+    const auto notADirectory =
+        core_->Send("listFolderFiles", {{"path", "C:\\definitely\\not\\a\\folder\\x.mp4"}});
+    ASSERT_TRUE(notADirectory.has_value());
+    EXPECT_FALSE(notADirectory->at("ok").get<bool>());
+    EXPECT_EQ(notADirectory->at("error").at("code").get<std::string>(), "E_NOT_A_DIRECTORY");
+
+    const auto missingParam = core_->Send("listFolderFiles", nlohmann::json::object());
+    ASSERT_TRUE(missingParam.has_value());
+    EXPECT_FALSE(missingParam->at("ok").get<bool>());
+    EXPECT_EQ(missingParam->at("error").at("code").get<std::string>(), "E_MISSING_PARAM");
+}
+
+#ifdef _WIN32
+// The positive direction needs a real Windows-shaped absolute path to get past
+// IsSafeUserSuppliedPath (see this file's header comment), so it only runs on the platform
+// the app actually ships on.
+TEST_F(IpcProtocolTest, ListFolderFilesReturnsOnlyConvertibleFilesAndCountsWhatItSkipped) {
+    const std::filesystem::path folder = core_->LocalAppData() / "batch-source";
+    std::filesystem::create_directories(folder);
+    std::filesystem::create_directories(folder / "subfolder");
+    // A directory whose name looks like a video: it must be skipped as a directory, not
+    // queued as an input file.
+    std::filesystem::create_directories(folder / "looks-like.mp4");
+    for (const char* name : {"b.mp4", "a.mp3", "c.png", "notes.txt", "archive.zip"}) {
+        std::ofstream out(folder / name, std::ios::binary);
+        out << "x";
+    }
+
+    const auto response = core_->Send("listFolderFiles", {{"path", folder.string()}});
+    ASSERT_TRUE(response.has_value());
+    ASSERT_TRUE(response->at("ok").get<bool>()) << response->dump();
+    const auto& result = response->at("result");
+
+    const auto& files = result.at("files");
+    ASSERT_EQ(files.size(), 3u) << files.dump();
+    // Sorted by name, so the queue lands in the order the folder reads in.
+    EXPECT_EQ(files[0].at("filename").get<std::string>(), "a.mp3");
+    EXPECT_EQ(files[1].at("filename").get<std::string>(), "b.mp4");
+    EXPECT_EQ(files[2].at("filename").get<std::string>(), "c.png");
+    EXPECT_EQ(files[0].at("category").get<std::string>(), "AUDIO");
+    EXPECT_EQ(files[1].at("category").get<std::string>(), "VIDEO");
+    EXPECT_EQ(files[2].at("category").get<std::string>(), "IMAGE");
+
+    // notes.txt and archive.zip -- reported so the UI can say what it left out. The two
+    // subdirectories are not "skipped files"; they were never candidates.
+    EXPECT_EQ(result.at("skipped").get<std::size_t>(), 2u);
+    EXPECT_FALSE(result.at("truncated").get<bool>());
+}
+#endif
 
 TEST_F(IpcProtocolTest, SettingsRoundTripThroughTheRealFileAndValidationRejectsBadValues) {
     const auto updated =

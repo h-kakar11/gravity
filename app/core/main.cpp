@@ -20,6 +20,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -910,6 +911,80 @@ json HandleInspectFile(AppContext& app, const json& params) {
     return {{"fileInfo", InspectFileEnriched(app, path).ToJson()}};
 }
 
+constexpr std::size_t kMaxFolderListingEntries = 500;
+
+// Batch convert (issue: "I can't convert multiple files in bulk"): the frontend needs the
+// list of convertible files in a folder the user picked, and needs it in ONE round trip.
+// The obvious client-side alternative -- enumerate the folder in Rust, then call
+// inspectFile once per entry to learn its category -- is a per-file ffprobe run against a
+// four-thread executor, so a folder of 200 videos would spend minutes producing a file
+// list and hand back E_CORE_BUSY for most of it. This does the cheap half only
+// (IFileSystem::Inspect, which reads the extension and the size, never ffprobe) and does
+// it inline on the request loop.
+//
+// Non-recursive on purpose, matching Watch Folders (RecursiveMode::NonRecursive): "convert
+// this folder" means the files in it, and a recursive walk of a folder the user picked by
+// accident is the kind of surprise that ends with a few thousand queued jobs.
+json HandleListFolderFiles(AppContext& app, const json& params) {
+    const std::string path = RequireNonEmptyString(params, "path");
+    const bool allowNetworkPaths = app.settingsStore.Load().advanced.allowNetworkPaths;
+    if (!filesystem::paths::IsSafeUserSuppliedPath(path, allowNetworkPaths)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_INVALID_PATH", errors::ErrorCategory::Unknown,
+            "The path must be an absolute path with no \"..\" segments" +
+                std::string(allowNetworkPaths ? "." : ", and network (UNC) paths are not enabled."),
+            "path=" + path));
+    }
+    if (!app.fileSystem.IsDirectory(path)) {
+        throw errors::MediaToolException(errors::ErrorInfo::Make(
+            "E_NOT_A_DIRECTORY", errors::ErrorCategory::InvalidFile,
+            "That path is not a folder.", "path=" + path));
+    }
+
+    // Sorted so the queue lands in the order the user sees the folder in, rather than in
+    // whatever order the filesystem happened to hand entries back.
+    std::vector<std::string> names = app.fileSystem.ListDirectory(path);
+    std::sort(names.begin(), names.end());
+
+    json files = json::array();
+    std::size_t skipped = 0;
+    bool truncated = false;
+    for (const std::string& name : names) {
+        const std::string entry = filesystem::paths::Join(path, name);
+        if (app.fileSystem.IsDirectory(entry)) continue;  // not skipped: never a candidate
+
+        filesystem::FileInfo info;
+        try {
+            info = app.fileSystem.Inspect(entry);
+        } catch (const errors::MediaToolException&) {
+            // Raced with a delete, or unreadable. One bad entry must not fail the listing.
+            ++skipped;
+            continue;
+        }
+
+        // Exactly the categories ConvertPage can offer an output format for. A folder of
+        // media almost always has a stray .txt or .nfo in it, and counting those as
+        // "skipped" is what lets the UI say so instead of silently shortening the list.
+        const bool convertible = info.category == filesystem::FileCategory::Video ||
+                                 info.category == filesystem::FileCategory::Audio ||
+                                 info.category == filesystem::FileCategory::Image;
+        if (!convertible) {
+            ++skipped;
+            continue;
+        }
+
+        if (files.size() >= kMaxFolderListingEntries) {
+            truncated = true;
+            break;
+        }
+        files.push_back(info.ToJson());
+    }
+
+    return {{"files", std::move(files)},
+            {"skipped", skipped},
+            {"truncated", truncated}};
+}
+
 json HandleGetCapabilities(AppContext& app, const json& params) {
     const std::string path = RequireNonEmptyString(params, "path");
     filesystem::FileInfo info = app.fileSystem.Inspect(path);
@@ -935,6 +1010,16 @@ json HandleUpdateSettings(AppContext& app, const json& params) {
     merged.merge_patch(RequireObject(params, "settings"));
     settings::Settings updated = settings::Settings::FromJson(merged);
     app.settingsStore.Save(updated);
+
+    // Applied to the live pool, not only persisted for the next launch. Raising
+    // concurrentJobs is what a user does when a batch of conversions is crawling through
+    // one at a time, and "quit and relaunch the app before that takes effect" is not an
+    // instruction anything in the UI gives them. Grow-only, so a LOWERED value is
+    // persisted here and takes effect on the next launch -- see
+    // JobManager::SetMaxConcurrentJobs.
+    app.jobManager.SetMaxConcurrentJobs(
+        static_cast<std::size_t>(std::max(1, updated.processing.concurrentJobs)));
+
     return {{"settings", updated.ToJson()}};
 }
 
@@ -1048,6 +1133,7 @@ const std::unordered_map<std::string, Handler>& CommandTable() {
         {"retryJob", HandleRetryJob},
         {"removeJob", HandleRemoveJob},
         {"inspectFile", HandleInspectFile},
+        {"listFolderFiles", HandleListFolderFiles},
         {"inspectDownloadUrl", HandleInspectDownloadUrl},
         {"inspectPlaylistUrl", HandleInspectPlaylistUrl},
         {"suggestPlaylistFolder", HandleSuggestPlaylistFolder},

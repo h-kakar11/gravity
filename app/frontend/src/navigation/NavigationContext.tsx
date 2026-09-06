@@ -9,7 +9,9 @@ import { createContext, useCallback, useContext, useMemo, useState, type ReactNo
 export type Screen =
   | { kind: "home" }
   | { kind: "download"; prefillUrl?: string }
-  | { kind: "convert"; prefillFilePath?: string; mode?: "convert" | "compress" }
+  // Plural: the Convert screen takes a batch, so every entry point into it (a drop of
+  // several files, a folder, the shell context menu with one file) hands it a list.
+  | { kind: "convert"; prefillFilePaths?: string[]; mode?: "convert" | "compress" }
   | { kind: "queue" }
   | { kind: "settings" }
   | { kind: "scheduledTasks" };

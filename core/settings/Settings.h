@@ -47,7 +47,16 @@ struct ProcessingSettings {
     // smallest/largest option at each end rather than just the three middle presets).
     std::string defaultCompressionQuality = "medium";
     std::string defaultOutputFormat;
-    int concurrentJobs = 1;
+    // How many jobs the worker pool runs at once (1-25). Not 1: a batch of conversions
+    // submitted together -- which is the whole point of picking several files or a folder
+    // on the Convert screen -- would otherwise crawl through strictly one at a time, and
+    // "one at a time" is indistinguishable from "batch convert is broken" to the person
+    // watching it. 3 is deliberately modest rather than core-count-derived: ffmpeg already
+    // threads a single encode across the CPU, so the gain from running more at once comes
+    // from filling the gaps (probe, container muxing, disk I/O) around that, and past a
+    // handful the encodes mostly just contend. Users with a hardware encoder that likes
+    // more sessions can raise it in Settings, which now applies without a restart.
+    int concurrentJobs = 3;
     // TOTAL attempts for a job that fails recoverably, including the first -- so 1
     // disables automatic retry and 3 means "the original plus two retries". Lives beside
     // concurrentJobs rather than under `advanced` because, like concurrentJobs, it is a

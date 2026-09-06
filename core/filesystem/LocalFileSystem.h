@@ -10,6 +10,7 @@ namespace mediatool::filesystem {
 class LocalFileSystem final : public IFileSystem {
 public:
     bool Exists(const std::string& path) const override;
+    bool IsDirectory(const std::string& path) const override;
 
     // Populates path/filename/extension/category/sizeBytes/mimeType from the
     // filesystem itself. Media-specific fields (duration, codecs, fps, ...) are left
