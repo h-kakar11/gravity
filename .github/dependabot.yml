@@ -6,6 +6,28 @@ updates:
     directory: /app/frontend
     schedule:
       interval: weekly
+    # Grouped because these packages are only ever correct together. Ungrouped,
+    # Dependabot filed react and react-dom as two separate PRs (#70 and #76), each
+    # of which passes CI on its own -- nothing in the suite checks that React and
+    # React DOM agree on a major -- while merging either alone ships a broken app.
+    # It also filed @vitejs/plugin-react 6 (#73) without the Vite 8 major that
+    # plugin's peer range requires, making that PR unmergeable as filed. See #96.
+    groups:
+      react:
+        patterns:
+          - react
+          - react-dom
+          - "@types/react"
+          - "@types/react-dom"
+      vite:
+        patterns:
+          - vite
+          - "@vitejs/*"
+      test-tooling:
+        patterns:
+          - vitest
+          - jsdom
+          - "@testing-library/*"
 
   # Tauri desktop shell (Rust).
   - package-ecosystem: cargo
@@ -21,8 +43,15 @@ updates:
     schedule:
       interval: weekly
 
-  # CI workflow action versions.
+  # CI workflow action versions. Grouped into a single PR: these are four
+  # first-party actions that move together and are reviewed as one decision, and
+  # ungrouped they produced four near-identical PRs (#66, #67, #68, #71) for what
+  # is really one change.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
