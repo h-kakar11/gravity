@@ -71,7 +71,7 @@ function ErrorBanner({ error }: { error: ErrorInfo | null | undefined }) {
   if (!error) return null;
   const box = {
     border: "1px solid var(--color-error)",
-    background: "rgba(220, 53, 69, 0.12)",
+    background: "rgba(var(--color-error-rgb), 0.12)",
     color: "var(--color-text-primary)",
     borderRadius: 6,
     padding: "0.5rem 0.75rem",
@@ -115,6 +115,9 @@ export default function HomePage() {
   const [comboChoiceUrl, setComboChoiceUrl] = useState<string | null>(null);
   const [playlistFolder, setPlaylistFolder] = useState("");
   const [playlistJobIds, setPlaylistJobIds] = useState<string[]>([]);
+  // Entries the core refused at creation time, kept apart from `playlistJobIds` (jobs that
+  // exist and can still fail while running) so the two are never conflated in the report.
+  const [queueFailures, setQueueFailures] = useState<{ count: number; error: ErrorInfo | null } | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<ErrorInfo | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -164,20 +167,45 @@ export default function HomePage() {
       try {
         const { playlist: result } = await coreClient.inspectPlaylistUrl(target);
         setPlaylist(result);
-        try {
-          const { name } = await coreClient.suggestPlaylistFolder(outputDirectory.trim());
-          setPlaylistFolder(name);
-        } catch {
-          setPlaylistFolder(result.title);
-        }
+        // The playlist's own title, immediately -- so the field is never empty (an empty
+        // one disables the download button) even if the core cannot be asked. The effect
+        // below refines it into a name that does not collide with an existing folder.
+        setPlaylistFolder(result.title);
       } catch (err) {
         setInspectError(asErrorInfo(err));
       } finally {
         setPlaylistLoading(false);
       }
     },
-    [outputDirectory],
+    [],
   );
+
+  // Refines the suggested folder name once BOTH the playlist and the output directory are
+  // known. Deliberately an effect rather than part of loadPlaylist: the output directory
+  // arrives asynchronously (getSettings), and pasting a link the moment the window opens is
+  // ordinary, not a race a user has to provoke -- the call used to go out with an empty
+  // directory, fail the core's own non-empty check, and silently degrade to the raw title.
+  const suggestedForRef = useRef<PlaylistInfo | null>(null);
+  useEffect(() => {
+    if (playlist === null) return;
+    const directory = outputDirectory.trim();
+    if (directory === "") return;  // re-runs when the directory lands
+    if (suggestedForRef.current === playlist) return;  // one suggestion per enumeration
+    suggestedForRef.current = playlist;
+
+    let cancelled = false;
+    void coreClient
+      .suggestPlaylistFolder(directory, playlist.title)
+      .then(({ name }) => {
+        // Never overwrite something the user typed in the meantime: only the untouched
+        // initial value (the plain title) is ours to replace.
+        if (!cancelled) setPlaylistFolder((current) => (current === playlist.title ? name : current));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [playlist, outputDirectory]);
 
   const handleInspect = useCallback(
     async (urlOverride?: string) => {
@@ -247,25 +275,42 @@ export default function HomePage() {
 
     setCreating(true);
     setCreateError(null);
+    setQueueFailures(null);
     const destination = joinWindowsPath(outputDirectory.trim(), folder);
     const created: string[] = [];
+    // One entry the core refuses (an unsupported URL, a video whose id no longer resolves)
+    // must cost exactly that entry. This loop used to abort on the first rejection, which
+    // left a playlist half-queued behind an error naming a URL the user never typed --
+    // "the queue is full and nothing downloaded" from the other side (issue #98).
+    let firstFailure: ErrorInfo | null = null;
+    let failedCount = 0;
     try {
       for (const entry of playlist.entries) {
-        const { jobId } = await coreClient.createDownloadJob({
-          url: entry.url,
-          outputDirectory: destination,
-          quality,
-          playlistIndex: entry.index,
-          playlistCount: playlist.entries.length,
-          ...(created.length > 0 ? { runAfter: [created[created.length - 1]] } : {}),
-        });
-        created.push(jobId);
+        try {
+          const { jobId } = await coreClient.createDownloadJob({
+            url: entry.url,
+            outputDirectory: destination,
+            quality,
+            playlistIndex: entry.index,
+            playlistCount: playlist.entries.length,
+            // Chained onto the last job that actually exists, not the last one attempted:
+            // a runAfter naming a job the core never created is refused as
+            // E_INVALID_DEPENDENCY, turning one bad entry into every entry after it.
+            ...(created.length > 0 ? { runAfter: [created[created.length - 1]] } : {}),
+          });
+          created.push(jobId);
+        } catch (err) {
+          failedCount += 1;
+          if (firstFailure === null) firstFailure = asErrorInfo(err);
+        }
       }
       setPlaylistJobIds(created);
-    } catch (err) {
-      setPlaylistJobIds(created);
-      setCreateError(asErrorInfo(err));
+      if (failedCount > 0) setQueueFailures({ count: failedCount, error: firstFailure });
+      // An error banner only when NOTHING could be queued -- a partial result is reported
+      // by the progress line, which can also say how many made it.
+      if (created.length === 0) setCreateError(firstFailure);
     } finally {
+      // Whatever happens, the button must come back out of its "Queueing..." state.
       setCreating(false);
     }
   }, [playlist, playlistFolder, outputDirectory, quality]);
@@ -301,6 +346,7 @@ export default function HomePage() {
     setCreateError(null);
     setPlaylist(null);
     setPlaylistJobIds([]);
+    setQueueFailures(null);
     setPlaylistFolder("");
     setComboChoiceUrl(null);
     setInspectError(null);
@@ -396,7 +442,7 @@ export default function HomePage() {
               <ErrorBanner error={inspectError} />
 
               {metadata && (
-                <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", background: "rgba(99, 102, 241, 0.05)" }}>
+                <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", background: "rgba(var(--color-accent-rgb), 0.05)" }}>
                   <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start" }}>
                     {metadata.thumbnailUrl && (
                       <img
@@ -478,7 +524,7 @@ export default function HomePage() {
                               padding: "0.25rem 0.4rem",
                               fontSize: "0.8rem",
                               cursor: "pointer",
-                              background: isSelected ? "rgba(99, 102, 241, 0.25)" : "transparent",
+                              background: isSelected ? "rgba(var(--color-accent-rgb), 0.25)" : "transparent",
                               color: "var(--color-text-primary)",
                               border: "1px solid transparent",
                               borderRadius: 4,
@@ -554,7 +600,7 @@ export default function HomePage() {
                       <button
                         onClick={() => void handleCancel()}
                         disabled={cancelBusy}
-                        style={{ padding: "0.5rem 1rem", fontSize: "0.9rem", background: "#dc3545", color: "white", border: "none", borderRadius: 6, cursor: "pointer", opacity: cancelBusy ? 0.5 : 1 }}
+                        style={{ padding: "0.5rem 1rem", fontSize: "0.9rem", background: "var(--color-error)", color: "white", border: "none", borderRadius: 6, cursor: "pointer", opacity: cancelBusy ? 0.5 : 1 }}
                       >
                         Cancel
                       </button>
@@ -669,6 +715,13 @@ export default function HomePage() {
                       Queued {playlistProgress.total} downloads. {playlistProgress.completed} done
                       {playlistProgress.running > 0 ? `, ${playlistProgress.running} running` : ""}
                       {playlistProgress.failed > 0 ? `, ${playlistProgress.failed} failed` : ""}.
+                      {queueFailures ? (
+                        <div style={{ color: "var(--color-warning)" }}>
+                          {queueFailures.count} video{queueFailures.count === 1 ? "" : "s"} could not
+                          be queued and {queueFailures.count === 1 ? "was" : "were"} skipped
+                          {queueFailures.error?.message ? `: ${queueFailures.error.message}` : "."}
+                        </div>
+                      ) : null}
                       <div style={{ color: "var(--color-text-secondary)" }}>
                         They run one at a time. Watch or cancel individual videos on the Queue
                         screen.
@@ -683,14 +736,14 @@ export default function HomePage() {
               )}
 
               {activeJob && (
-                <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", background: "rgba(99, 102, 241, 0.05)", marginTop: "0.75rem" }} ref={jobSectionRef as any} tabIndex={-1}>
+                <div style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", background: "rgba(var(--color-accent-rgb), 0.05)", marginTop: "0.75rem" }} ref={jobSectionRef as any} tabIndex={-1}>
                   <div style={{ marginBottom: "0.5rem" }} aria-live="polite">
                     <strong>State:</strong> {activeJob.state}
                   </div>
                   <div style={{ marginBottom: "0.5rem", color: "var(--color-text-secondary)" }} aria-live="polite">{activeJob.progress.statusMessage}</div>
                   {activeJob.progress.percentage !== undefined && (
                     <div
-                      style={{ background: "rgba(99, 102, 241, 0.2)", borderRadius: 4, height: 6, overflow: "hidden", marginBottom: "0.5rem" }}
+                      style={{ background: "rgba(var(--color-accent-rgb), 0.2)", borderRadius: 4, height: 6, overflow: "hidden", marginBottom: "0.5rem" }}
                       role="progressbar"
                       aria-valuenow={Math.round(activeJob.progress.percentage)}
                       aria-valuemin={0}
@@ -707,7 +760,7 @@ export default function HomePage() {
                   </div>
 
                   {activeJob.state === "COMPLETED" && (
-                    <div style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(99, 102, 241, 0.2)", paddingTop: "0.5rem" }}>
+                    <div style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(var(--color-accent-rgb), 0.2)", paddingTop: "0.5rem" }}>
                       <p style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem", margin: "0.25rem 0" }}>Download complete.</p>
                       {typeof activeJob.result?.outputPath === "string" && (
                         <p style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem", wordBreak: "break-word", margin: "0.25rem 0" }}>{activeJob.result.outputPath}</p>
@@ -725,7 +778,7 @@ export default function HomePage() {
                   )}
 
                   {activeJob.state === "FAILED" && activeJob.error && (
-                    <div style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(99, 102, 241, 0.2)", paddingTop: "0.5rem" }} ref={failureRef} tabIndex={-1}>
+                    <div style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(var(--color-accent-rgb), 0.2)", paddingTop: "0.5rem" }} ref={failureRef} tabIndex={-1}>
                       <ErrorBanner error={activeJob.error} />
                       <button onClick={handleRetry} style={{ marginTop: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "0.85rem", background: "var(--color-accent)", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
                         Try again
@@ -734,7 +787,7 @@ export default function HomePage() {
                   )}
 
                   {activeJob.state === "CANCELLED" && (
-                    <div style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(99, 102, 241, 0.2)", paddingTop: "0.5rem" }}>
+                    <div style={{ marginTop: "0.75rem", borderTop: "1px solid rgba(var(--color-accent-rgb), 0.2)", paddingTop: "0.5rem" }}>
                       <p style={{ color: "var(--color-text-secondary)", fontSize: "0.85rem", margin: "0.25rem 0" }}>Download cancelled.</p>
                       <button onClick={handleStartOver} style={{ marginTop: "0.5rem", padding: "0.4rem 0.8rem", fontSize: "0.85rem", background: "var(--color-accent)", color: "white", border: "none", borderRadius: 4, cursor: "pointer" }}>
                         Start over

@@ -156,6 +156,50 @@ describe("HomePage playlist flow", () => {
     }
   });
 
+  it("keeps queueing the rest of the playlist when the core refuses one entry", async () => {
+    // Issue #98's "the queue was full and nothing downloaded", from the creation side: the
+    // loop used to abort on the first rejection, so one unusable entry stranded every entry
+    // after it -- with an error naming a URL the user never typed.
+    scriptPlaylist();
+    let created = 0;
+    vi.mocked(coreClient.createDownloadJob).mockImplementation(async (params) => {
+      if (params.playlistIndex === 2) {
+        throw { code: "E_INVALID_DOWNLOAD_URL", message: "This URL is not supported." };
+      }
+      return { jobId: `job-${++created}` } as never;
+    });
+
+    renderHome();
+    await inspect(PLAYLIST_URL);
+    await waitFor(() => expect(screen.getByText("My Playlist")).toBeTruthy());
+    await click(/Download all 3/);
+
+    await waitFor(() => expect(coreClient.createDownloadJob).toHaveBeenCalledTimes(3));
+    const calls = vi.mocked(coreClient.createDownloadJob).mock.calls.map(([p]) => p);
+    // Entry 3 chains onto entry 1's job -- the last one that EXISTS. Naming the job the
+    // core never created would be refused as E_INVALID_DEPENDENCY, turning one bad entry
+    // into every entry after it by a second route.
+    expect(calls[2].runAfter).toEqual(["job-1"]);
+    await waitFor(() =>
+      expect(screen.getByText(/1 video could not be queued/)).toBeTruthy(),
+    );
+  });
+
+  it("names the playlist folder after the playlist itself", async () => {
+    // "playlist #1" made the user retype a name the app already knew (issue #98). The core
+    // does the naming (it is the side that can see what is already on disk); this asserts
+    // the title actually reaches it and the answer is what gets used.
+    scriptPlaylist();
+    vi.mocked(coreClient.suggestPlaylistFolder).mockResolvedValue({ name: "My Playlist" } as never);
+
+    renderHome();
+    await inspect(PLAYLIST_URL);
+
+    await waitFor(() => expect(screen.getByText("My Playlist")).toBeTruthy());
+    expect(coreClient.suggestPlaylistFolder).toHaveBeenCalledWith("D:\\Videos", "My Playlist");
+    expect(screen.getByDisplayValue("My Playlist")).toBeTruthy();
+  });
+
   it("offers the video-or-playlist choice for a link that is both", async () => {
     // `comboChoiceUrl` was set on this page but never rendered, so a watch?v=X&list=Y link
     // silently resolved to just the one video with no way to ask for the list.

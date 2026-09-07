@@ -32,6 +32,7 @@ import sys
 import traceback
 import urllib.error
 import urllib.parse
+from typing import Optional
 
 try:
     import yt_dlp
@@ -277,6 +278,37 @@ def build_metadata_payload(info: dict, url: str) -> dict:
 _MAX_PLAYLIST_ENTRIES = 500
 
 
+def resolve_entry_url(raw: dict) -> Optional[str]:
+    """The absolute http(s) URL for one flat playlist entry, or None if it has none.
+
+    This has to produce an ABSOLUTE url, not merely a truthy string: the core validates
+    every job URL with `YtDlpProvider::CanHandle` before creating it (E_INVALID_DOWNLOAD_URL,
+    see ValidateDownloadUrl in app/core/main.cpp), and the frontend's fan-out submits
+    entries in order -- so one scheme-less entry rejected at createJob used to abort the
+    whole playlist, leaving the user with a partially queued list and an error naming a
+    string they never typed.
+
+    `extract_flat` does not guarantee a full URL. YouTube's tab extractor supplies one, but
+    the flat form of an entry is only required to carry `id` plus an `ie_key` naming the
+    extractor that can resolve it, and several extractors yield exactly that. For a YouTube
+    entry the id alone is enough to rebuild the canonical watch URL; for anything else,
+    guessing a URL scheme from an opaque id would be inventing one, so those are reported
+    as unavailable rather than turned into a job that cannot run.
+    """
+    for key in ("url", "webpage_url", "original_url"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            candidate = value.strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+
+    video_id = raw.get("id")
+    extractor = raw.get("ie_key") or raw.get("extractor_key") or raw.get("extractor") or ""
+    if isinstance(video_id, str) and video_id.strip() and str(extractor).lower() == "youtube":
+        return "https://www.youtube.com/watch?v=" + video_id.strip()
+    return None
+
+
 def build_playlist_payload(info: dict, url: str) -> dict:
     """Flattens a yt-dlp playlist extraction into the entry list the core fans out into jobs.
 
@@ -305,7 +337,7 @@ def build_playlist_payload(info: dict, url: str) -> dict:
         if not isinstance(raw, dict):
             unavailable_count += 1  # unavailable entry -- yt-dlp yields None for these
             continue
-        entry_url = raw.get("url") or raw.get("webpage_url")
+        entry_url = resolve_entry_url(raw)
         if not entry_url:
             unavailable_count += 1
             continue

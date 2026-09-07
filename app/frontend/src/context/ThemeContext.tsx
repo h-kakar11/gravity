@@ -36,6 +36,24 @@ const DEFAULT_COLORS: ThemeColors = {
 
 const STORAGE_KEY = "gravity-theme-colors";
 
+// "#6366f1" -> "99, 102, 241", the channel-list form CSS needs to build a translucent
+// shade of a themed color: `rgba(var(--color-accent-rgb), 0.15)`. Without this, any style
+// that wanted a faded accent had to hardcode the DEFAULT accent's channels -- which is
+// exactly how the home page came to ignore the theme entirely (issue #99): every one of
+// its surfaces, hovers and progress bars was a literal rgba(99, 102, 241, ...).
+//
+// Returns null for anything that is not a 3- or 6-digit hex color (a saved theme could
+// hold an `rgb()` string or something a user typed), in which case the caller leaves the
+// existing channel variable alone rather than writing a value CSS cannot parse.
+export function hexToRgbChannels(hex: string): string | null {
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return null;
+  let digits = match[1];
+  if (digits.length === 3) digits = digits.split("").map((d) => d + d).join("");
+  const value = parseInt(digits, 16);
+  return `${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}`;
+}
+
 interface ThemeContextType {
   colors: ThemeColors;
   updateColors: (newColors: Partial<ThemeColors>) => void;
@@ -51,7 +69,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        setColors(JSON.parse(saved));
+        // Merged over the defaults, never used as-is: a theme saved by an earlier build
+        // has no key for a color added since, and the missing key would reach
+        // setProperty() as `undefined` -- which sets the CSS variable to the literal
+        // string "undefined" and takes that color out of the theme for good.
+        setColors({ ...DEFAULT_COLORS, ...(JSON.parse(saved) as Partial<ThemeColors>) });
       } catch {
         setColors(DEFAULT_COLORS);
       }
@@ -73,6 +95,16 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     root.style.setProperty("--color-success", colors.success);
     root.style.setProperty("--color-error", colors.error);
     root.style.setProperty("--color-warning", colors.warning);
+
+    // Channel forms of the colors that get used at partial opacity somewhere in the app.
+    for (const [variable, value] of [
+      ["--color-accent-rgb", colors.accent],
+      ["--color-surface-rgb", colors.surface],
+      ["--color-error-rgb", colors.error],
+    ] as const) {
+      const channels = hexToRgbChannels(value);
+      if (channels !== null) root.style.setProperty(variable, channels);
+    }
   }, [colors]);
 
   const updateColors = (newColors: Partial<ThemeColors>) => {
