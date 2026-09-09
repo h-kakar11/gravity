@@ -118,6 +118,12 @@ export default function HomePage() {
   // Entries the core refused at creation time, kept apart from `playlistJobIds` (jobs that
   // exist and can still fail while running) so the two are never conflated in the report.
   const [queueFailures, setQueueFailures] = useState<{ count: number; error: ErrorInfo | null } | null>(null);
+  // True while the core is being asked for a non-colliding folder name. The field is
+  // already filled with the playlist's title by then, so this is not about having a value
+  // -- it is about not starting the fan-out against a name that is one round trip away
+  // from being deduplicated, which would silently merge this playlist into an existing
+  // folder of the same name.
+  const [folderPending, setFolderPending] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<ErrorInfo | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -194,6 +200,7 @@ export default function HomePage() {
     suggestedForRef.current = playlist;
 
     let cancelled = false;
+    setFolderPending(true);
     void coreClient
       .suggestPlaylistFolder(directory, playlist.title)
       .then(({ name }) => {
@@ -201,7 +208,10 @@ export default function HomePage() {
         // initial value (the plain title) is ours to replace.
         if (!cancelled) setPlaylistFolder((current) => (current === playlist.title ? name : current));
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setFolderPending(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -699,6 +709,7 @@ export default function HomePage() {
                       disabled={
                         creating ||
                         playlist.entries.length === 0 ||
+                        folderPending ||
                         !outputDirectory.trim() ||
                         !playlistFolder.trim() ||
                         playlistJobIds.length > 0

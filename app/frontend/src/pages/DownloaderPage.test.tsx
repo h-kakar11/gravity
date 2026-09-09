@@ -223,6 +223,11 @@ describe("DownloaderPage playlist handling", () => {
     renderPage();
     firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, PLAYLIST_URL);
 
+    // The folder name is settled first, on purpose: "Download all" stays disabled until
+    // the core has answered with a name that does not collide with an existing folder,
+    // so clicking before then would be a no-op (and, in the app, would fan out against a
+    // name one round trip away from being deduplicated).
+    await screen.findByDisplayValue("playlist #1");
     (await screen.findByRole("button", { name: "Download all 3" })).click();
 
     await waitFor(() => expect(coreClient.createDownloadJob).toHaveBeenCalledTimes(3));
@@ -263,6 +268,7 @@ describe("DownloaderPage playlist handling", () => {
 
     renderPage();
     firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, PLAYLIST_URL);
+    await screen.findByDisplayValue("playlist #1");
     (await screen.findByRole("button", { name: "Download all 3" })).click();
 
     expect(await screen.findByText(/Queued 2 downloads/)).toBeTruthy();
@@ -289,6 +295,7 @@ describe("DownloaderPage playlist handling", () => {
 
     renderPage();
     firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, PLAYLIST_URL);
+    await screen.findByDisplayValue("playlist #1");
     (await screen.findByRole("button", { name: "Download all 3" })).click();
 
     expect(await screen.findByText(/Queued 2 downloads/)).toBeTruthy();

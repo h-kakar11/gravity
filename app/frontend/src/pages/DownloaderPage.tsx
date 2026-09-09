@@ -127,6 +127,12 @@ export default function DownloaderPage() {
   // Entries the core refused at creation time, kept apart from `playlistJobIds` (jobs that
   // exist and can still fail while running) so the two are never conflated in the report.
   const [queueFailures, setQueueFailures] = useState<{ count: number; error: ErrorInfo | null } | null>(null);
+  // True while the core is being asked for a non-colliding folder name. The field is
+  // already filled with the playlist's title by then, so this is not about having a value
+  // -- it is about not starting the fan-out against a name that is one round trip away
+  // from being deduplicated, which would silently merge this playlist into an existing
+  // folder of the same name.
+  const [folderPending, setFolderPending] = useState(false);
 
   // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
   // started blank regardless of the user's configured default (issue #54), and the quality
@@ -205,6 +211,7 @@ export default function DownloaderPage() {
     suggestedForRef.current = playlist;
 
     let cancelled = false;
+    setFolderPending(true);
     void coreClient
       .suggestPlaylistFolder(directory, playlist.title)
       .then(({ name }) => {
@@ -212,7 +219,10 @@ export default function DownloaderPage() {
         // initial value (the plain title) is ours to replace.
         if (!cancelled) setPlaylistFolder((current) => (current === playlist.title ? name : current));
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setFolderPending(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -659,6 +669,7 @@ export default function DownloaderPage() {
               onClick={() => void handleDownloadPlaylist()}
               disabled={
                 creating ||
+                folderPending ||
                 playlist.entries.length === 0 ||
                 !outputDirectory.trim() ||
                 !playlistFolder.trim() ||

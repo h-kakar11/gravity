@@ -121,6 +121,7 @@ describe("HomePage playlist flow", () => {
     renderHome();
     await inspect(PLAYLIST_URL);
     await waitFor(() => expect(screen.getByText("My Playlist")).toBeTruthy());
+    await screen.findByDisplayValue("playlist #1");
     await click(/Download all 3/);
 
     await waitFor(() => expect(coreClient.createDownloadJob).toHaveBeenCalledTimes(3));
@@ -148,6 +149,7 @@ describe("HomePage playlist flow", () => {
     renderHome();
     await inspect(PLAYLIST_URL);
     await waitFor(() => expect(screen.getByText("My Playlist")).toBeTruthy());
+    await screen.findByDisplayValue("playlist #1");
     await click(/Download all 3/);
 
     await waitFor(() => expect(coreClient.createDownloadJob).toHaveBeenCalledTimes(3));
@@ -172,6 +174,7 @@ describe("HomePage playlist flow", () => {
     renderHome();
     await inspect(PLAYLIST_URL);
     await waitFor(() => expect(screen.getByText("My Playlist")).toBeTruthy());
+    await screen.findByDisplayValue("playlist #1");
     await click(/Download all 3/);
 
     await waitFor(() => expect(coreClient.createDownloadJob).toHaveBeenCalledTimes(3));
@@ -183,6 +186,38 @@ describe("HomePage playlist flow", () => {
     await waitFor(() =>
       expect(screen.getByText(/1 video could not be queued/)).toBeTruthy(),
     );
+  });
+
+  it("holds the download back until the folder name is settled", async () => {
+    // The field is pre-filled with the playlist's title immediately, so this is not about
+    // having a value -- it is about not fanning out against a name that is still one round
+    // trip away from being deduplicated, which would merge this playlist into an existing
+    // folder of the same name. Caught by React 19's effect timing, where the click landed
+    // before the suggestion did; under React 18 the ordering hid it.
+    scriptPlaylist();
+    let resolveSuggestion: (value: { name: string }) => void = () => {};
+    vi.mocked(coreClient.suggestPlaylistFolder).mockReturnValue(
+      new Promise<{ name: string }>((resolve) => {
+        resolveSuggestion = resolve;
+      }) as never,
+    );
+
+    renderHome();
+    await inspect(PLAYLIST_URL);
+
+    const button = (await screen.findByRole("button", {
+      name: /Download all 3/,
+    })) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    // The title is already there to be edited, though -- the field is never empty.
+    expect(screen.getByDisplayValue("My Playlist")).toBeTruthy();
+
+    await act(async () => {
+      resolveSuggestion({ name: "My Playlist (2)" });
+    });
+
+    expect(button.disabled).toBe(false);
+    expect(screen.getByDisplayValue("My Playlist (2)")).toBeTruthy();
   });
 
   it("names the playlist folder after the playlist itself", async () => {
