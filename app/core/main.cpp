@@ -10,6 +10,7 @@
 // against shared interfaces) are wired together for the first time -- see docs/architecture.md.
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -31,6 +32,7 @@
 #include "core/events/Event.h"
 #include "core/events/EventBus.h"
 #include "core/filesystem/FileInfo.h"
+#include "core/filesystem/FilenameSanitizer.h"
 #include "core/filesystem/LocalFileSystem.h"
 #include "core/filesystem/PathUtils.h"
 #include "core/filesystem/ToolPathResolver.h"
@@ -549,14 +551,44 @@ json HandleInspectPlaylistUrl(AppContext& app, const json& params) {
 // keeps a pathological directory from turning name suggestion into an unbounded stat loop.
 constexpr int kMaxPlaylistFolderProbes = 500;
 
-// Suggests the default name for a playlist's destination subfolder: "playlist #n" for the
-// lowest n not already present in `outputDirectory`. Only a suggestion -- the user is
-// expected to overwrite it with the real playlist name, and nothing reserves it, so two
+// Suggests the default name for a playlist's destination subfolder.
+//
+// With a `title` (the playlist's own, sent by the frontend as of issue #98): the sanitized
+// title if that name is free, else "<title> (2)", "<title> (3)"... The user pasted a link
+// to a named playlist, so naming its folder after it is the answer they would have typed;
+// "playlist #1" made them retype something the app already knew.
+//
+// Without one, or when nothing legal survives sanitizing: the original "playlist #n" for
+// the lowest n not already present in `outputDirectory`. `title` stays optional so an
+// older frontend against a newer core keeps working.
+//
+// Only a suggestion -- the user can overwrite it, and nothing reserves it, so two
 // suggestions taken concurrently can collide. That is acceptable because the actual
 // collision guard is downstream: each entry's DownloadJob still runs its filename through
 // FilenameReservationRegistry.
 json HandleSuggestPlaylistFolder(AppContext& app, const json& params) {
     const std::string outputDirectory = RequireNonEmptyString(params, "outputDirectory");
+
+    const std::string rawTitle = OptionalString(params, "title").value_or(std::string());
+    if (!rawTitle.empty()) {
+        // The sanitizer REPLACES illegal characters rather than dropping them, so a title
+        // of "???" comes back as "___" and a title of nothing legal at all comes back as
+        // its "untitled" placeholder. Neither is a name worth suggesting over
+        // "playlist #1", so require at least one alphanumeric character to have survived.
+        const std::string base = filesystem::SanitizeWindowsFilename(rawTitle);
+        const bool hasSubstance =
+            std::any_of(base.begin(), base.end(),
+                         [](unsigned char c) { return std::isalnum(c) != 0; });
+        if (hasSubstance && base != "untitled") {
+            for (int n = 1; n <= kMaxPlaylistFolderProbes; ++n) {
+                const std::string candidate =
+                    n == 1 ? base : base + " (" + std::to_string(n) + ")";
+                if (!app.fileSystem.Exists(filesystem::paths::Join(outputDirectory, candidate))) {
+                    return {{"name", candidate}};
+                }
+            }
+        }
+    }
 
     for (int n = 1; n <= kMaxPlaylistFolderProbes; ++n) {
         const std::string candidate = "playlist #" + std::to_string(n);

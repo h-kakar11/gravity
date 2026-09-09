@@ -158,6 +158,35 @@ For granular debugging, the individual commands it wraps:
 Manual (non-automated, real network) downloader integration test:
 `docs/protocols/downloader.md`'s "Manual integration test" section.
 
+### Running the C++ suite on Linux
+
+Gravity ships only to Windows, and `ci-local.ps1` needs PowerShell, MinGW and vcpkg. But
+the C++ suite itself builds and runs on Linux through the `sanitizers-linux` preset, which
+takes its dependencies from the system instead of vcpkg — worth knowing, because "I have no
+Windows host" otherwise means no C++ coverage at all, and that is how backend regressions
+have reached master unverified before.
+
+```bash
+# nlohmann-json, spdlog and gtest are packaged; reproc++ is not, so build it once.
+apt-get install -y nlohmann-json3-dev libspdlog-dev libgtest-dev libfmt-dev ninja-build
+git clone --depth 1 --branch v14.2.5 https://github.com/DaanDeMeyer/reproc.git /tmp/reproc
+cmake -S /tmp/reproc -B /tmp/reproc/build -DCMAKE_BUILD_TYPE=Release -DREPROC++=ON \
+  -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build /tmp/reproc/build && cmake --install /tmp/reproc/build
+
+cmake --preset sanitizers-linux
+cmake --build build/sanitizers-linux -j"$(nproc)"
+cd build/sanitizers-linux && ctest --output-on-failure
+```
+
+15 cases fail there and are expected to: `PathUtilsTest` asserts the Windows path
+separator, `RealProcessRunnerTest` launches `cmd.exe`, and three `DownloadJob` cases build
+`C:\...` paths that then miss in `MockFileSystem` because `paths::Join` used a forward
+slash. Anything else red is a real finding. This is not a substitute for a Windows run
+before merging — libstdc++'s `std::filesystem` behaves differently there, which is exactly
+how the empty-`parent_path()` crash in `FFmpegEngine` stayed invisible on Linux while
+failing every Windows CI run (see `docs/decisions.md`).
+
 ## Why some choices were made
 
 - **GLOB-based CMake source lists** (`file(GLOB_RECURSE ... CONFIGURE_DEPENDS ...)`):

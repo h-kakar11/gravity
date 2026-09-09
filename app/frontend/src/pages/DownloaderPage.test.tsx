@@ -223,6 +223,11 @@ describe("DownloaderPage playlist handling", () => {
     renderPage();
     firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, PLAYLIST_URL);
 
+    // The folder name is settled first, on purpose: "Download all" stays disabled until
+    // the core has answered with a name that does not collide with an existing folder,
+    // so clicking before then would be a no-op (and, in the app, would fan out against a
+    // name one round trip away from being deduplicated).
+    await screen.findByDisplayValue("playlist #1");
     (await screen.findByRole("button", { name: "Download all 3" })).click();
 
     await waitFor(() => expect(coreClient.createDownloadJob).toHaveBeenCalledTimes(3));
@@ -263,8 +268,42 @@ describe("DownloaderPage playlist handling", () => {
 
     renderPage();
     firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, PLAYLIST_URL);
+    await screen.findByDisplayValue("playlist #1");
     (await screen.findByRole("button", { name: "Download all 3" })).click();
 
     expect(await screen.findByText(/Queued 2 downloads/)).toBeTruthy();
+  });
+
+  it("keeps going past a refused entry instead of stranding the rest", async () => {
+    // A failure in the MIDDLE, not at the end: the loop used to abort there, so one entry
+    // the core would not accept cost the user every entry after it -- issue #98's "the
+    // queue was full and nothing downloaded", seen from the job-creation side.
+    vi.mocked(coreClient.inspectDownloadUrl).mockRejectedValue({
+      code: "E_PLAYLIST_NOT_SUPPORTED", category: "UNSUPPORTED_FORMAT", message: "playlist",
+    });
+    vi.mocked(coreClient.inspectPlaylistUrl).mockResolvedValue(playlistOf(3) as never);
+    let attempts = 0;
+    vi.mocked(coreClient.createDownloadJob).mockImplementation((() => {
+      attempts += 1;
+      if (attempts === 2) {
+        return Promise.reject({
+          code: "E_INVALID_DOWNLOAD_URL", category: "UNSUPPORTED_FORMAT", message: "bad url",
+        });
+      }
+      return Promise.resolve({ jobId: `job-${attempts}` });
+    }) as never);
+
+    renderPage();
+    firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, PLAYLIST_URL);
+    await screen.findByDisplayValue("playlist #1");
+    (await screen.findByRole("button", { name: "Download all 3" })).click();
+
+    expect(await screen.findByText(/Queued 2 downloads/)).toBeTruthy();
+    expect(screen.getByText(/1 video could not be queued/)).toBeTruthy();
+    expect(vi.mocked(coreClient.createDownloadJob).mock.calls.length).toBe(3);
+    // The survivor after the gap chains onto the last job that exists, not the one that
+    // was never created (which the core refuses as E_INVALID_DEPENDENCY).
+    const last = vi.mocked(coreClient.createDownloadJob).mock.calls[2][0];
+    expect(last.runAfter).toEqual(["job-1"]);
   });
 });

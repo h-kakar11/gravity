@@ -137,8 +137,11 @@ export const removeJob = (jobId: string) => sendCommand("removeJob", { jobId });
 export const inspectFile = (path: string) => sendCommand("inspectFile", { path });
 export const inspectDownloadUrl = (url: string) => sendCommand("inspectDownloadUrl", { url });
 export const inspectPlaylistUrl = (url: string) => sendCommand("inspectPlaylistUrl", { url });
-export const suggestPlaylistFolder = (outputDirectory: string) =>
-  sendCommand("suggestPlaylistFolder", { outputDirectory });
+// `title` is the playlist's own name (issue #98): the core suggests a folder named after
+// it, deduplicated against what is already on disk, instead of a generic "playlist #n".
+// Optional on the wire, so an older core still answers.
+export const suggestPlaylistFolder = (outputDirectory: string, title?: string) =>
+  sendCommand("suggestPlaylistFolder", title === undefined ? { outputDirectory } : { outputDirectory, title });
 export const createDownloadJob = (params: DownloadJobParams) =>
   sendCommand("createJob", { type: "DOWNLOAD", params: params as unknown as Record<string, unknown> });
 export const createConversionJob = (params: MediaProcessingJobParams) =>

@@ -91,20 +91,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install MinGW-w64 GCC
-        # Direct Chocolatey install rather than a wrapper action: egor-tensin/setup-mingw@v2
-        # unconditionally tries to delete libpthread.dll.a/libwinpthread.dll.a as a "static
-        # workaround" after installing, and throws (aborting the whole step) if the current
-        # `mingw` Chocolatey package version doesn't ship those files under that name --
-        # confirmed happening with mingw 16.1.0. This does the same install without that
-        # unnecessary, version-fragile cleanup.
-        run: |
-          choco install mingw --no-progress -y
-          $mingwBin = "C:\ProgramData\mingw64\mingw64\bin"
-          if (-not (Test-Path $mingwBin)) {
-            throw "Expected MinGW bin directory not found at $mingwBin -- the mingw Chocolatey package's layout may have changed."
-          }
-          echo $mingwBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      # NO MinGW install here, deliberately -- see issue #90.
+      #
+      # This job used to `choco install mingw` and prepend C:\ProgramData\mingw64\mingw64\bin
+      # to PATH, copied from the cpp job. Nothing in app/desktop/src-tauri compiles C or C++
+      # from this repository (the C++ core is a separate CMake build that this crate only
+      # SPAWNS as a subprocess), so the only effect it had was on rustc's own linking: for
+      # the x86_64-pc-windows-gnu host, rustc drives the link through whichever `gcc.exe` is
+      # first on PATH, and that install put Chocolatey's GCC 16.x ahead of the version-matched
+      # linker/dlltool that ship inside the rustup GNU toolchain itself.
+      #
+      # The result was `cargo test` failing on EVERY run this job has ever had, at process
+      # start rather than in any test: STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) -- the test
+      # binary links cleanly, then dies because it imports a symbol no DLL it loads exports.
+      # Earlier rounds ruled out the obvious runtime-DLL mismatch (the binary imports no
+      # MinGW runtime DLLs at all, so +crt-static changed nothing), which leaves the mismatched
+      # toolchain producing the import descriptor as the remaining explanation.
+      #
+      # If a dependency ever does need a C compiler for this target, this fails loudly and
+      # immediately with "linker `gcc` not found" -- a clear signal, unlike the silent
+      # miscompile it replaces. Restore the step (appending rather than prepending) if so.
 
       - name: Install GNU Rust toolchain
         run: |
