@@ -107,6 +107,7 @@ describe("DownloaderPage paste handling", () => {
 
 const PLAYLIST_URL = "https://www.youtube.com/playlist?list=PL123";
 const COMBO_URL = "https://www.youtube.com/watch?v=abc123&list=PL123";
+const MIX_URL = "https://www.youtube.com/watch?v=abc123&list=RDabc123&start_radio=1";
 
 function playlistOf(count: number) {
   return {
@@ -177,6 +178,23 @@ describe("DownloaderPage playlist handling", () => {
 
     expect(await screen.findByText("This link is part of a playlist.")).toBeTruthy();
     // Nothing is enumerated until the user actually chooses the playlist.
+    expect(coreClient.inspectPlaylistUrl).not.toHaveBeenCalled();
+  });
+
+  it("does not offer the whole playlist for a YouTube Mix link", async () => {
+    // A mix is an endless auto-generated radio: enumerating one ran to the 500-entry cap,
+    // so a list the user knew held forty songs came back as hundreds of videos. The button
+    // that started that is gone for mixes, and the banner says why.
+    vi.mocked(coreClient.inspectDownloadUrl).mockResolvedValue({
+      metadata: { title: "Example", formats: [] },
+    } as never);
+
+    renderPage();
+    firePaste(screen.getByPlaceholderText("https://...") as HTMLInputElement, MIX_URL);
+
+    expect(await screen.findByText(/endless auto-generated radio/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "The whole playlist" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Just this video" })).toBeTruthy();
     expect(coreClient.inspectPlaylistUrl).not.toHaveBeenCalled();
   });
 

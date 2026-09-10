@@ -140,6 +140,44 @@ feature rather than a bug fix, which that audit pass had no sign-off to design u
 The `WithPlaylistIndex`/playlist-count fields were kept parked precisely so the numbering
 scheme would not need re-deriving when support did ship, which is what happened.
 
+### YouTube Mixes are refused, not enumerated (the "40 songs became hundreds" report)
+
+- **Context:** pasting a playlist link and being told it held hundreds of videos when the
+  list holds thirty or fifty. Reproduced against yt-dlp 2026.8.19: the link in that report
+  is not a playlist link. YouTube's `list=` id encodes the kind of list, and `RD…` is a
+  *mix* (its UI calls it a radio) — a stream synthesized around a seed video, continuation
+  page after continuation page. Enumerating one does not converge on the songs in a
+  playlist; it converges on `_MAX_PLAYLIST_ENTRIES`. Measured: `list=RDdQw4w9WgXcQ` yielded
+  349–500 entries across runs, `list=RDAMVM…` yielded 500 of which only 379 were distinct.
+  A real playlist enumerated exactly (19 entries; a curated YouTube Music list, 51).
+- **Options considered:** (a) raise the cap / trim the tail and hope; (b) de-duplicate the
+  entries; (c) recognize a mix and refuse it.
+- **Choice:** (c), plus rewriting the one mix shape that *does* name a real playlist.
+  `RDAMPL<playlist id>` is the radio seeded from a playlist — what pressing play on your own
+  playlist in YouTube Music produces — so the id of the list the user meant is right there
+  in the mix id, and `normalize_playlist_url()` rewrites the URL to that playlist. Every
+  other `RD…` (bar the finite curated `RDCLAK…` lists) is refused with `E_PLAYLIST_IS_MIX`,
+  before the probe, since it is a pure URL test and enumerating a mix is the slowest useless
+  thing this command can do.
+- **Reason:** (a) does not exist as an answer — a mix has no last entry to reach. (b) treats
+  the symptom: de-duplicating still leaves hundreds of videos the user never asked for, and
+  it would silently drop entries from a real playlist that deliberately lists a song twice.
+  Refusing says the true thing: the link names an endless radio, so "download all of it" has
+  no meaning, and the user wants either this video or their actual playlist page.
+- **Consequences:** `analyzePlaylistUrl()` gained a matching `isMix` flag so the combo banner
+  stops offering "the whole playlist" for a mix and explains why instead — still only a UI
+  hint, with the backend the authority, exactly as the rest of that file already worked. The
+  prefix table lives in `downloader.py` and is mirrored (with a pointer, not a re-derivation)
+  in `playlistUrl.ts`; both are scoped to YouTube hosts, since "RD means radio" is a fact
+  about YouTube's URLs and not about playlist ids generally.
+- **Found alongside it:** `inspectPlaylist` ran with `extract_flat: True`, which flattens the
+  *root* result as well as the entries. For a `watch?v=X&list=Y` URL — the one shape the
+  "the whole playlist" button exists to serve — YouTube's extractor returns an unresolved
+  `{"_type": "url"}` pointing at the list, and `True` handed that back untouched: no entries,
+  no `playlist` type, so the user's own playlist link was rejected as "a single video". It is
+  `"in_playlist"` now, which keeps entries shallow (the actual point) without flattening the
+  root. Verified: 0 entries before, all 19 after; a bare playlist URL is unchanged at 19.
+
 ### Video/audio merge strategy: yt-dlp's own ffmpeg invocation, pointed at our resolved path
 - **Context:** "Best" quality and every resolution preset select separate video+audio
   streams that need merging into one container (spec section 16).

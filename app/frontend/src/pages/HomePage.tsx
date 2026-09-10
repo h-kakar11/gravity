@@ -33,6 +33,15 @@ const FIELD_STYLE: React.CSSProperties = { ...CONTROL_STYLE, flex: "1 1 260px" }
 const ACTIVE_STATES = new Set(["QUEUED", "STARTING", "RUNNING", "PAUSED"]);
 const PLAYLIST_NOT_SUPPORTED = "E_PLAYLIST_NOT_SUPPORTED";
 
+// Shown instead of the playlist fork when the pasted link's `list=` is one of YouTube's
+// auto-generated mixes. There is no fixed set of videos behind a mix, so "the whole
+// playlist" is not a choice that can be honoured -- the backend rejects it outright with
+// E_PLAYLIST_IS_MIX, and offering the button anyway is what used to send the user to a
+// 500-video enumeration of a list they thought held forty songs.
+const MIX_EXPLANATION =
+  "This link carries a YouTube Mix -- an endless auto-generated radio, not a fixed " +
+  "playlist. Only the video itself can be downloaded.";
+
 function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "?";
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -143,6 +152,8 @@ export default function HomePage() {
   const activeJob = useMemo(() => jobs.find((j) => j.id === activeJobId) ?? null, [jobs, activeJobId]);
   const canCancel = activeJob !== null && ACTIVE_STATES.has(activeJob.state as any);
   const canStartDownload = metadata !== null && outputDirectory.trim().length > 0 && !creating && !canCancel;
+  // Derived, never state: the banner's shape is a pure function of the URL that produced it.
+  const comboIsMix = comboChoiceUrl !== null && analyzePlaylistUrl(comboChoiceUrl).isMix;
 
   const loadPlaylist = useCallback(
     async (target: string) => {
@@ -420,9 +431,9 @@ export default function HomePage() {
                 <div
                   style={{ border: "1px solid var(--color-surface-border)", borderRadius: 8, padding: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem", fontSize: "0.9rem" }}
                   role="group"
-                  aria-label="This link is part of a playlist"
+                  aria-label={comboIsMix ? "This link is a YouTube Mix" : "This link is part of a playlist"}
                 >
-                  <div>This link is part of a playlist.</div>
+                  <div>{comboIsMix ? MIX_EXPLANATION : "This link is part of a playlist."}</div>
                   <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
                     <button
                       type="button"
@@ -433,16 +444,18 @@ export default function HomePage() {
                     >
                       Just this video
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const target = comboChoiceUrl;
-                        setComboChoiceUrl(null);
-                        void loadPlaylist(target);
-                      }}
-                    >
-                      The whole playlist
-                    </button>
+                    {comboIsMix ? null : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = comboChoiceUrl;
+                          setComboChoiceUrl(null);
+                          void loadPlaylist(target);
+                        }}
+                      >
+                        The whole playlist
+                      </button>
+                    )}
                   </div>
                 </div>
               )}

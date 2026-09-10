@@ -98,7 +98,7 @@ verified without hitting a real URL.
 | `inspectFile` | `{path: string}` | `{fileInfo: FileInfo}` |
 | `listFolderFiles` | `{path: string}` | `{files: FileInfo[], skipped: number, truncated: boolean}` — the convertible files (VIDEO/AUDIO/IMAGE) sitting **directly** in that folder, sorted by filename. Non-recursive, capped at 500 (`truncated` says the folder held more); `skipped` counts entries that are not convertible at all. Fails with `E_NOT_A_DIRECTORY` when `path` is a file. Fills in the cheap filesystem fields only — no `durationSeconds`/`width`/`height`, since those need an ffprobe run per file |
 | `inspectDownloadUrl` | `{url: string}` | `{metadata: DownloadMetadata}` (fails with `E_PLAYLIST_NOT_SUPPORTED` when the URL is a playlist — the frontend treats that as "call `inspectPlaylistUrl` instead", see `docs/decisions.md`) |
-| `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video) |
+| `inspectPlaylistUrl` | `{url: string}` | `{playlist: PlaylistInfo}` (enumerates entries only; creates no jobs. Fails with `E_NOT_A_PLAYLIST` when the URL is a single video, and with `E_PLAYLIST_IS_MIX` when it is a YouTube Mix — an endless auto-generated radio with no fixed entry list) |
 | `suggestPlaylistFolder` | `{outputDirectory: string}` | `{name: string}` — the lowest unused `"playlist #n"` in that directory. A suggestion only: nothing is reserved, and the user is expected to replace it with the real playlist name |
 | `getCapabilities` | `{path: string}` | `{capabilities: string[], deferredCapabilities: {capability: string, reason: string}[]}` |
 | `getDownloaderInfo` | `{}` | `{downloaderInfo: DownloaderInfo}` |

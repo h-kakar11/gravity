@@ -174,6 +174,21 @@ describe("HomePage playlist flow", () => {
     await click("The whole playlist");
     await waitFor(() => expect(screen.getByText("My Playlist")).toBeTruthy());
   });
+
+  it("does not offer the whole playlist for a YouTube Mix link", async () => {
+    // A mix is an endless auto-generated radio, so "all of it" enumerated to the 500-entry
+    // cap -- the reason a forty-song list was reported as hundreds of videos.
+    vi.mocked(coreClient.inspectDownloadUrl).mockResolvedValue({
+      metadata: { title: "Playing In A Mix", formats: [] },
+    } as never);
+
+    renderHome();
+    await inspect("https://music.youtube.com/watch?v=abc123&list=RDAMVMabc123");
+
+    await waitFor(() => expect(screen.getByText(/endless auto-generated radio/)).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "The whole playlist" })).toBeNull();
+    expect(coreClient.inspectPlaylistUrl).not.toHaveBeenCalled();
+  });
 });
 
 describe("HomePage single-video download", () => {
