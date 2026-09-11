@@ -375,6 +375,52 @@ class BuildPlaylistPayloadTest(unittest.TestCase):
         ]), "https://example.com/playlist?list=x")
         self.assertEqual(payload["entries"][0]["url"], "https://example.com/watch?v=z")
 
+    def test_youtube_entry_with_only_an_id_is_rebuilt_into_a_watch_url(self):
+        # `extract_flat` is not required to hand back a full URL -- an entry may carry only
+        # `id` plus the `ie_key` naming the extractor. The core rejects a scheme-less job
+        # URL outright (E_INVALID_DOWNLOAD_URL), and the frontend fans entries out in order,
+        # so one such entry used to abort the rest of the playlist.
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"id": "dQw4w9WgXcQ", "ie_key": "Youtube", "title": "Id only"},
+        ]), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["unavailableCount"], 0)
+        self.assertEqual(payload["entries"][0]["url"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_scheme_less_entry_url_is_not_passed_through_as_a_job_url(self):
+        # A bare id in `url` (rather than in `id`) is the same problem wearing a different
+        # hat: truthy, so the old `raw.get("url") or ...` accepted it, and rejected at
+        # createJob. With no extractor that says how to resolve it, it counts as unavailable.
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"url": "dQw4w9WgXcQ", "title": "Bare id in url"},
+            {"url": "https://example.com/watch?v=b", "title": "Fine"},
+        ]), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["unavailableCount"], 1)
+        self.assertEqual(payload["entries"][0]["url"], "https://example.com/watch?v=b")
+
+    def test_scheme_less_url_falls_back_to_the_youtube_id_when_the_extractor_says_so(self):
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"url": "dQw4w9WgXcQ", "id": "dQw4w9WgXcQ", "ie_key": "Youtube", "title": "Both"},
+        ]), "https://example.com/playlist?list=x")
+
+        self.assertEqual(payload["entries"][0]["url"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_every_entry_url_handed_to_the_core_is_absolute(self):
+        # The invariant the two tests above are specific cases of, asserted directly: the
+        # core validates each fan-out URL as http/https before it will create the job.
+        payload = downloader.build_playlist_payload(self._playlist([
+            {"url": "https://example.com/watch?v=a", "title": "Absolute"},
+            {"id": "b", "ie_key": "Youtube", "title": "Id only"},
+            {"url": "relative/path", "title": "Unusable"},
+            None,
+        ]), "https://example.com/playlist?list=x")
+
+        for entry in payload["entries"]:
+            self.assertRegex(entry["url"], r"^https?://")
+
     def test_caps_fan_out_and_reports_truncation(self):
         oversized = [
             {"url": f"https://example.com/watch?v={n}", "title": f"Video {n}"}

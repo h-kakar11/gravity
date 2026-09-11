@@ -302,6 +302,49 @@ TEST_F(IpcProtocolTest, DependenciesOrderExecutionAndAnUnknownOneIsRefusedAtSubm
     EXPECT_EQ(bad->at("error").at("code").get<std::string>(), "E_INVALID_DEPENDENCY");
 }
 
+TEST_F(IpcProtocolTest, PlaylistFolderIsSuggestedFromThePlaylistsOwnTitle) {
+    // Issue #98: the suggestion used to be "playlist #1" whatever the playlist was called,
+    // so every pasted playlist made the user retype a name the app already had. Unlike the
+    // download paths, this handler has no IsSafeUserSuppliedPath gate, so it can be driven
+    // with a real directory on a POSIX build host (see this file's header comment).
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        ("gravity-playlist-folder-" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    std::filesystem::create_directories(directory);
+
+    const auto first = core_->Send(
+        "suggestPlaylistFolder",
+        {{"outputDirectory", directory.string()}, {"title", "Deep Focus Mix"}});
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first->at("ok").get<bool>()) << first->dump();
+    EXPECT_EQ(first->at("result").at("name").get<std::string>(), "Deep Focus Mix");
+
+    // Taken: the next suggestion must not point at the same folder, or two playlists
+    // downloaded in a row would interleave into one directory.
+    std::filesystem::create_directories(directory / "Deep Focus Mix");
+    const auto second = core_->Send(
+        "suggestPlaylistFolder",
+        {{"outputDirectory", directory.string()}, {"title", "Deep Focus Mix"}});
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second->at("result").at("name").get<std::string>(), "Deep Focus Mix (2)");
+
+    // A title with nothing legal left after sanitizing falls back to the old scheme rather
+    // than suggesting the sanitizer's "untitled" placeholder.
+    const auto unusable = core_->Send(
+        "suggestPlaylistFolder", {{"outputDirectory", directory.string()}, {"title", "???"}});
+    ASSERT_TRUE(unusable.has_value());
+    EXPECT_EQ(unusable->at("result").at("name").get<std::string>(), "playlist #1");
+
+    // And no title at all is still the pre-#98 behavior, so an older frontend keeps working.
+    const auto untitled =
+        core_->Send("suggestPlaylistFolder", {{"outputDirectory", directory.string()}});
+    ASSERT_TRUE(untitled.has_value());
+    EXPECT_EQ(untitled->at("result").at("name").get<std::string>(), "playlist #1");
+
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+}
+
 TEST_F(IpcProtocolTest, ClosingStdinShutsTheCoreDownCleanly) {
     // Not a formality: the teardown path is where the worker pool is joined and the
     // persistence stores are written, and it is the path that used to touch a destroyed

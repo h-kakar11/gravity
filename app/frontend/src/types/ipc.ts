@@ -84,7 +84,7 @@ export interface CommandParams {
   listFolderFiles: { path: string };
   inspectDownloadUrl: { url: string };
   inspectPlaylistUrl: { url: string };
-  suggestPlaylistFolder: { outputDirectory: string };
+  suggestPlaylistFolder: { outputDirectory: string; title?: string };
   getCapabilities: { path: string };
   getDownloaderInfo: Record<string, never>;
   getSettings: Record<string, never>;

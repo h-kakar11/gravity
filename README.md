@@ -116,8 +116,17 @@ real YouTube videos with real network access — see `docs/phase-2.md` for the e
 
 ## Tests
 
-146 GoogleTest cases (C++) + a Python `unittest` suite (24 cases across two files), all
-passing. See `docs/development.md` for exact commands, and `docs/protocols/downloader.md`
+455 GoogleTest cases (C++: 428 unit, 21 IPC integration, 6 stress) + a Python `unittest`
+suite (67 cases across two files) + a frontend Vitest suite (64 cases across eight files).
+
+The C++ suite is green on Windows, which is the platform it describes. On a Linux host
+(see `docs/development.md`, "Running the C++ suite on Linux") 15 of those cases fail for
+reasons that are entirely about the host: `PathUtils` asserts the Windows separator, the
+`RealProcessRunner` cases launch `cmd.exe`, and three `DownloadJob` cases build `C:\...`
+paths whose lookups then miss in `MockFileSystem`. Everything else passes there, which is
+enough to develop against.
+
+See `docs/development.md` for exact commands, and `docs/protocols/downloader.md`
 for the manual (non-automated) real-network integration test procedure.
 
 ## Documentation

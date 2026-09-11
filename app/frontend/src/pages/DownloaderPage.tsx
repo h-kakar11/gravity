@@ -124,6 +124,15 @@ export default function DownloaderPage() {
   // editable field -- the expectation is that the user types the real playlist name.
   const [playlistFolder, setPlaylistFolder] = useState("");
   const [playlistJobIds, setPlaylistJobIds] = useState<string[]>([]);
+  // Entries the core refused at creation time, kept apart from `playlistJobIds` (jobs that
+  // exist and can still fail while running) so the two are never conflated in the report.
+  const [queueFailures, setQueueFailures] = useState<{ count: number; error: ErrorInfo | null } | null>(null);
+  // True while the core is being asked for a non-colliding folder name. The field is
+  // already filled with the playlist's title by then, so this is not about having a value
+  // -- it is about not starting the fan-out against a name that is one round trip away
+  // from being deduplicated, which would silently merge this playlist into an existing
+  // folder of the same name.
+  const [folderPending, setFolderPending] = useState(false);
 
   // Seed from Settings once, same as ConvertPage.tsx -- this page never did, so it always
   // started blank regardless of the user's configured default (issue #54), and the quality
@@ -175,20 +184,49 @@ export default function DownloaderPage() {
         // A suggestion, not a reservation -- see HandleSuggestPlaylistFolder in main.cpp.
         // Failing to get one is not worth blocking the download over; the user can type a
         // name themselves, and the field simply starts on the playlist's own title.
-        try {
-          const { name } = await coreClient.suggestPlaylistFolder(outputDirectory.trim());
-          setPlaylistFolder(name);
-        } catch {
-          setPlaylistFolder(result.title);
-        }
+        // The playlist's own title, immediately -- so the field is never empty (an empty
+        // one disables the download button) even if the core cannot be asked. The effect
+        // below refines it into a name that does not collide with an existing folder.
+        setPlaylistFolder(result.title);
       } catch (err) {
         setInspectError(asErrorInfo(err));
       } finally {
         setPlaylistLoading(false);
       }
     },
-    [outputDirectory],
+    [],
   );
+
+  // Refines the suggested folder name once BOTH the playlist and the output directory are
+  // known. Deliberately an effect rather than part of loadPlaylist: the output directory
+  // arrives asynchronously (getSettings), and pasting a link the moment the window opens is
+  // ordinary, not a race a user has to provoke -- the call used to go out with an empty
+  // directory, fail the core's own non-empty check, and silently degrade to the raw title.
+  const suggestedForRef = useRef<PlaylistInfo | null>(null);
+  useEffect(() => {
+    if (playlist === null) return;
+    const directory = outputDirectory.trim();
+    if (directory === "") return;  // re-runs when the directory lands
+    if (suggestedForRef.current === playlist) return;  // one suggestion per enumeration
+    suggestedForRef.current = playlist;
+
+    let cancelled = false;
+    setFolderPending(true);
+    void coreClient
+      .suggestPlaylistFolder(directory, playlist.title)
+      .then(({ name }) => {
+        // Never overwrite something the user typed in the meantime: only the untouched
+        // initial value (the plain title) is ours to replace.
+        if (!cancelled) setPlaylistFolder((current) => (current === playlist.title ? name : current));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setFolderPending(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [playlist, outputDirectory]);
 
   // `urlOverride` lets a paste handler kick off inspection with the just-pasted text
   // immediately, without waiting for a `setUrl` re-render to land in the `url` state this
@@ -289,28 +327,42 @@ export default function DownloaderPage() {
 
     setCreating(true);
     setCreateError(null);
+    setQueueFailures(null);
     const destination = joinWindowsPath(outputDirectory.trim(), folder);
     const created: string[] = [];
+    // One entry the core refuses (an unsupported URL, a video whose id no longer resolves)
+    // must cost exactly that entry. This loop used to abort on the first rejection, which
+    // left a playlist half-queued behind an error naming a URL the user never typed --
+    // "the queue is full and nothing downloaded" from the other side (issue #98).
+    let firstFailure: ErrorInfo | null = null;
+    let failedCount = 0;
     try {
       for (const entry of playlist.entries) {
-        const { jobId } = await coreClient.createDownloadJob({
-          url: entry.url,
-          outputDirectory: destination,
-          quality,
-          playlistIndex: entry.index,
-          playlistCount: playlist.entries.length,
-          ...(created.length > 0 ? { runAfter: [created[created.length - 1]] } : {}),
-        });
-        created.push(jobId);
+        try {
+          const { jobId } = await coreClient.createDownloadJob({
+            url: entry.url,
+            outputDirectory: destination,
+            quality,
+            playlistIndex: entry.index,
+            playlistCount: playlist.entries.length,
+            // Chained onto the last job that actually exists, not the last one attempted:
+            // a runAfter naming a job the core never created is refused as
+            // E_INVALID_DEPENDENCY, turning one bad entry into every entry after it.
+            ...(created.length > 0 ? { runAfter: [created[created.length - 1]] } : {}),
+          });
+          created.push(jobId);
+        } catch (err) {
+          failedCount += 1;
+          if (firstFailure === null) firstFailure = asErrorInfo(err);
+        }
       }
       setPlaylistJobIds(created);
-    } catch (err) {
-      // Partial failure is real: entries before the failure are already queued and running.
-      // Record what was created so the UI reports the true count rather than implying
-      // nothing happened.
-      setPlaylistJobIds(created);
-      setCreateError(asErrorInfo(err));
+      if (failedCount > 0) setQueueFailures({ count: failedCount, error: firstFailure });
+      // An error banner only when NOTHING could be queued -- a partial result is reported
+      // by the progress line, which can also say how many made it.
+      if (created.length === 0) setCreateError(firstFailure);
     } finally {
+      // Whatever happens, the button must come back out of its "Queueing..." state.
       setCreating(false);
     }
   }, [playlist, playlistFolder, outputDirectory, quality]);
@@ -346,6 +398,7 @@ export default function DownloaderPage() {
     setCreateError(null);
     setPlaylist(null);
     setPlaylistJobIds([]);
+    setQueueFailures(null);
     setPlaylistFolder("");
     setComboChoiceUrl(null);
   }, []);
@@ -616,6 +669,7 @@ export default function DownloaderPage() {
               onClick={() => void handleDownloadPlaylist()}
               disabled={
                 creating ||
+                folderPending ||
                 playlist.entries.length === 0 ||
                 !outputDirectory.trim() ||
                 !playlistFolder.trim() ||
@@ -634,6 +688,13 @@ export default function DownloaderPage() {
               Queued {playlistProgress.total} downloads. {playlistProgress.completed} done
               {playlistProgress.running > 0 ? `, ${playlistProgress.running} running` : ""}
               {playlistProgress.failed > 0 ? `, ${playlistProgress.failed} failed` : ""}.
+              {queueFailures ? (
+                <div style={styles.muted}>
+                  {queueFailures.count} video{queueFailures.count === 1 ? "" : "s"} could not be
+                  queued and {queueFailures.count === 1 ? "was" : "were"} skipped
+                  {queueFailures.error?.message ? `: ${queueFailures.error.message}` : "."}
+                </div>
+              ) : null}
               <div style={styles.muted}>
                 They run one at a time. Watch or cancel individual videos on the Queue screen.
               </div>
