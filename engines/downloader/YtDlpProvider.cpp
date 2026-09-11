@@ -341,12 +341,15 @@ downloads::PlaylistInfo YtDlpProvider::InspectPlaylist(const std::string& url,
         }
     };
 
-    // Shares Inspect()'s deadline: enumerating a playlist is one flat extraction, no
-    // per-video round-trips (see _PLAYLIST_PROBE_OPTS in downloader.py), so it is the same
-    // order of work as inspecting a single video and stalls the same way.
+    // Has its own deadline rather than sharing Inspect()'s. Enumeration is still one flat
+    // extraction with no per-video round-trips (see _PLAYLIST_PROBE_OPTS in downloader.py),
+    // but its cost scales with the length of the list, which a single-video probe's does
+    // not -- at the 5000-entry cap it runs ~120s, so Inspect()'s 60s would reject long
+    // playlists as timeouts instead of enumerating them.
     const RunOutcome outcome = RunPythonCommand(
         command, onEvent, isCancelled, "E_INSPECT_PLAYLIST_CANCELLED",
-        "Playlist inspection was cancelled.", timeouts_.inspect, "E_INSPECT_PLAYLIST_TIMEOUT",
+        "Playlist inspection was cancelled.", timeouts_.inspectPlaylist,
+        "E_INSPECT_PLAYLIST_TIMEOUT",
         "Timed out reading this playlist. The site may be unreachable or very slow right now.");
 
     if (outcome.error) {

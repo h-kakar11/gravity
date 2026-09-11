@@ -141,7 +141,7 @@ Unknown commands return `ok: false` with `error.category = "UNKNOWN"`.
 
 | `type` | `params` |
 |---|---|
-| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[], runAfter?: string[], playlistIndex?: number, playlistCount?: number}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31, and is validated before the job is accepted: see "Format id validation" below. `playlistIndex`/`playlistCount` must be sent together or not at all — together they prefix the output filename with the zero-padded position, e.g. `03 - Title`; each must be within `[1, 500]` and `playlistIndex <= playlistCount`) |
+| `"DOWNLOAD"` | `{url: string, outputDirectory: string, quality?: QualityPreset, formatId?: string, priority?: number, dependsOn?: string[], runAfter?: string[], playlistIndex?: number, playlistCount?: number}` (`quality` defaults to `"BEST"`; `formatId` — an exact stream id, or `"id1+id2"` combo, from `inspectDownloadUrl`'s format list — overrides `quality` entirely when set, issue #31, and is validated before the job is accepted: see "Format id validation" below. `playlistIndex`/`playlistCount` must be sent together or not at all — together they prefix the output filename with the zero-padded position, e.g. `03 - Title`; each must be within `[1, 5000]` and `playlistIndex <= playlistCount`) |
 | `"CONVERSION"` / `"COMPRESSION"` | `{inputPath: string, outputDirectory: string, options: MediaProcessingOptions, priority?: number, dependsOn?: string[], runAfter?: string[]}` — see below. `inputPath`/`outputDirectory` are validated the same way as DOWNLOAD's `outputDirectory` (absolute, no `..` segments, UNC rejected unless `advanced.allowNetworkPaths` is set). |
 | `"TEST"` | `{priority?: number, dependsOn?: string[], runAfter?: string[]}` |
 | anything else | rejected with `error.code = "E_JOB_TYPE_NOT_IMPLEMENTED"` — declared in the `JobType` vocabulary for future phases, not runnable yet |
@@ -497,7 +497,7 @@ DOWNLOAD job fetches full metadata when it runs. Entries yt-dlp reports as unava
   uploader?: string;
   webpageUrl?: string;
   count: number;             // == entries.length
-  truncated: boolean;        // playlist was longer than the 500-entry enumeration cap
+  truncated: boolean;        // playlist was longer than the 5000-entry enumeration cap
   unavailableCount: number;  // raw entries dropped as unavailable (deleted/private) --
                               // distinct from truncated, and why count can be short of the
                               // playlist's real length even when truncated is false

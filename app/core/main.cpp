@@ -397,7 +397,7 @@ constexpr std::size_t kMaxJobDependencies = 32;
 // Mirrors _MAX_PLAYLIST_ENTRIES in python/downloader/downloader.py -- the enumeration cap
 // there is what actually bounds a fan-out; this bounds the numbering params a caller may
 // send, so a hand-rolled createJob call cannot ask for a 2-billion-wide zero-padding.
-constexpr std::int64_t kMaxPlaylistEntries = 500;
+constexpr std::int64_t kMaxPlaylistEntries = 5000;
 
 // The two scheduling parameters every job type accepts, applied identically for all of
 // them (jobs::SchedulerCore is what interprets them). Both are optional: absent means

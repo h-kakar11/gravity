@@ -269,12 +269,19 @@ def build_metadata_payload(info: dict, url: str) -> dict:
 
 
 # A playlist becomes one queued DownloadJob per entry, so this bound is a real resource
-# limit, not cosmetics: an unbounded fan-out (YouTube allows playlists in the thousands, and
-# a channel "uploads" pseudo-playlist can be far larger) would flood the scheduler and the
-# recovery store with jobs the user never meant to create. Entries past the cap are dropped
-# and reported via `truncated`, so the UI can say so plainly instead of silently downloading
-# a prefix.
-_MAX_PLAYLIST_ENTRIES = 500
+# limit, not cosmetics: an unbounded fan-out (a channel "uploads" pseudo-playlist runs to
+# tens of thousands) would flood the scheduler and the recovery store with jobs the user
+# never meant to create. Entries past the cap are dropped and reported via `truncated`, so
+# the UI can say so plainly instead of silently downloading a prefix.
+#
+# The value is YouTube's own maximum playlist size, so every playlist a user can actually
+# build enumerates completely and `truncated` fires only for the pseudo-playlists that have
+# no user-authored length in the first place. It was 500, which silently truncated ordinary
+# long playlists -- a real list of 800 songs reported 500 with no way to get the rest.
+# Enumeration cost scales with it: measured at ~42 entries/sec against yt-dlp 2026.8.19
+# (500 entries in 12.0s), so a full 5000 takes ~120s, which is why InspectPlaylist has its
+# own wall-clock deadline instead of sharing the single-video probe's 60s one.
+_MAX_PLAYLIST_ENTRIES = 5000
 
 
 def build_playlist_payload(info: dict, url: str) -> dict:

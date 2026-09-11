@@ -74,9 +74,13 @@ tell the caller anything useful about either one:
 Both checks are scoped to YouTube hosts: "an id beginning with `RD`" describes YouTube's URL
 scheme, not playlist ids in general.
 
-Entries are capped at `_MAX_PLAYLIST_ENTRIES` (500) — the C++ core turns each entry into its
-own queued job, so an uncapped fan-out is a real resource problem, not a cosmetic one. When
-the cap truncates a playlist, `truncated` is `true`. Separately, `unavailableCount` counts
+Entries are capped at `_MAX_PLAYLIST_ENTRIES` (5000) — the C++ core turns each entry into its
+own queued job, so an uncapped fan-out is a real resource problem, not a cosmetic one. The
+value is YouTube's own maximum playlist size, so a playlist a user actually built enumerates
+in full and the cap only bites on pseudo-playlists (a channel's uploads) that have no
+authored length. When the cap truncates a playlist, `truncated` is `true`. Enumerating that
+many entries takes ~120s at the measured ~42 entries/sec, which is why `InspectPlaylist`
+carries its own wall-clock deadline rather than the single-video probe's 60s one. Separately, `unavailableCount` counts
 raw entries yt-dlp reported unavailable (deleted/private/no resolvable URL) and dropped
 before `entries` was built — this is why `count` can be less than the playlist's real length
 even when `truncated` is `false`, and the caller should say so rather than let a dropped

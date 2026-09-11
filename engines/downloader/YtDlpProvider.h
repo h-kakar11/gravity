@@ -39,6 +39,14 @@ struct DownloaderTimeouts {
     // to survive yt-dlp's own internal retries without cutting off a slow-but-working
     // extractor -- it exists to bound a hang, not to enforce a latency target.
     std::chrono::milliseconds inspect{std::chrono::seconds(60)};
+    // Enumeration is the one probe whose cost scales with what the user pasted, which is
+    // why it does not share `inspect`. A flat playlist extraction pages through YouTube's
+    // continuations ~100 entries at a time: measured at ~42 entries/sec against yt-dlp
+    // 2026.8.19 (500 entries in 12.0s), so a playlist at the 5000-entry cap needs ~120s
+    // and would blow a 60s deadline long before it finished. Sized at 2.5x that measured
+    // worst case so a slow connection or yt-dlp's own retries still land inside it --
+    // it bounds a hang, and the hang it has to let through is a legitimately large list.
+    std::chrono::milliseconds inspectPlaylist{std::chrono::seconds(300)};
     // The version probe touches no network at all, so anything beyond interpreter startup
     // means something is wrong and waiting longer will not help.
     std::chrono::milliseconds version{std::chrono::seconds(15)};
